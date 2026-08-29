@@ -90,6 +90,7 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
 .tag-exclude [data-lucide] { width: 13px; height: 13px; }
 .tag-section summary { display: flex; align-items: center; gap: 8px; list-style: none; cursor: pointer; color: var(--muted); font-size: .82em; }
 .tag-section summary::-webkit-details-marker { display: none; }
+.text-link { padding:0; border:0; background:none; color:var(--accent); font:inherit; cursor:pointer; }
 .tag-section summary::after { content: ""; width: 7px; height: 7px; margin-left: auto; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg) translateY(-2px); transition: transform .15s; }
 .tag-section:not([open]) summary::after { transform: rotate(-45deg); }
 .tag-section .badge { margin-left: 2px; }

@@ -69,6 +69,9 @@ class SqliteLibraryRepository:
 def _build_filter(query: LibraryQuery, connection) -> tuple[str, tuple[object, ...]]:
     clauses: list[str] = ["item.deleted_at IS NULL"]
     parameters: list[object] = []
+    if query.media_id is not None:
+        clauses.append("item.id = ?")
+        parameters.append(query.media_id)
     include_tags = query.tags or ((query.tag,) if query.tag else ())
     exclude_tags = query.excluded_tags or ((query.exclude_tag,) if query.exclude_tag else ())
     aliases = {}

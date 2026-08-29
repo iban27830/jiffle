@@ -33,6 +33,7 @@ class LibraryQuery:
     domain: str | None = None
     media_type: MediaType | None = None
     text: str | None = None
+    media_id: int | None = None
     tags: tuple[str, ...] = ()
     excluded_tags: tuple[str, ...] = ()
 

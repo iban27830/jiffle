@@ -1,4 +1,5 @@
 import json
+from hashlib import sha256
 import sqlite3
 from threading import Thread
 from flask import Blueprint, current_app, jsonify, request, send_file
@@ -12,14 +13,14 @@ crop_blueprint=Blueprint("crop_editor",__name__)
 def create_analysis():
     payload=request.get_json(silent=True) or {}; media_id=payload.get("media_id")
     try:
-        row=analyze_image(get_database(),current_app.config["JIFFLE_SETTINGS"],int(media_id),"local",float(payload.get("min_area",10)),float(payload.get("padding",.02)))
+        row=analyze_image(get_database(),current_app.config["JIFFLE_SETTINGS"],int(media_id),"local",float(payload.get("min_area",10)),float(payload.get("padding",.02)),int(payload.get("tolerance",18)))
     except (TypeError,ValueError,CropFailure) as e: return _crop_error(e)
     return jsonify(_serialize(row) if row else {"status":"no_candidate"}),201
 
 @crop_blueprint.post("/api/v1/crop-scan-jobs")
 def create_scan_job():
     payload=request.get_json(silent=True) or {}
-    parameters={"min_area":float(payload.get("min_area",10)),"padding":float(payload.get("padding",.02)),"tolerance":int(payload.get("tolerance",18))}
+    parameters={"min_area":float(payload.get("min_area",10)),"padding":float(payload.get("padding",.02)),"tolerance":int(payload.get("tolerance",18)),"algorithm_version":1}
     connection=get_database(); cursor=connection.execute("INSERT INTO background_jobs (job_type,status,result_json) VALUES ('crop_scan','pending',?)",(json.dumps(parameters),)); job_id=int(cursor.lastrowid); connection.execute("INSERT INTO crop_scan_jobs (job_id,parameters_json) VALUES (?,?)",(job_id,json.dumps(parameters))); connection.commit()
     settings=current_app.config["JIFFLE_SETTINGS"]; args=(settings.database_path,settings,job_id,parameters)
     if settings.run_jobs_inline: _run_scan(*args)
@@ -55,6 +56,16 @@ def list_analyses():
     where="" if status=="all" else "WHERE a.status=?"; params=() if status=="all" else (status,)
     rows=get_database().execute(f"SELECT a.*,m.width media_width,m.height media_height FROM crop_analyses a JOIN media_items m ON m.id=a.media_item_id {where} ORDER BY a.confidence DESC,a.removed_area DESC",params).fetchall()
     return jsonify({"items":[_serialize(r) for r in rows]})
+
+@crop_blueprint.get("/api/v1/crop-analyses/<int:analysis_id>")
+def get_analysis(analysis_id):
+    row=get_database().execute(
+        "SELECT a.*,m.width media_width,m.height media_height FROM crop_analyses a "
+        "JOIN media_items m ON m.id=a.media_item_id WHERE a.id=?",
+        (analysis_id,),
+    ).fetchone()
+    if row is None:return _error("crop.analysis_not_found","Crop analysis was not found.",404)
+    return jsonify(_serialize(row))
 
 @crop_blueprint.post("/api/v1/crop-analyses/<int:analysis_id>/apply")
 def apply(analysis_id):
@@ -103,18 +114,25 @@ def _crop_error(error):
 def _run_scan(database_path,settings,job_id,parameters):
     connection=sqlite3.connect(database_path); connection.row_factory=sqlite3.Row; connection.execute("PRAGMA foreign_keys=ON")
     try:
-        rows=connection.execute("SELECT id FROM media_items WHERE deleted_at IS NULL AND media_type='image' ORDER BY id").fetchall(); state=connection.execute("SELECT scanned_count,candidate_count FROM crop_scan_jobs WHERE job_id=?",(job_id,)).fetchone(); start=int(state[0] or 0); candidates=int(state[1] or 0); connection.execute("UPDATE background_jobs SET status='running',started_at=COALESCE(started_at,CURRENT_TIMESTAMP) WHERE id=?",(job_id,)); connection.commit()
+        rows=connection.execute("SELECT id,active_revision_id FROM media_items WHERE deleted_at IS NULL AND media_type='image' ORDER BY id").fetchall(); state=connection.execute("SELECT scanned_count,candidate_count FROM crop_scan_jobs WHERE job_id=?",(job_id,)).fetchone(); start=int(state[0] or 0); candidates=int(state[1] or 0); signature=_scan_signature(parameters); connection.execute("UPDATE background_jobs SET status='running',started_at=COALESCE(started_at,CURRENT_TIMESTAMP) WHERE id=?",(job_id,)); connection.commit()
         for index,row in enumerate(rows[start:],start=start):
             if connection.execute("SELECT cancel_requested FROM crop_scan_jobs WHERE job_id=?",(job_id,)).fetchone()[0]:
                 result=json.dumps({"scanned":index,"candidates":candidates,"cancelled":True}); connection.execute("UPDATE background_jobs SET status='completed',progress=100,result_json=?,finished_at=CURRENT_TIMESTAMP WHERE id=?",(result,job_id)); connection.commit(); return
+            cached=connection.execute("SELECT candidate_found FROM crop_scan_results WHERE revision_id=? AND parameter_signature=?",(row["active_revision_id"],signature)).fetchone()
             try:
-                found=analyze_image(connection,settings,int(row["id"]),min_area=parameters["min_area"],padding=parameters["padding"],tolerance=parameters["tolerance"]); candidates+=int(found is not None)
+                if cached is None:
+                    found=analyze_image(connection,settings,int(row["id"]),min_area=parameters["min_area"],padding=parameters["padding"],tolerance=parameters["tolerance"]); candidates+=int(found is not None)
+                    connection.execute("INSERT OR REPLACE INTO crop_scan_results (revision_id,parameter_signature,candidate_found) VALUES (?,?,?)",(row["active_revision_id"],signature,int(found is not None)))
             except CropFailure:pass
             progress=1+int(98*(index+1)/max(len(rows),1)); connection.execute("UPDATE background_jobs SET progress=? WHERE id=?",(progress,job_id)); connection.execute("UPDATE crop_scan_jobs SET scanned_count=?,candidate_count=? WHERE job_id=?",(index+1,candidates,job_id)); connection.commit()
         result=json.dumps({"scanned":len(rows),"candidates":candidates,"cancelled":False}); connection.execute("UPDATE background_jobs SET status='completed',progress=100,result_json=?,finished_at=CURRENT_TIMESTAMP WHERE id=?",(result,job_id)); connection.commit()
     except Exception:
         connection.rollback(); connection.execute("UPDATE background_jobs SET status='failed',error_code='crop.scan_failed',error_message='Crop scan failed.',finished_at=CURRENT_TIMESTAMP WHERE id=?",(job_id,)); connection.commit(); raise
     finally:connection.close()
+
+def _scan_signature(parameters):
+    canonical={"algorithm_version":int(parameters.get("algorithm_version",1)),"min_area":float(parameters["min_area"]),"padding":float(parameters["padding"]),"tolerance":int(parameters["tolerance"])}
+    return sha256(json.dumps(canonical,sort_keys=True,separators=(",", ":")).encode("utf-8")).hexdigest()
 
 def resume_crop_scans(database_path,settings):
     connection=sqlite3.connect(database_path); connection.row_factory=sqlite3.Row

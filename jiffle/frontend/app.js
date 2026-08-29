@@ -17,6 +17,20 @@ let librarySearch = '';
 let reloadLibrary = null;
 let monitoredCropJob = null;
 
+const UI_STATE_KEY = 'jiffle-session-state-v1';
+let uiState = (() => { try { return JSON.parse(sessionStorage.getItem(UI_STATE_KEY) || '{}'); } catch { return {}; } })();
+function viewState(view) { return uiState[view] || {}; }
+function saveViewState(view, changes) {
+  uiState = {...uiState, [view]: {...viewState(view), ...changes}};
+  try { sessionStorage.setItem(UI_STATE_KEY, JSON.stringify(uiState)); } catch {}
+}
+function saveScrollState() {
+  if (currentView) saveViewState(currentView, {scrollTop:workspace.scrollTop});
+}
+function restoreScrollState(view) {
+  requestAnimationFrame(() => { workspace.scrollTop = Number(viewState(view).scrollTop || 0); });
+}
+
 const FONT_SIZE_KEY = 'jiffle-font-size';
 const allowedFontSizes = [14, 16, 18, 20];
 const LIBRARY_PREFS_KEY = 'jiffle-library-preferences';
@@ -158,22 +172,28 @@ async function monitorCropScan(job) {
 async function restoreCropScanMonitor(){try{const active=await api('/api/v1/crop-scan-jobs/active');if(active.job)monitorCropScan(active.job)}catch{}}
 
 async function showLibrary() {
+  const state = viewState('library');
+  librarySearch = state.search ?? librarySearch;
+  libraryOffset = Number(state.offset ?? libraryOffset);
   const prefs = applyLibraryPrefs();
   setHeader('Library', '', button('Import', 'upload', 'primary'));
   actions.querySelector('button').onclick = () => navigate('import');
   workspace.innerHTML = `<div class="library-layout"><div class="library-main">
-    <div class="toolbar"><input id="search" class="control search" placeholder="Tag, author, domain, or source"><select id="mediaType" class="control toolbar-select"><option value="">All types</option><option value="image">Images</option><option value="video">Videos</option></select><label class="toolbar-count" title="Items per page"><span>Per page</span><select id="pageSize" class="control">${[20,40,60,100].map(size => `<option value="${size}" ${size === prefs.pageSize ? 'selected' : ''}>${size}</option>`).join('')}</select></label><button id="searchBtn" class="icon-btn" title="Search"><i data-lucide="search"></i></button><div id="activeFilters" class="active-filters"></div></div>
+    <div class="toolbar"><input id="search" class="control search" placeholder="Tag, author, domain, source, or id:123"><select id="mediaType" class="control toolbar-select"><option value="">All types</option><option value="image">Images</option><option value="video">Videos</option></select><label class="toolbar-count" title="Items per page"><span>Per page</span><select id="pageSize" class="control">${[20,40,60,100].map(size => `<option value="${size}" ${size === prefs.pageSize ? 'selected' : ''}>${size}</option>`).join('')}</select></label><button id="searchBtn" class="icon-btn" title="Search"><i data-lucide="search"></i></button><div id="activeFilters" class="active-filters"></div></div>
     <div id="gallery" class="gallery"></div><div id="pager" class="pager"></div></div><div id="inspectorResize" class="inspector-resize" title="Resize panel"></div><aside id="inspector" class="inspector"><div class="empty">Select a file</div></aside></div>`;
   document.querySelector('#search').value = librarySearch;
+  document.querySelector('#mediaType').value = state.mediaType || '';
   const load = async () => {
     const pageSize = libraryPrefs().pageSize;
     librarySearch = document.querySelector('#search').value.trim();
     const parsedSearch = parseLibrarySearch(librarySearch);
     const query = '';
     const authorFilter = parsedSearch.authors.length ? `&author=${encodeURIComponent(parsedSearch.authors.at(-1))}` : '';
+    const idFilter = parsedSearch.mediaIds.length ? `&id=${parsedSearch.mediaIds.at(-1)}` : '';
     const type = document.querySelector('#mediaType').value;
     const filters = `${parsedSearch.includedTags.map(tag => `&tag=${encodeURIComponent(tag)}`).join('')}${parsedSearch.excludedTags.map(tag => `&exclude_tag=${encodeURIComponent(tag)}`).join('')}`;
-    const data = await api(`/api/v1/media?limit=${pageSize}&offset=${libraryOffset}&q=${query}&type=${type}${authorFilter}${filters}`);
+    saveViewState('library', {search:librarySearch, offset:libraryOffset, mediaType:type});
+    const data = await api(`/api/v1/media?limit=${pageSize}&offset=${libraryOffset}&q=${query}&type=${type}${authorFilter}${idFilter}${filters}`);
     meta.textContent = `${data.page.total} files`;
     statusText.textContent = `Showing ${data.items.length}`;
     document.querySelector('#activeFilters').innerHTML = activeFiltersHtml();
@@ -213,6 +233,9 @@ async function showLibrary() {
   document.querySelector('#pageSize').onchange = event => { saveLibraryPrefs({pageSize:Number(event.target.value)}); libraryOffset = 0; load(); };
   bindInspectorResize();
   icons(); await load();
+  const selectedId = Number(state.selectedMediaId || 0);
+  if (selectedId) { try { await inspectMedia(selectedId); } catch { saveViewState('library',{selectedMediaId:null}); } }
+  restoreScrollState('library');
 }
 
 function bindInspectorResize() {
@@ -241,11 +264,12 @@ function bindInspectorResize() {
 
 async function inspectMedia(id) {
   selectedMedia = await api(`/api/v1/media/${id}`);
+  saveViewState('library', {selectedMediaId:id});
   document.querySelectorAll('.media-card').forEach(card => card.classList.toggle('selected', Number(card.dataset.id) === id));
   const pane = document.querySelector('#inspector');
   const preview = selectedMedia.type === 'video' ? `<video class="inspector-preview" src="${selectedMedia.content_url}" controls></video>` : `<img class="inspector-preview" src="${selectedMedia.content_url}" alt="">`;
   pane.classList.add('has-media');
-  pane.innerHTML = `<button id="closeInspector" class="icon-btn inspector-close" title="Close"><i data-lucide="x"></i></button>${preview}<h2>${esc(selectedMedia.author || 'Unknown author')}</h2><div class="field"><label>Source</label><a href="${esc(selectedMedia.source_url || '#')}" target="_blank" rel="noopener" class="ellipsis">${esc(selectedMedia.source_url || 'Not specified')}</a></div><div class="field"><label>Size</label>${selectedMedia.width || '?'} × ${selectedMedia.height || '?'} · ${formatBytes(selectedMedia.file_size)}</div><details class="tag-section field" open><summary><span>Tags</span><span class="badge">${selectedMedia.tags.length}</span></summary><div class="tag-scroll"><div class="tags">${selectedMedia.tags.map(tagHtml).join('') || 'No tags'}</div></div></details><div class="form-actions inspector-actions"><button id="openEditor" class="btn"><i data-lucide="panel-top-open"></i>Open in Editor</button><button id="addCollection" class="btn"><i data-lucide="folder-plus"></i>Build collection</button><button id="deleteMedia" class="icon-btn danger" title="Delete"><i data-lucide="trash-2"></i></button></div>`;
+  pane.innerHTML = `<button id="closeInspector" class="icon-btn inspector-close" title="Close"><i data-lucide="x"></i></button>${preview}<h2>${esc(selectedMedia.author || 'Unknown author')}</h2><div class="field"><label>Media ID</label><button type="button" id="searchMediaId" class="text-link">${selectedMedia.id}</button></div><div class="field"><label>Source</label><a href="${esc(selectedMedia.source_url || '#')}" target="_blank" rel="noopener" class="ellipsis">${esc(selectedMedia.source_url || 'Not specified')}</a></div><div class="field"><label>Size</label>${selectedMedia.width || '?'} × ${selectedMedia.height || '?'} · ${formatBytes(selectedMedia.file_size)}</div><details class="tag-section field" open><summary><span>Tags</span><span class="badge">${selectedMedia.tags.length}</span></summary><div class="tag-scroll"><div class="tags">${selectedMedia.tags.map(tagHtml).join('') || 'No tags'}</div></div></details><div class="form-actions inspector-actions"><a class="icon-btn" href="${selectedMedia.content_url}" target="_blank" rel="noopener" title="Open full size"><i data-lucide="maximize-2"></i></a><button id="openEditor" class="btn"><i data-lucide="panel-top-open"></i>Open in Editor</button><button id="addCollection" class="btn"><i data-lucide="folder-plus"></i>Build collection</button><button id="deleteMedia" class="icon-btn danger" title="Delete"><i data-lucide="trash-2"></i></button></div>`;
   const authorHeading = pane.querySelector('h2');
   authorHeading.insertAdjacentHTML('beforebegin', '<div class="field author-field"><label>Author</label></div>');
   authorHeading.className = 'author-value';
@@ -253,7 +277,8 @@ async function inspectMedia(id) {
   authorHeading.title = selectedMedia.author ? 'Search by author' : '';
   authorHeading.outerHTML = `<div class="tags author-tags">${authorHtml(selectedMedia.author)}</div>`;
   bindAuthorFilters(pane);
-  document.querySelector('#closeInspector').onclick = () => pane.classList.remove('has-media');
+  document.querySelector('#closeInspector').onclick = () => { pane.classList.remove('has-media'); selectedMedia=null; saveViewState('library',{selectedMediaId:null}); };
+  document.querySelector('#searchMediaId').onclick = () => { librarySearch=`id:${id}`; libraryOffset=0; document.querySelector('#search').value=librarySearch; reloadLibrary(); };
   pane.querySelectorAll('[data-include-tag]').forEach(node => {
     const include = () => appendSearchTerm(node.dataset.includeTag);
     node.onclick = event => { if (!event.target.closest('[data-exclude-tag]')) include(); };
@@ -262,7 +287,7 @@ async function inspectMedia(id) {
   pane.querySelectorAll('[data-exclude-tag]').forEach(node => node.onclick = event => { event.stopPropagation(); appendSearchTerm(`-${node.dataset.excludeTag}`); });
   document.querySelector('#deleteMedia').onclick = async () => { if (!confirm('Delete this file?')) return; try { await api(`/api/v1/media/${id}`, {method:'DELETE'}); toast('File deleted'); selectedMedia=null; showLibrary(); } catch(error) { toast(error.message,true); } };
   document.querySelector('#addCollection').onclick = () => showCollectionBuilder();
-  document.querySelector('#openEditor').onclick = () => navigate('editor');
+  document.querySelector('#openEditor').onclick = () => { saveViewState('editor',{targetMediaId:id,analysisId:null}); navigate('editor'); };
   icons();
 }
 
@@ -304,6 +329,14 @@ async function reviewAction(id, action) {
   catch (error) { toast(error.message,true); }
 }
 
+function openMediaInLibrary(mediaId) {
+  selectedMedia=null;
+  librarySearch=`id:${mediaId}`;
+  libraryOffset=0;
+  saveViewState('library',{search:librarySearch,offset:0,mediaType:'',selectedMediaId:mediaId,scrollTop:0});
+  navigate('library');
+}
+
 async function showDuplicates() {
   setHeader('Duplicates','',button('Scan','scan-search','primary'));
   actions.querySelector('button').onclick = async () => { try { await runJob(() => api('/api/v1/duplicate-scan-jobs',{method:'POST',body:JSON.stringify({threshold:90})})); showDuplicates(); } catch(error){toast(error.message,true);} };
@@ -315,8 +348,10 @@ async function showDuplicates() {
 
 async function showEditor() {
   setHeader('Editor', 'Crop');
+  const editorState=viewState('editor');
   let cropSettings=await api('/api/v1/settings');
-  const render = async (status='pending') => {
+  const render = async (status=editorState.status || 'pending') => {
+    saveViewState('editor',{status,analysisId:null,targetMediaId:null});
     const data=await api(`/api/v1/crop-analyses?status=${status}`);
     workspace.innerHTML=`<div class="page editor-page"><div class="editor-toolbar"><select id="cropStatus" class="control"><option value="pending">Pending</option><option value="cropped">Cropped</option><option value="no_crop_needed">No crop needed</option><option value="failed">Failed</option><option value="all">All</option></select><label>Minimum area <input id="cropArea" class="control" type="number" min="1" max="50" value="10"></label><label>Padding <input id="cropPadding" class="control" type="number" min="0" max="10" step=".5" value="2"></label><button id="scanSelected" class="btn"><i data-lucide="scan-line"></i>Selected</button><button id="scanAll" class="btn primary"><i data-lucide="scan-search"></i>Scan library</button></div><div class="page-head"><h2>Crop candidates</h2><span class="badge">${data.items.length}</span></div><div class="item-list">${data.items.map(item=>`<article class="queue-item"><img src="${item.thumbnail_url}" alt=""><div><strong>Media #${item.media_id}</strong><small>${esc(item.status)} · ${Number(item.confidence).toFixed(0)}% confidence · removes ${Number(item.removed_area).toFixed(1)}%</small></div><div class="actions">${item.status==='pending'?`<button class="btn open-crop" data-id="${item.id}"><i data-lucide="scan-line"></i>Review</button>`:`<button class="btn reset-crop" data-id="${item.id}"><i data-lucide="rotate-ccw"></i>Reset</button>`}</div></article>`).join('')||'<div class="empty">No items for this status</div>'}</div></div>`;
     document.querySelector('#cropStatus').value=status; document.querySelector('#cropStatus').onchange=e=>render(e.target.value);
@@ -327,21 +362,28 @@ async function showEditor() {
     const options=()=>({min_area:Number(document.querySelector('#cropArea').value),padding:Number(document.querySelector('#cropPadding').value)/100,tolerance:Number(document.querySelector('#cropPreset').value)});
     document.querySelector('#scanSelected').onclick=async()=>{if(!selectedMedia){toast('Select an image in Library first',true);return}try{const method=document.querySelector('#cropSelectedMethod').value;const result=method==='vision'?await api(`/api/v1/media/${selectedMedia.id}/crop-vision-analysis`,{method:'POST'}):await api('/api/v1/crop-analyses',{method:'POST',body:JSON.stringify({media_id:selectedMedia.id,...options()})});if(result.id){openCrop(result.id)}else{toast('No removable margins found')}}catch(error){toast(error.message,true)}};
     document.querySelector('#scanAll').onclick=async()=>{try{const created=await api('/api/v1/crop-scan-jobs',{method:'POST',body:JSON.stringify(options())});monitorCropScan({id:created.job_id,status_url:created.status_url,progress:0,scanned:0,total:'?',candidates:0});toast('Crop scan started')}catch(error){toast(error.message,true)}};
+    document.querySelectorAll('.queue-item').forEach((node,index)=>node.querySelector('.actions').insertAdjacentHTML('afterbegin',`<button class="icon-btn open-library" data-media-id="${data.items[index].media_id}" title="Open in Library"><i data-lucide="images"></i></button>`));
+    document.querySelectorAll('.open-library').forEach(n=>n.onclick=()=>openMediaInLibrary(Number(n.dataset.mediaId)));
     document.querySelectorAll('.open-crop').forEach(n=>n.onclick=()=>openCrop(Number(n.dataset.id)));document.querySelectorAll('.reset-crop').forEach(n=>n.onclick=async()=>{await api(`/api/v1/crop-analyses/${n.dataset.id}/reset`,{method:'POST'});render(status)}); icons(); document.querySelector('#cropCount').textContent=status==='pending'?(data.items.length||''):document.querySelector('#cropCount').textContent;
   };
   const openCrop = async id => {
-    const item=(await api('/api/v1/crop-analyses?status=pending')).items.find(x=>x.id===id); if(!item)return;
+    const item=await api(`/api/v1/crop-analyses/${id}`);
+    saveViewState('editor',{analysisId:id,targetMediaId:null});
     const revisions=await api(`/api/v1/media/${item.media_id}/revisions`);
     workspace.innerHTML=`<div class="page editor-page"><div class="page-head"><button class="btn" id="backEditor"><i data-lucide="chevron-left"></i>Editor</button><h2>Review crop</h2><span class="badge" id="proposalMethod">${esc(item.method)}</span></div><div class="crop-workspace"><div class="crop-source"><img id="cropSource" src="${item.content_url}" alt=""></div><canvas id="cropPreview"></canvas></div><div class="crop-controls">${['Left','Top','Right','Bottom'].map((name,index)=>`<label>${name}<input class="control crop-coordinate" data-index="${index}" type="number" value="${item.box[index]}"></label>`).join('')}<button id="resetCrop" class="icon-btn" title="Reset suggested crop"><i data-lucide="rotate-ccw"></i></button></div><div class="actions"><button class="btn" id="visionCrop"><i data-lucide="scan-eye"></i>Vision model</button><button class="btn primary" id="applyCrop"><i data-lucide="check"></i>Apply crop</button><button class="btn" id="noCrop">No crop needed</button><button class="btn" id="skipCrop">Skip</button></div><section class="revision-list"><h3>Versions</h3>${revisions.items.map(r=>`<article><img src="${r.content_url}" alt=""><span>${esc(r.operation)} · ${r.width}×${r.height} · ${formatBytes(r.file_size)}</span><button class="btn restore-revision" data-id="${r.id}" ${r.active?'disabled':''}>${r.active?'Active':'Restore'}</button></article>`).join('')}</section></div>`;
-    document.querySelector('#backEditor').onclick=render;
+    document.querySelector('#backEditor').insertAdjacentHTML('afterend',`<button class="icon-btn" id="cropOpenLibrary" title="Open in Library"><i data-lucide="images"></i></button>`);
+    document.querySelector('#cropOpenLibrary').onclick=()=>openMediaInLibrary(item.media_id);
+    document.querySelector('#backEditor').onclick=()=>{saveViewState('editor',{analysisId:null});render()};
     document.querySelector('#noCrop').onclick=async()=>{await api(`/api/v1/crop-analyses/${id}/no_crop_needed`,{method:'POST'});render()};
     document.querySelector('#skipCrop').onclick=render;
     const source=document.querySelector('#cropSource'),canvas=document.querySelector('#cropPreview'),inputs=[...document.querySelectorAll('.crop-coordinate')];
+    const savedBox=viewState('editor').box;
+    if(Array.isArray(savedBox)&&savedBox.length===4)inputs.forEach((n,i)=>n.value=savedBox[i]);
     const previewPane=document.createElement('div');previewPane.className='crop-preview-pane';canvas.replaceWith(previewPane);previewPane.append(canvas);
-    document.querySelector('.crop-workspace').insertAdjacentHTML('beforebegin','<label class="crop-zoom">Zoom <input id="cropZoom" type="range" min="100" max="400" value="100"><output id="cropZoomValue">100%</output></label>');
+    document.querySelector('.crop-workspace').insertAdjacentHTML('beforebegin',`<label class="crop-zoom">Zoom <input id="cropZoom" type="range" min="100" max="400" value="${Number(viewState('editor').zoom || 100)}"><output id="cropZoomValue">100%</output></label>`);
     const box=()=>inputs.map(n=>Number(n.value));
     const applyZoom=()=>{if(!source.naturalWidth||!canvas.width)return;const factor=Number(document.querySelector('#cropZoom').value)/100;const leftPane=source.parentElement;const base=Math.min(leftPane.clientWidth/source.naturalWidth,previewPane.clientWidth/canvas.width,1);source.style.maxWidth='none';source.style.maxHeight='none';source.style.width=`${source.naturalWidth*base*factor}px`;canvas.style.width=`${canvas.width*base*factor}px`;canvas.style.height=`${canvas.height*base*factor}px`;document.querySelector('#cropZoomValue').value=`${Math.round(factor*100)}%`};
-    const draw=()=>{if(!source.naturalWidth)return;const [l,t,r,b]=box();canvas.width=Math.max(1,r-l);canvas.height=Math.max(1,b-t);canvas.getContext('2d').drawImage(source,l,t,r-l,b-t,0,0,r-l,b-t);applyZoom()}; source.onload=draw; inputs.forEach(n=>n.oninput=draw);document.querySelector('#cropZoom').oninput=applyZoom;document.querySelector('#resetCrop').onclick=()=>{inputs.forEach((n,i)=>n.value=item.box[i]);draw()};
+    const draw=()=>{if(!source.naturalWidth)return;const [l,t,r,b]=box();canvas.width=Math.max(1,r-l);canvas.height=Math.max(1,b-t);canvas.getContext('2d').drawImage(source,l,t,r-l,b-t,0,0,r-l,b-t);saveViewState('editor',{box:box()});applyZoom()}; source.onload=draw; inputs.forEach(n=>n.oninput=draw);document.querySelector('#cropZoom').oninput=()=>{saveViewState('editor',{zoom:Number(document.querySelector('#cropZoom').value)});applyZoom()};document.querySelector('#resetCrop').onclick=()=>{inputs.forEach((n,i)=>n.value=item.box[i]);draw()};
     let syncingPan=false;
     const syncPan=(from,to)=>{if(syncingPan)return;syncingPan=true;const maxX=Math.max(1,from.scrollWidth-from.clientWidth),maxY=Math.max(1,from.scrollHeight-from.clientHeight);to.scrollLeft=(from.scrollLeft/maxX)*Math.max(0,to.scrollWidth-to.clientWidth);to.scrollTop=(from.scrollTop/maxY)*Math.max(0,to.scrollHeight-to.clientHeight);syncingPan=false};
     const bindPan=(pane,other)=>{pane.onscroll=()=>syncPan(pane,other);let start=null;pane.onpointerdown=event=>{if(event.button!==0)return;start={x:event.clientX,y:event.clientY,left:pane.scrollLeft,top:pane.scrollTop};pane.setPointerCapture(event.pointerId);pane.classList.add('panning')};pane.onpointermove=event=>{if(!start)return;pane.scrollLeft=start.left-(event.clientX-start.x);pane.scrollTop=start.top-(event.clientY-start.y)};pane.onpointerup=event=>{start=null;pane.classList.remove('panning');if(pane.hasPointerCapture(event.pointerId))pane.releasePointerCapture(event.pointerId)}};
@@ -350,11 +392,14 @@ async function showEditor() {
     document.querySelector('#applyCrop').onclick=async()=>{if(!confirm('Apply this crop? The original is kept in version history.'))return;try{await api(`/api/v1/crop-analyses/${id}/apply`,{method:'POST',body:JSON.stringify({box:box()})});toast('Crop applied');render()}catch(error){toast(error.message,true)}};
     document.querySelectorAll('.restore-revision').forEach(n=>n.onclick=async()=>{if(!confirm('Restore this version?'))return;await api(`/api/v1/media/${item.media_id}/revisions/${n.dataset.id}/activate`,{method:'POST'});toast('Version restored');openCrop(id)}); icons();
   };
-  if(selectedMedia?.type==='image'){try{const result=await api('/api/v1/crop-analyses',{method:'POST',body:JSON.stringify({media_id:selectedMedia.id,min_area:10,padding:.02})});if(result.id){openCrop(result.id);return}}catch{}}
-  await render('pending');
+  const targetMediaId=Number(editorState.targetMediaId || 0);
+  if(targetMediaId){try{const result=await api('/api/v1/crop-analyses',{method:'POST',body:JSON.stringify({media_id:targetMediaId,min_area:cropSettings.crop_min_area_percent,padding:cropSettings.crop_padding_percent/100,tolerance:cropSettings.crop_background_tolerance})});if(result.id){await openCrop(result.id);return}toast('No removable margins found')}catch(error){toast(error.message,true)}saveViewState('editor',{targetMediaId:null});}
+  if(editorState.analysisId){try{await openCrop(Number(editorState.analysisId));return}catch{saveViewState('editor',{analysisId:null})}}
+  await render(editorState.status || 'pending');
 }
 
 async function showCollections() {
+  const collectionState=viewState('collections');
   setHeader('Collections','',button('Create','plus','primary'));
   actions.querySelector('button').onclick = showCollectionBuilder;
   const data = await api('/api/v1/collections');
@@ -363,13 +408,14 @@ async function showCollections() {
     return byDate || Number(right.id) - Number(left.id);
   });
   const prefs = JSON.parse(localStorage.getItem('jiffle.collection-prefs') || '{"pageSize":20,"view":"list"}');
-  let page = 1;
+  let page = Number(collectionState.page || 1);
   const render = async () => {
     const query = (document.querySelector('#collectionSearch')?.value || '').trim().toLowerCase();
     const filtered = data.items.filter(item => item.name.toLowerCase().includes(query));
     const pageSize = Math.max(1, Number(document.querySelector('#collectionPageSize')?.value || prefs.pageSize));
     const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize)); page = Math.min(page, totalPages);
     const visible = filtered.slice((page-1)*pageSize, page*pageSize);
+    saveViewState('collections',{search:document.querySelector('#collectionSearch')?.value || '',page});
     const smart = document.querySelector('#collectionView')?.value === 'cards';
     const warning = item => Number(item.author_warning_count) > 0 ? `<span class="badge warn" title="Author limit exceeded"><i data-lucide="triangle-alert"></i>${item.author_warning_count}</span>` : '';
     const body = smart ? visible.map(item => `<article class="smart-collection"><div class="smart-previews">${item.cover_urls.map(url => `<img src="${url}" loading="lazy" alt="">`).join('') || '<div class="empty">No files</div>'}</div><div class="smart-body"><strong>${esc(item.name)}</strong><small>${item.item_count} files · ${esc(item.created_at || '')}</small><div class="actions">${warning(item)}<button class="btn open" data-id="${item.id}"><i data-lucide="eye"></i>Open</button><button class="btn export" data-id="${item.id}"><i data-lucide="download"></i>Export</button><button class="icon-btn danger delete" data-id="${item.id}" title="Delete"><i data-lucide="trash-2"></i></button></div></div></article>`).join('') : visible.map(item => `<article class="collection-item"><i data-lucide="folder"></i><div><strong>${esc(item.name)}</strong><small>${item.item_count} files · created ${esc(item.created_at || '')}</small></div><div class="actions">${warning(item)}<button class="btn open" data-id="${item.id}"><i data-lucide="eye"></i>Open</button><button class="btn export" data-id="${item.id}"><i data-lucide="download"></i>Export</button><button class="icon-btn danger delete" data-id="${item.id}" title="Delete"><i data-lucide="trash-2"></i></button></div></article>`).join('');
@@ -379,7 +425,7 @@ async function showCollections() {
     bindCollectionActions(); icons();
   };
   workspace.innerHTML = `<div class="page"><div class="collection-toolbar"><input id="collectionSearch" class="control" placeholder="Search by name"><select id="collectionPageSize" class="control"><option value="10">10 per page</option><option value="20">20 per page</option><option value="50">50 per page</option></select><select id="collectionView" class="control"><option value="list">List</option><option value="cards">Smart cards</option></select></div><div id="collectionResults" class="item-list"></div><div id="collectionPager" class="collection-pager"></div></div>`;
-  document.querySelector('#collectionPageSize').value=String(prefs.pageSize); document.querySelector('#collectionView').value=prefs.view;
+  document.querySelector('#collectionSearch').value=collectionState.search || ''; document.querySelector('#collectionPageSize').value=String(prefs.pageSize); document.querySelector('#collectionView').value=prefs.view;
   document.querySelector('#collectionSearch').oninput=()=>{page=1;render()}; document.querySelector('#collectionPageSize').onchange=event=>{prefs.pageSize=Number(event.target.value);localStorage.setItem('jiffle.collection-prefs',JSON.stringify(prefs));page=1;render()}; document.querySelector('#collectionView').onchange=event=>{prefs.view=event.target.value;localStorage.setItem('jiffle.collection-prefs',JSON.stringify(prefs));render()};
   await render();
   const collectionMedia = item => `<figure class="collection-media">${item.media_type === 'video' ? `<video class="collection-preview" src="${item.content_url}" poster="${item.thumbnail_url}" controls preload="metadata"></video>` : `<a href="${item.content_url}" target="_blank" rel="noopener"><img class="collection-preview" src="${item.thumbnail_url}" loading="lazy" alt=""></a>`}<figcaption>${item.source_url ? `<a href="${esc(item.source_url)}" target="_blank" rel="noopener">Source</a>` : '<span>Unknown source</span>'}</figcaption></figure>`;
@@ -505,6 +551,10 @@ async function showSettingsPage() {
     <div class="settings-savebar"><span id="settingsState">Interface changes are saved immediately</span><button class="btn primary"><i data-lucide="save"></i>Save settings</button></div>
   </form></div>`;
 
+  const openSections=viewState('settings').openSections;
+  if(Array.isArray(openSections))document.querySelectorAll('.settings-section').forEach((node,index)=>node.open=openSections.includes(index));
+  document.querySelectorAll('.settings-section').forEach(node=>node.ontoggle=()=>saveViewState('settings',{openSections:[...document.querySelectorAll('.settings-section')].map((section,index)=>section.open?index:null).filter(index=>index!==null)}));
+
   document.querySelectorAll('[data-font-size]').forEach(node => node.onclick = () => {
     applyFontSize(node.dataset.fontSize);
     document.querySelectorAll('[data-font-size]').forEach(option => option.classList.toggle('active', option === node));
@@ -545,14 +595,15 @@ async function showSettingsPage() {
     catch(error) { toast(error.message,true); }
   };
   document.querySelectorAll('.test-source').forEach(node => node.onclick = async () => { try { await api(`/api/v1/settings/source-providers/${node.dataset.provider}/test`,{method:'POST'});toast('Connection successful'); } catch(error) { toast(error.message,true); } });
-  icons();
+  icons(); restoreScrollState('settings');
 }
 
 async function refreshCounts(){try{const [reviews,crops]=await Promise.all([api('/api/v1/review-items?limit=1'),api('/api/v1/crop-analyses?status=pending')]);document.querySelector('#reviewCount').textContent=reviews.page.total||'';document.querySelector('#cropCount').textContent=crops.items.length||'';}catch{}}
 function formatBytes(value){if(value==null)return 'unknown size';const units=['B','KB','MB','GB'];let size=value,index=0;while(size>=1024&&index<3){size/=1024;index++;}return `${size.toFixed(index?1:0)} ${units[index]}`;}
 
 const views={library:showLibrary,import:showImport,review:showReview,duplicates:showDuplicates,editor:showEditor,collections:showCollections,settings:showSettingsPage};
-async function navigate(view){currentView=view;document.querySelectorAll('.nav-item').forEach(node=>node.classList.toggle('active',node.dataset.view===view));workspace.innerHTML='<div class="empty">Loading...</div>';try{await views[view]();}catch(error){workspace.innerHTML='<div class="empty">Could not load this section</div>';toast(error.message,true);}icons();}
+async function navigate(view){if(!views[view])view='library';saveScrollState();currentView=view;history.replaceState(null,'',`#${view}`);document.querySelectorAll('.nav-item').forEach(node=>node.classList.toggle('active',node.dataset.view===view));workspace.innerHTML='<div class="empty">Loading...</div>';try{await views[view]();restoreScrollState(view)}catch(error){workspace.innerHTML='<div class="empty">Could not load this section</div>';toast(error.message,true);}icons();}
 document.querySelectorAll('.nav-item').forEach(node=>node.onclick=()=>navigate(node.dataset.view));
 window.addEventListener('hashchange',()=>navigate(location.hash.slice(1)||'library'));
+window.addEventListener('beforeunload',saveScrollState);
 navigate(location.hash.slice(1)||'library');refreshCounts();restoreCropScanMonitor();icons();

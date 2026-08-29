@@ -54,10 +54,15 @@ Some sources require account credentials configured under **Settings**. A direct
 ### Browse and organize
 
 - Open **Library** to browse imported media and filter it by tags. When an online source provides an author, the author name appears on the media card and in the item details.
+- Search for an exact library item with `id:123`. The media ID is shown in the item details and can be selected there to apply the same search.
+- In the item details, use the full-size button to open the current file by itself in a new browser tab. **Open in Editor** analyzes that exact image and opens its crop proposal when removable margins are found.
 - Select an author in the item details to add an `author:name` filter without clearing the current search. The active author and selected media card remain highlighted while results update. Items with multiple authors show each author separately.
 - Select an item to inspect its source, dimensions, tags, and available actions.
 - Open **Duplicates** and select **Scan** to find similar files.
 - Open **Editor** to find images with removable empty margins. Use **Scan library** for a background scan with progress and cancellation, or select an image in **Library** and choose **Open in Editor**.
+- Use the library button beside a crop candidate or in the crop review screen to return to that image in **Library** with its details open.
+- Completed scans remember images that produced no crop candidate. Repeating a scan with the same detector settings skips their image analysis; changing minimum area, padding, or detector sensitivity makes them eligible for analysis again.
+- Navigation state such as library filters, the selected image, editor status, crop coordinates, zoom, scroll position, and expanded Settings sections survives page refreshes for the current browser session. Unsaved Settings values are not stored.
 - Review the original and cropped preview, adjust the Left, Top, Right, and Bottom coordinates, and select **Apply crop**. Jiffle asks for confirmation and retains the original and every accepted version. Use the Versions list to restore an earlier version.
 - The crop scan checks static images for almost-uniform white, black, colored, or transparent margins on any side. Animated images and videos are not scanned. **No crop needed** excludes the current version from later scans; **Skip** leaves it pending. Use the status filter and **Reset** to reconsider an earlier decision.
 - Configure the detector under **Settings → Crop analysis**: choose the cautious, normal, or sensitive preset, set the minimum removable area and retained padding, and select Local or Vision analysis for an image opened directly in Editor. Library-wide scans always use the local detector.

@@ -400,6 +400,16 @@ def migration_15(connection: sqlite3.Connection) -> None:
     connection.execute("DELETE FROM background_jobs WHERE job_type='ai_tagging'")
 
 
+def migration_16(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "CREATE TABLE crop_scan_results ("
+        "revision_id INTEGER NOT NULL REFERENCES media_revisions(id) ON DELETE CASCADE, "
+        "parameter_signature TEXT NOT NULL, candidate_found INTEGER NOT NULL, "
+        "scanned_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+        "PRIMARY KEY(revision_id, parameter_signature))"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -416,6 +426,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (13, migration_13),
     (14, migration_14),
     (15, migration_15),
+    (16, migration_16),
 )
 
 

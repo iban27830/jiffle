@@ -116,6 +116,13 @@ def _parse_query() -> tuple[LibraryQuery | None, str | None]:
         media_type = MediaType(raw_type) if raw_type else None
     except ValueError:
         return None, "Type must be image or video."
+    raw_id = _optional_parameter("id")
+    try:
+        media_id = int(raw_id) if raw_id else None
+    except ValueError:
+        return None, "Media ID must be an integer."
+    if media_id is not None and media_id < 1:
+        return None, "Media ID must be a positive integer."
     return LibraryQuery(
         limit=limit,
         offset=offset,
@@ -125,6 +132,7 @@ def _parse_query() -> tuple[LibraryQuery | None, str | None]:
         domain=_optional_parameter("domain"),
         media_type=media_type,
         text=_optional_parameter("q"),
+        media_id=media_id,
         tags=tuple(value.strip().lower() for value in request.args.getlist("tag") if value.strip()),
         excluded_tags=tuple(value.strip().lower() for value in request.args.getlist("exclude_tag") if value.strip()),
     ), None

@@ -5,15 +5,18 @@ export function tokenizeSearch(value) {
 export function parseLibrarySearch(value) {
   const terms = tokenizeSearch(value);
   const authors = [];
+  const mediaIds = [];
   const includedTags = [];
   const excludedTags = [];
   for (const term of terms) {
     const authorMatch = term.match(/^author:(?:"([^"]*)"|(.*))$/i);
+    const idMatch = term.match(/^id:(\d+)$/i);
     if (authorMatch) authors.push((authorMatch[1] ?? authorMatch[2]).trim());
+    else if (idMatch) mediaIds.push(Number(idMatch[1]));
     else if (term.startsWith('-') && term.length > 1) excludedTags.push(term.slice(1));
     else includedTags.push(term);
   }
-  return {terms, authors: authors.filter(Boolean), includedTags, excludedTags};
+  return {terms, authors: authors.filter(Boolean), mediaIds, includedTags, excludedTags};
 }
 
 export function withAuthorFilter(value, author) {
