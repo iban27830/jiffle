@@ -8,6 +8,7 @@ from jiffle.features.imports.local_import import ImportFailure, atomic_copy, ins
 from jiffle.features.imports.history import create_import_history, update_import_history
 from jiffle.features.imports.source_adapters.contracts import MediaDownloader, SourceProvider
 from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
+from jiffle.infrastructure.media_revisions import create_original_revision
 
 
 def create_url_import_job(connection: sqlite3.Connection, submitted_url: str) -> int:
@@ -126,6 +127,7 @@ def run_url_import_job(
                 ),
             )
             media_item_id = int(cursor.lastrowid)
+            create_original_revision(connection, media_item_id)
             _attach_source(connection, media_item_id, source)
             connection.executemany(
                 "INSERT INTO media_tags (media_item_id, tag) VALUES (?, ?)",

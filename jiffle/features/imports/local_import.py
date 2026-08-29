@@ -12,6 +12,7 @@ from PIL import Image
 from jiffle.configuration.settings import Settings
 from jiffle.features.imports.domain import ImportOutcome, LocalImportCommand, LocalImportResult
 from jiffle.features.imports.history import create_import_history, update_import_history
+from jiffle.infrastructure.media_revisions import create_original_revision
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 VIDEO_EXTENSIONS = {".mp4", ".webm"}
@@ -179,6 +180,7 @@ def _import_file(
             ),
         )
         media_item_id = int(cursor.lastrowid)
+        create_original_revision(connection, media_item_id)
         connection.execute(
             "UPDATE import_candidates SET status = 'accepted', stored_path = ?, "
             "media_item_id = ? WHERE id = ?",

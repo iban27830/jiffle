@@ -165,9 +165,12 @@ def _serialize(item: MediaItem) -> dict[str, object]:
         "height": item.height,
         "file_size": item.file_size,
         "created_at": item.created_at,
+        "active_revision_id": item.active_revision_id,
+        "is_edited": bool(item.edit_operations),
+        "edit_operations": list(item.edit_operations),
         "tags": list(item.tags),
-        "content_url": f"/api/v1/media/{item.id}/content",
-        "thumbnail_url": f"/api/v1/media/{item.id}/thumbnail",
+        "content_url": f"/api/v1/media/{item.id}/content?revision={item.active_revision_id or 0}",
+        "thumbnail_url": f"/api/v1/media/{item.id}/thumbnail?revision={item.active_revision_id or 0}",
     }
 
 

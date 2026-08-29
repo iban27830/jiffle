@@ -7,6 +7,7 @@ from jiffle.configuration.settings import Settings
 from jiffle.features.imports.local_import import atomic_copy
 from jiffle.features.imports.source_adapters.contracts import SourceMedia, SourceProvider
 from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
+from jiffle.infrastructure.media_revisions import create_original_revision
 
 
 class ReviewFailure(Exception):
@@ -72,6 +73,7 @@ def accept_review_item(
             ),
         )
         media_item_id = int(cursor.lastrowid)
+        create_original_revision(connection, media_item_id)
         if source:
             _store_source(connection, media_item_id, source)
             _store_tags(connection, media_item_id, source.tags)

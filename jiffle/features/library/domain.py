@@ -19,6 +19,8 @@ class MediaItem:
     height: int | None
     file_size: int | None
     content_hash: str | None
+    active_revision_id: int | None
+    edit_operations: tuple[str, ...]
     created_at: str
     tags: tuple[str, ...]
 

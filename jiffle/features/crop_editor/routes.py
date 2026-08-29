@@ -4,7 +4,8 @@ import sqlite3
 from threading import Thread
 from flask import Blueprint, current_app, jsonify, request, send_file
 from jiffle.infrastructure.database.connection import get_database
-from .workflow import CropFailure, activate_revision, analyze_image, apply_crop, list_revisions, media_path, reset_analysis, resolve_analysis
+from .workflow import CropFailure, activate_revision, analyze_image, apply_crop, list_revisions, media_path, reset_analysis, reset_to_original, resolve_analysis
+from jiffle.infrastructure.media_revisions import active_edit_operations, revision_details
 from .vision import analyze_with_vision
 
 crop_blueprint=Blueprint("crop_editor",__name__)
@@ -54,14 +55,14 @@ def active_scan():
 def list_analyses():
     status=request.args.get("status","pending")
     where="" if status=="all" else "WHERE a.status=?"; params=() if status=="all" else (status,)
-    rows=get_database().execute(f"SELECT a.*,m.width media_width,m.height media_height FROM crop_analyses a JOIN media_items m ON m.id=a.media_item_id {where} ORDER BY a.confidence DESC,a.removed_area DESC",params).fetchall()
+    rows=get_database().execute(f"SELECT a.*,r.width media_width,r.height media_height FROM crop_analyses a JOIN media_revisions r ON r.id=a.revision_id {where} ORDER BY a.confidence DESC,a.removed_area DESC",params).fetchall()
     return jsonify({"items":[_serialize(r) for r in rows]})
 
 @crop_blueprint.get("/api/v1/crop-analyses/<int:analysis_id>")
 def get_analysis(analysis_id):
     row=get_database().execute(
-        "SELECT a.*,m.width media_width,m.height media_height FROM crop_analyses a "
-        "JOIN media_items m ON m.id=a.media_item_id WHERE a.id=?",
+        "SELECT a.*,r.width media_width,r.height media_height FROM crop_analyses a "
+        "JOIN media_revisions r ON r.id=a.revision_id WHERE a.id=?",
         (analysis_id,),
     ).fetchone()
     if row is None:return _error("crop.analysis_not_found","Crop analysis was not found.",404)
@@ -88,7 +89,28 @@ def reset(analysis_id):
 
 @crop_blueprint.get("/api/v1/media/<int:media_id>/revisions")
 def revisions(media_id):
-    return jsonify({"items":[{"id":r["id"],"operation":r["operation"],"width":r["width"],"height":r["height"],"file_size":r["file_size"],"created_at":r["created_at"],"active":bool(r["active"]),"content_url":f"/api/v1/media/{media_id}/revisions/{r['id']}/content"} for r in list_revisions(get_database(),media_id)]})
+    rows=list_revisions(get_database(),media_id)
+    active=next((r for r in rows if r["active"]),None)
+    active_chain=set()
+    by_id={int(r["id"]):r for r in rows}
+    cursor=active
+    while cursor:
+        active_chain.add(int(cursor["id"])); cursor=by_id.get(int(cursor["parent_revision_id"])) if cursor["parent_revision_id"] else None
+    return jsonify({"items":[{"id":r["id"],"parent_revision_id":r["parent_revision_id"],"operation":r["operation"],"details":revision_details(r["details_json"]),"width":r["width"],"height":r["height"],"file_size":r["file_size"],"created_at":r["created_at"],"active":bool(r["active"]),"in_active_chain":int(r["id"]) in active_chain,"content_url":f"/api/v1/media/{media_id}/revisions/{r['id']}/content"} for r in rows]})
+
+@crop_blueprint.get("/api/v1/media/<int:media_id>/editor-state")
+def editor_state(media_id):
+    connection=get_database(); media=connection.execute("SELECT id,active_revision_id FROM media_items WHERE id=? AND deleted_at IS NULL AND media_type='image'",(media_id,)).fetchone()
+    if media is None:return _error("crop.media_not_found","Media item was not found.",404)
+    analyses=connection.execute("SELECT id,revision_id,status,method FROM crop_analyses WHERE media_item_id=? ORDER BY id DESC",(media_id,)).fetchall()
+    operations=active_edit_operations(connection,media_id)
+    return jsonify({"media_id":media_id,"active_revision_id":media["active_revision_id"],"is_edited":bool(operations),"edit_operations":list(operations),"analyses":[dict(row) for row in analyses],"content_url":f"/api/v1/media/{media_id}/content?revision={media['active_revision_id']}"})
+
+@crop_blueprint.post("/api/v1/media/<int:media_id>/reset-to-original")
+def reset_media(media_id):
+    try:revision_id=reset_to_original(get_database(),current_app.config["JIFFLE_SETTINGS"],media_id)
+    except CropFailure as error:return _crop_error(error)
+    return jsonify({"status":"reset","revision_id":revision_id})
 
 @crop_blueprint.get("/api/v1/media/<int:media_id>/revisions/<int:revision_id>/content")
 def revision_content(media_id,revision_id):
@@ -103,7 +125,7 @@ def restore_revision(media_id,revision_id):
     return jsonify({"status":"activated","revision_id":revision_id})
 
 def _serialize(row):
-    return {"id":row["id"],"media_id":row["media_item_id"],"revision_id":row["revision_id"],"method":row["method"],"status":row["status"],"box":[row["left_px"],row["top_px"],row["right_px"],row["bottom_px"]],"confidence":row["confidence"],"removed_area":row["removed_area"],"width":row["media_width"] if "media_width" in row.keys() else None,"height":row["media_height"] if "media_height" in row.keys() else None,"content_url":f"/api/v1/media/{row['media_item_id']}/content","thumbnail_url":f"/api/v1/media/{row['media_item_id']}/thumbnail"}
+    return {"id":row["id"],"media_id":row["media_item_id"],"revision_id":row["revision_id"],"method":row["method"],"status":row["status"],"box":[row["left_px"],row["top_px"],row["right_px"],row["bottom_px"]],"confidence":row["confidence"],"removed_area":row["removed_area"],"width":row["media_width"] if "media_width" in row.keys() else None,"height":row["media_height"] if "media_height" in row.keys() else None,"content_url":f"/api/v1/media/{row['media_item_id']}/revisions/{row['revision_id']}/content","thumbnail_url":f"/api/v1/media/{row['media_item_id']}/revisions/{row['revision_id']}/content"}
 def _error(code,message,status): return jsonify({"error":{"code":code,"message":message,"details":{}}}),status
 
 def _crop_error(error):

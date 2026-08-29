@@ -1,4 +1,5 @@
 from collections.abc import Callable
+import json
 import sqlite3
 from urllib.parse import urlsplit, urlunsplit
 
@@ -410,6 +411,80 @@ def migration_16(connection: sqlite3.Connection) -> None:
     )
 
 
+def migration_17(connection: sqlite3.Connection) -> None:
+    connection.execute("ALTER TABLE media_revisions ADD COLUMN details_json TEXT NOT NULL DEFAULT '{}'")
+    rows = connection.execute(
+        "SELECT id, file_path, width, height, file_size, content_hash FROM media_items "
+        "WHERE active_revision_id IS NULL"
+    ).fetchall()
+    for row in rows:
+        cursor = connection.execute(
+            "INSERT INTO media_revisions "
+            "(media_item_id, file_path, operation, width, height, file_size, content_hash) "
+            "VALUES (?, ?, 'original', ?, ?, ?, ?)",
+            (row[0], row[1], row[2], row[3], row[4], row[5]),
+        )
+        connection.execute(
+            "UPDATE media_items SET active_revision_id=? WHERE id=?",
+            (cursor.lastrowid, row[0]),
+        )
+    history = connection.execute(
+        "SELECT details_json FROM operation_history WHERE event_type='crop.applied' ORDER BY id"
+    ).fetchall()
+    for entry in history:
+        try:
+            details = json.loads(entry[0])
+            revision_id = int(details["revision_id"])
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+        analysis = connection.execute(
+            "SELECT method, revision_id FROM crop_analyses WHERE id=?",
+            (details.get("analysis_id"),),
+        ).fetchone()
+        connection.execute(
+            "UPDATE media_revisions SET details_json=? WHERE id=? AND operation='crop'",
+            (json.dumps({
+                "analysis_id": details.get("analysis_id"),
+                "box": details.get("box"),
+                "method": analysis[0] if analysis else None,
+                "source_revision_id": analysis[1] if analysis else None,
+            }), revision_id),
+        )
+
+
+def migration_18(connection: sqlite3.Connection) -> None:
+    rows = connection.execute(
+        "SELECT id, parent_revision_id, details_json FROM media_revisions WHERE operation='crop'"
+    ).fetchall()
+    for row in rows:
+        try:
+            details = json.loads(row[2] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            details = {}
+        analysis = None
+        if details.get("analysis_id") is not None:
+            analysis = connection.execute(
+                "SELECT id, method, revision_id FROM crop_analyses WHERE id=?",
+                (details["analysis_id"],),
+            ).fetchone()
+        if analysis is None and row[1] is not None:
+            analysis = connection.execute(
+                "SELECT id, method, revision_id FROM crop_analyses "
+                "WHERE revision_id=? AND status='cropped' ORDER BY id DESC LIMIT 1",
+                (row[1],),
+            ).fetchone()
+        if analysis:
+            details.update({
+                "analysis_id": analysis[0],
+                "method": analysis[1],
+                "source_revision_id": analysis[2],
+            })
+            connection.execute(
+                "UPDATE media_revisions SET details_json=? WHERE id=?",
+                (json.dumps(details), row[0]),
+            )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -427,6 +502,8 @@ MIGRATIONS: tuple[Migration, ...] = (
     (14, migration_14),
     (15, migration_15),
     (16, migration_16),
+    (17, migration_17),
+    (18, migration_18),
 )
 
 

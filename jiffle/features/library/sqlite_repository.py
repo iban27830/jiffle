@@ -6,6 +6,7 @@ from jiffle.features.library.domain import (
     MediaItem,
     MediaType,
 )
+from jiffle.infrastructure.media_revisions import active_edit_operations
 
 
 class SqliteLibraryRepository:
@@ -61,6 +62,9 @@ class SqliteLibraryRepository:
             height=row["height"],
             file_size=row["file_size"],
             content_hash=row["content_hash"],
+            active_revision_id=row["active_revision_id"] if "active_revision_id" in row.keys() else None,
+            edit_operations=active_edit_operations(self.connection, row["id"])
+            if "active_revision_id" in row.keys() else (),
             created_at=row["created_at"],
             tags=tags,
         )

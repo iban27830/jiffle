@@ -77,6 +77,7 @@ def get_review_thumbnail(review_id: int):
         media_type=MediaType(row["media_type"]), source_url=None, author=None,
         domain=None, width=row["width"], height=row["height"],
         file_size=row["file_size"], content_hash=row["content_hash"],
+        active_revision_id=None, edit_operations=(),
         created_at=row["created_at"], tags=(),
     )
     try:
