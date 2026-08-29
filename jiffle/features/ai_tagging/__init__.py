@@ -1,1 +1,0 @@
-"""External AI tagging feature."""

@@ -6,7 +6,6 @@ from flask import Blueprint, current_app, jsonify, request
 import requests
 
 from jiffle.configuration.settings import Settings, persist_settings
-from jiffle.features.ai_tagging.adapters import build_tagging_provider
 from jiffle.features.imports.source_adapters.registry import build_source_providers
 from jiffle.infrastructure.database.connection import get_database
 
@@ -27,8 +26,8 @@ def update_settings():
     allowed = {
         "media_path", "thumbnail_path", "import_staging_path", "export_path",
         "max_items_per_author", "max_export_size_bytes", "block_previously_deleted",
-        "ai_api_url",
-        "ai_api_key", "ai_api_model", "ai_api_format", "ai_tagging_prompt",
+        "crop_vision_url", "crop_vision_key", "crop_vision_model", "crop_vision_format",
+        "crop_min_area_percent", "crop_padding_percent", "crop_background_tolerance", "crop_selected_analysis",
         "danbooru_login", "danbooru_api_key", "e621_login", "e621_api_key",
         "gelbooru_user_id", "gelbooru_api_key", "furaffinity_cookie_a",
         "furaffinity_cookie_b",
@@ -44,7 +43,6 @@ def update_settings():
     except OSError:
         return _error("settings.write_failed", "Settings could not be saved.", 500)
     current_app.config["JIFFLE_SETTINGS"] = updated
-    current_app.config["JIFFLE_TAGGING_PROVIDER"] = build_tagging_provider(updated)
     if not current_app.config["JIFFLE_CUSTOM_SOURCE_PROVIDERS"]:
         current_app.config["JIFFLE_SOURCE_PROVIDERS"] = build_source_providers(updated)
     return jsonify(_public_settings(updated))
@@ -91,18 +89,6 @@ def choose_directory():
         if root is not None:
             root.destroy()
     return jsonify({"path": str(Path(selected).resolve()) if selected else None})
-
-
-@settings_blueprint.post("/api/v1/settings/ai-provider/test")
-def test_ai_provider():
-    provider = current_app.config["JIFFLE_TAGGING_PROVIDER"]
-    if provider is None:
-        return _error("ai.provider_not_configured", "No tagging provider is configured.", 503)
-    try:
-        provider.check_connection()
-    except (requests.RequestException, AttributeError):
-        return _error("ai.connection_failed", "The tagging provider could not be reached.", 502)
-    return jsonify({"status": "ok", "provider": provider.provider_name})
 
 
 @settings_blueprint.post("/api/v1/settings/source-providers/<provider_name>/test")
@@ -205,19 +191,26 @@ def _validated_update(settings, payload):
         values["block_previously_deleted"], bool
     ):
         raise ValueError("block_previously_deleted must be boolean.")
-    if "ai_api_format" in values and values["ai_api_format"] not in {"openai", "gemini"}:
-        raise ValueError("ai_api_format must be openai or gemini.")
+    if "crop_vision_format" in values and values["crop_vision_format"] not in {"openai", "gemini"}:
+        raise ValueError("crop_vision_format must be openai or gemini.")
+    if "crop_selected_analysis" in values and values["crop_selected_analysis"] not in {"local", "vision"}:
+        raise ValueError("crop_selected_analysis must be local or vision.")
+    if "crop_min_area_percent" in values:
+        value=values["crop_min_area_percent"]
+        if not isinstance(value,(int,float)) or isinstance(value,bool) or not 1<=value<=50:raise ValueError("crop_min_area_percent must be from 1 to 50.")
+    if "crop_padding_percent" in values:
+        value=values["crop_padding_percent"]
+        if not isinstance(value,(int,float)) or isinstance(value,bool) or not 0<=value<=10:raise ValueError("crop_padding_percent must be from 0 to 10.")
+    if "crop_background_tolerance" in values:
+        value=values["crop_background_tolerance"]
+        if not isinstance(value,int) or isinstance(value,bool) or not 5<=value<=40:raise ValueError("crop_background_tolerance must be from 5 to 40.")
     for field in (
-        "ai_api_url", "ai_api_key", "ai_api_model", "danbooru_login",
+        "crop_vision_url", "crop_vision_key", "crop_vision_model", "danbooru_login",
         "danbooru_api_key", "e621_login", "e621_api_key", "gelbooru_user_id",
         "gelbooru_api_key", "furaffinity_cookie_a", "furaffinity_cookie_b",
     ):
         if field in values and values[field] is not None and not isinstance(values[field], str):
             raise ValueError(f"{field} must be a string or null.")
-    if "ai_tagging_prompt" in values:
-        prompt = values["ai_tagging_prompt"]
-        if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 10000:
-            raise ValueError("ai_tagging_prompt is invalid.")
     return replace(settings, **values)
 
 
@@ -230,11 +223,14 @@ def _public_settings(settings):
         "max_items_per_author": settings.max_items_per_author,
         "max_export_size_bytes": settings.max_export_size_bytes,
         "block_previously_deleted": settings.block_previously_deleted,
-        "ai_api_url": settings.ai_api_url,
-        "ai_api_model": settings.ai_api_model,
-        "ai_api_format": settings.ai_api_format,
-        "ai_tagging_prompt": settings.ai_tagging_prompt,
-        "ai_api_key_configured": bool(settings.ai_api_key),
+        "crop_vision_url": settings.crop_vision_url,
+        "crop_vision_model": settings.crop_vision_model,
+        "crop_vision_format": settings.crop_vision_format,
+        "crop_vision_key_configured": bool(settings.crop_vision_key),
+        "crop_min_area_percent": settings.crop_min_area_percent,
+        "crop_padding_percent": settings.crop_padding_percent,
+        "crop_background_tolerance": settings.crop_background_tolerance,
+        "crop_selected_analysis": settings.crop_selected_analysis,
         "danbooru_login": settings.danbooru_login,
         "danbooru_api_key_configured": bool(settings.danbooru_api_key),
         "e621_login": settings.e621_login,

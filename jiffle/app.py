@@ -9,11 +9,10 @@ from jiffle.features.imports.source_adapters.http_download import RequestsMediaD
 from jiffle.features.imports.source_adapters.registry import build_source_providers
 from jiffle.features.library.routes import library_blueprint
 from jiffle.features.review_queue.routes import review_blueprint
-from jiffle.features.ai_tagging.adapters import build_tagging_provider
-from jiffle.features.ai_tagging.routes import ai_tagging_blueprint
 from jiffle.features.collections.routes import collections_blueprint
 from jiffle.features.settings_api.routes import settings_blueprint
 from jiffle.features.tag_management.routes import tag_management_blueprint
+from jiffle.features.crop_editor.routes import crop_blueprint, resume_crop_scans
 from jiffle.infrastructure.database.connection import close_database
 from jiffle.infrastructure.database.migrations import migrate_database
 
@@ -22,7 +21,6 @@ def create_app(
     settings: Settings | None = None,
     source_providers: tuple[object, ...] | None = None,
     media_downloader: object | None = None,
-    tagging_provider: object | None = None,
 ) -> Flask:
     resolved_settings = settings or Settings.from_environment()
     app = Flask(__name__, static_folder="frontend", static_url_path="/app-assets")
@@ -34,20 +32,16 @@ def create_app(
     app.config["JIFFLE_MEDIA_DOWNLOADER"] = (
         media_downloader if media_downloader is not None else RequestsMediaDownloader()
     )
-    app.config["JIFFLE_TAGGING_PROVIDER"] = (
-        tagging_provider if tagging_provider is not None
-        else build_tagging_provider(resolved_settings)
-    )
     app.teardown_appcontext(close_database)
     app.register_blueprint(health_blueprint)
     app.register_blueprint(library_blueprint)
     app.register_blueprint(imports_blueprint)
     app.register_blueprint(review_blueprint)
     app.register_blueprint(duplicates_blueprint)
-    app.register_blueprint(ai_tagging_blueprint)
     app.register_blueprint(collections_blueprint)
     app.register_blueprint(settings_blueprint)
     app.register_blueprint(tag_management_blueprint)
+    app.register_blueprint(crop_blueprint)
     register_error_handlers(app)
 
     @app.get("/")
@@ -58,6 +52,8 @@ def create_app(
         resolved_settings.database_path.parent.mkdir(parents=True, exist_ok=True)
         with app.app_context():
             migrate_database()
+        if not resolved_settings.run_jobs_inline:
+            resume_crop_scans(resolved_settings.database_path, resolved_settings)
 
     return app
 

@@ -361,6 +361,45 @@ def migration_13(connection: sqlite3.Connection) -> None:
         )
 
 
+def migration_14(connection: sqlite3.Connection) -> None:
+    connection.execute("ALTER TABLE media_items ADD COLUMN active_revision_id INTEGER")
+    connection.execute(
+        "CREATE TABLE media_revisions ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, media_item_id INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE, "
+        "parent_revision_id INTEGER REFERENCES media_revisions(id), file_path TEXT NOT NULL UNIQUE, "
+        "operation TEXT NOT NULL, width INTEGER, height INTEGER, file_size INTEGER, content_hash TEXT, "
+        "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    )
+    connection.execute(
+        "CREATE TABLE crop_analyses ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, media_item_id INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE, "
+        "revision_id INTEGER NOT NULL REFERENCES media_revisions(id) ON DELETE CASCADE, method TEXT NOT NULL, "
+        "status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','cropped','no_crop_needed','deferred','failed')), "
+        "left_px INTEGER NOT NULL DEFAULT 0, top_px INTEGER NOT NULL DEFAULT 0, right_px INTEGER NOT NULL, bottom_px INTEGER NOT NULL, "
+        "confidence REAL NOT NULL DEFAULT 0, removed_area REAL NOT NULL DEFAULT 0, parameters_json TEXT NOT NULL DEFAULT '{}', "
+        "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, resolved_at TEXT, UNIQUE(revision_id, method))"
+    )
+    connection.execute("CREATE INDEX crop_analyses_status_idx ON crop_analyses(status, confidence DESC)")
+    rows = connection.execute("SELECT id, file_path, width, height, file_size, content_hash FROM media_items WHERE deleted_at IS NULL").fetchall()
+    for row in rows:
+        cur = connection.execute(
+            "INSERT INTO media_revisions (media_item_id, file_path, operation, width, height, file_size, content_hash) VALUES (?, ?, 'original', ?, ?, ?, ?)",
+            (row[0], row[1], row[2], row[3], row[4], row[5]),
+        )
+        connection.execute("UPDATE media_items SET active_revision_id=? WHERE id=?", (cur.lastrowid, row[0]))
+
+
+def migration_15(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "CREATE TABLE crop_scan_jobs (job_id INTEGER PRIMARY KEY REFERENCES background_jobs(id) ON DELETE CASCADE, "
+        "cancel_requested INTEGER NOT NULL DEFAULT 0, scanned_count INTEGER NOT NULL DEFAULT 0, "
+        "candidate_count INTEGER NOT NULL DEFAULT 0, parameters_json TEXT NOT NULL DEFAULT '{}')"
+    )
+    connection.execute("DROP TABLE IF EXISTS tag_suggestions")
+    connection.execute("DELETE FROM operation_history WHERE event_type LIKE 'ai_tags.%'")
+    connection.execute("DELETE FROM background_jobs WHERE job_type='ai_tagging'")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -375,6 +414,8 @@ MIGRATIONS: tuple[Migration, ...] = (
     (11, migration_11),
     (12, migration_12),
     (13, migration_13),
+    (14, migration_14),
+    (15, migration_15),
 )
 
 

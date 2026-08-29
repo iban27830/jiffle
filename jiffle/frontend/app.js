@@ -15,6 +15,7 @@ let selectedMedia = null;
 let includeTag = ''; let excludeTag = '';
 let librarySearch = '';
 let reloadLibrary = null;
+let monitoredCropJob = null;
 
 const FONT_SIZE_KEY = 'jiffle-font-size';
 const allowedFontSizes = [14, 16, 18, 20];
@@ -133,6 +134,29 @@ async function runJob(start, onCreated) {
   return job;
 }
 
+async function monitorCropScan(job) {
+  if (!job || monitoredCropJob === job.id) return;
+  monitoredCropJob = job.id;
+  const render = current => {
+    jobStatus.innerHTML = `<span>Crop scan: ${current.progress}% · ${current.scanned ?? 0}/${current.total ?? '?'} · ${current.candidates ?? 0} found</span><button id="stopCropScan" class="status-stop" title="Stop crop scan"><i data-lucide="square"></i></button>`;
+    const stop=document.querySelector('#stopCropScan'); stop.disabled=Boolean(current.cancel_requested); stop.onclick=async()=>{stop.disabled=true;await api(`/api/v1/crop-scan-jobs/${current.id}/cancel`,{method:'POST'})}; icons();
+  };
+  try {
+    let current=job;
+    for (;;) {
+      render(current);
+      const state=await api(current.status_url);
+      if(state.status==='completed'||state.status==='failed')break;
+      await new Promise(resolve=>setTimeout(resolve,700));
+      const active=await api('/api/v1/crop-scan-jobs/active');
+      if(!active.job)break; current=active.job;
+    }
+  } catch {}
+  if(monitoredCropJob===job.id){monitoredCropJob=null;jobStatus.textContent='';refreshCounts();}
+}
+
+async function restoreCropScanMonitor(){try{const active=await api('/api/v1/crop-scan-jobs/active');if(active.job)monitorCropScan(active.job)}catch{}}
+
 async function showLibrary() {
   const prefs = applyLibraryPrefs();
   setHeader('Library', '', button('Import', 'upload', 'primary'));
@@ -221,7 +245,7 @@ async function inspectMedia(id) {
   const pane = document.querySelector('#inspector');
   const preview = selectedMedia.type === 'video' ? `<video class="inspector-preview" src="${selectedMedia.content_url}" controls></video>` : `<img class="inspector-preview" src="${selectedMedia.content_url}" alt="">`;
   pane.classList.add('has-media');
-  pane.innerHTML = `<button id="closeInspector" class="icon-btn inspector-close" title="Close"><i data-lucide="x"></i></button>${preview}<h2>${esc(selectedMedia.author || 'Unknown author')}</h2><div class="field"><label>Source</label><a href="${esc(selectedMedia.source_url || '#')}" target="_blank" rel="noopener" class="ellipsis">${esc(selectedMedia.source_url || 'Not specified')}</a></div><div class="field"><label>Size</label>${selectedMedia.width || '?'} × ${selectedMedia.height || '?'} · ${formatBytes(selectedMedia.file_size)}</div><details class="tag-section field" open><summary><span>Tags</span><span class="badge">${selectedMedia.tags.length}</span></summary><div class="tag-scroll"><div class="tags">${selectedMedia.tags.map(tagHtml).join('') || 'No tags'}</div></div></details><div class="form-actions inspector-actions"><button id="addCollection" class="btn"><i data-lucide="folder-plus"></i>Build collection</button><button id="deleteMedia" class="icon-btn danger" title="Delete"><i data-lucide="trash-2"></i></button></div>`;
+  pane.innerHTML = `<button id="closeInspector" class="icon-btn inspector-close" title="Close"><i data-lucide="x"></i></button>${preview}<h2>${esc(selectedMedia.author || 'Unknown author')}</h2><div class="field"><label>Source</label><a href="${esc(selectedMedia.source_url || '#')}" target="_blank" rel="noopener" class="ellipsis">${esc(selectedMedia.source_url || 'Not specified')}</a></div><div class="field"><label>Size</label>${selectedMedia.width || '?'} × ${selectedMedia.height || '?'} · ${formatBytes(selectedMedia.file_size)}</div><details class="tag-section field" open><summary><span>Tags</span><span class="badge">${selectedMedia.tags.length}</span></summary><div class="tag-scroll"><div class="tags">${selectedMedia.tags.map(tagHtml).join('') || 'No tags'}</div></div></details><div class="form-actions inspector-actions"><button id="openEditor" class="btn"><i data-lucide="panel-top-open"></i>Open in Editor</button><button id="addCollection" class="btn"><i data-lucide="folder-plus"></i>Build collection</button><button id="deleteMedia" class="icon-btn danger" title="Delete"><i data-lucide="trash-2"></i></button></div>`;
   const authorHeading = pane.querySelector('h2');
   authorHeading.insertAdjacentHTML('beforebegin', '<div class="field author-field"><label>Author</label></div>');
   authorHeading.className = 'author-value';
@@ -238,6 +262,7 @@ async function inspectMedia(id) {
   pane.querySelectorAll('[data-exclude-tag]').forEach(node => node.onclick = event => { event.stopPropagation(); appendSearchTerm(`-${node.dataset.excludeTag}`); });
   document.querySelector('#deleteMedia').onclick = async () => { if (!confirm('Delete this file?')) return; try { await api(`/api/v1/media/${id}`, {method:'DELETE'}); toast('File deleted'); selectedMedia=null; showLibrary(); } catch(error) { toast(error.message,true); } };
   document.querySelector('#addCollection').onclick = () => showCollectionBuilder();
+  document.querySelector('#openEditor').onclick = () => navigate('editor');
   icons();
 }
 
@@ -286,6 +311,47 @@ async function showDuplicates() {
   workspace.innerHTML = `<div class="page item-list">${data.items.length ? data.items.map(match => `<section class="panel"><div class="panel-head">Match ${match.confidence}%</div><div class="panel-body"><div class="compare"><img src="${match.left.thumbnail_url}" alt=""><img src="${match.right.thumbnail_url}" alt=""></div><div class="actions" style="margin-top:10px"><button class="btn resolve" data-id="${match.id}" data-keep="left">Keep left</button><button class="btn resolve" data-id="${match.id}" data-keep="right">Keep right</button><button class="btn ignore" data-id="${match.id}">Ignore</button></div></div></section>`).join('') : '<div class="empty">No matches</div>'}</div>`;
   document.querySelectorAll('.ignore').forEach(node => node.onclick = async () => { await api(`/api/v1/duplicate-matches/${node.dataset.id}/ignore`,{method:'POST'}); showDuplicates(); });
   document.querySelectorAll('.resolve').forEach(node => node.onclick = async () => { try { await api(`/api/v1/duplicate-matches/${node.dataset.id}/resolve`,{method:'POST',body:JSON.stringify({keep:node.dataset.keep,merge_metadata:true})}); showDuplicates(); } catch(error){toast(error.message,true);} }); icons();
+}
+
+async function showEditor() {
+  setHeader('Editor', 'Crop');
+  let cropSettings=await api('/api/v1/settings');
+  const render = async (status='pending') => {
+    const data=await api(`/api/v1/crop-analyses?status=${status}`);
+    workspace.innerHTML=`<div class="page editor-page"><div class="editor-toolbar"><select id="cropStatus" class="control"><option value="pending">Pending</option><option value="cropped">Cropped</option><option value="no_crop_needed">No crop needed</option><option value="failed">Failed</option><option value="all">All</option></select><label>Minimum area <input id="cropArea" class="control" type="number" min="1" max="50" value="10"></label><label>Padding <input id="cropPadding" class="control" type="number" min="0" max="10" step=".5" value="2"></label><button id="scanSelected" class="btn"><i data-lucide="scan-line"></i>Selected</button><button id="scanAll" class="btn primary"><i data-lucide="scan-search"></i>Scan library</button></div><div class="page-head"><h2>Crop candidates</h2><span class="badge">${data.items.length}</span></div><div class="item-list">${data.items.map(item=>`<article class="queue-item"><img src="${item.thumbnail_url}" alt=""><div><strong>Media #${item.media_id}</strong><small>${esc(item.status)} · ${Number(item.confidence).toFixed(0)}% confidence · removes ${Number(item.removed_area).toFixed(1)}%</small></div><div class="actions">${item.status==='pending'?`<button class="btn open-crop" data-id="${item.id}"><i data-lucide="scan-line"></i>Review</button>`:`<button class="btn reset-crop" data-id="${item.id}"><i data-lucide="rotate-ccw"></i>Reset</button>`}</div></article>`).join('')||'<div class="empty">No items for this status</div>'}</div></div>`;
+    document.querySelector('#cropStatus').value=status; document.querySelector('#cropStatus').onchange=e=>render(e.target.value);
+    document.querySelector('#cropStatus').insertAdjacentHTML('afterend','<label>Preset <select id="cropPreset" class="control"><option value="14">Cautious</option><option value="20">Normal</option><option value="28">Sensitive</option></select></label><label>Selected analysis <select id="cropSelectedMethod" class="control"><option value="local">Local</option><option value="vision">Vision model</option></select></label>');
+    document.querySelector('#cropPreset').value=String(cropSettings.crop_background_tolerance);document.querySelector('#cropArea').value=String(cropSettings.crop_min_area_percent);document.querySelector('#cropPadding').value=String(cropSettings.crop_padding_percent);document.querySelector('#cropSelectedMethod').value=cropSettings.crop_selected_analysis;
+    const persistCropSettings=async()=>{cropSettings=await api('/api/v1/settings',{method:'PATCH',body:JSON.stringify({crop_background_tolerance:Number(document.querySelector('#cropPreset').value),crop_min_area_percent:Number(document.querySelector('#cropArea').value),crop_padding_percent:Number(document.querySelector('#cropPadding').value),crop_selected_analysis:document.querySelector('#cropSelectedMethod').value})});toast('Crop settings saved')};
+    ['cropPreset','cropArea','cropPadding','cropSelectedMethod'].forEach(id=>document.querySelector(`#${id}`).onchange=persistCropSettings);
+    const options=()=>({min_area:Number(document.querySelector('#cropArea').value),padding:Number(document.querySelector('#cropPadding').value)/100,tolerance:Number(document.querySelector('#cropPreset').value)});
+    document.querySelector('#scanSelected').onclick=async()=>{if(!selectedMedia){toast('Select an image in Library first',true);return}try{const method=document.querySelector('#cropSelectedMethod').value;const result=method==='vision'?await api(`/api/v1/media/${selectedMedia.id}/crop-vision-analysis`,{method:'POST'}):await api('/api/v1/crop-analyses',{method:'POST',body:JSON.stringify({media_id:selectedMedia.id,...options()})});if(result.id){openCrop(result.id)}else{toast('No removable margins found')}}catch(error){toast(error.message,true)}};
+    document.querySelector('#scanAll').onclick=async()=>{try{const created=await api('/api/v1/crop-scan-jobs',{method:'POST',body:JSON.stringify(options())});monitorCropScan({id:created.job_id,status_url:created.status_url,progress:0,scanned:0,total:'?',candidates:0});toast('Crop scan started')}catch(error){toast(error.message,true)}};
+    document.querySelectorAll('.open-crop').forEach(n=>n.onclick=()=>openCrop(Number(n.dataset.id)));document.querySelectorAll('.reset-crop').forEach(n=>n.onclick=async()=>{await api(`/api/v1/crop-analyses/${n.dataset.id}/reset`,{method:'POST'});render(status)}); icons(); document.querySelector('#cropCount').textContent=status==='pending'?(data.items.length||''):document.querySelector('#cropCount').textContent;
+  };
+  const openCrop = async id => {
+    const item=(await api('/api/v1/crop-analyses?status=pending')).items.find(x=>x.id===id); if(!item)return;
+    const revisions=await api(`/api/v1/media/${item.media_id}/revisions`);
+    workspace.innerHTML=`<div class="page editor-page"><div class="page-head"><button class="btn" id="backEditor"><i data-lucide="chevron-left"></i>Editor</button><h2>Review crop</h2><span class="badge" id="proposalMethod">${esc(item.method)}</span></div><div class="crop-workspace"><div class="crop-source"><img id="cropSource" src="${item.content_url}" alt=""></div><canvas id="cropPreview"></canvas></div><div class="crop-controls">${['Left','Top','Right','Bottom'].map((name,index)=>`<label>${name}<input class="control crop-coordinate" data-index="${index}" type="number" value="${item.box[index]}"></label>`).join('')}<button id="resetCrop" class="icon-btn" title="Reset suggested crop"><i data-lucide="rotate-ccw"></i></button></div><div class="actions"><button class="btn" id="visionCrop"><i data-lucide="scan-eye"></i>Vision model</button><button class="btn primary" id="applyCrop"><i data-lucide="check"></i>Apply crop</button><button class="btn" id="noCrop">No crop needed</button><button class="btn" id="skipCrop">Skip</button></div><section class="revision-list"><h3>Versions</h3>${revisions.items.map(r=>`<article><img src="${r.content_url}" alt=""><span>${esc(r.operation)} · ${r.width}×${r.height} · ${formatBytes(r.file_size)}</span><button class="btn restore-revision" data-id="${r.id}" ${r.active?'disabled':''}>${r.active?'Active':'Restore'}</button></article>`).join('')}</section></div>`;
+    document.querySelector('#backEditor').onclick=render;
+    document.querySelector('#noCrop').onclick=async()=>{await api(`/api/v1/crop-analyses/${id}/no_crop_needed`,{method:'POST'});render()};
+    document.querySelector('#skipCrop').onclick=render;
+    const source=document.querySelector('#cropSource'),canvas=document.querySelector('#cropPreview'),inputs=[...document.querySelectorAll('.crop-coordinate')];
+    const previewPane=document.createElement('div');previewPane.className='crop-preview-pane';canvas.replaceWith(previewPane);previewPane.append(canvas);
+    document.querySelector('.crop-workspace').insertAdjacentHTML('beforebegin','<label class="crop-zoom">Zoom <input id="cropZoom" type="range" min="100" max="400" value="100"><output id="cropZoomValue">100%</output></label>');
+    const box=()=>inputs.map(n=>Number(n.value));
+    const applyZoom=()=>{if(!source.naturalWidth||!canvas.width)return;const factor=Number(document.querySelector('#cropZoom').value)/100;const leftPane=source.parentElement;const base=Math.min(leftPane.clientWidth/source.naturalWidth,previewPane.clientWidth/canvas.width,1);source.style.maxWidth='none';source.style.maxHeight='none';source.style.width=`${source.naturalWidth*base*factor}px`;canvas.style.width=`${canvas.width*base*factor}px`;canvas.style.height=`${canvas.height*base*factor}px`;document.querySelector('#cropZoomValue').value=`${Math.round(factor*100)}%`};
+    const draw=()=>{if(!source.naturalWidth)return;const [l,t,r,b]=box();canvas.width=Math.max(1,r-l);canvas.height=Math.max(1,b-t);canvas.getContext('2d').drawImage(source,l,t,r-l,b-t,0,0,r-l,b-t);applyZoom()}; source.onload=draw; inputs.forEach(n=>n.oninput=draw);document.querySelector('#cropZoom').oninput=applyZoom;document.querySelector('#resetCrop').onclick=()=>{inputs.forEach((n,i)=>n.value=item.box[i]);draw()};
+    let syncingPan=false;
+    const syncPan=(from,to)=>{if(syncingPan)return;syncingPan=true;const maxX=Math.max(1,from.scrollWidth-from.clientWidth),maxY=Math.max(1,from.scrollHeight-from.clientHeight);to.scrollLeft=(from.scrollLeft/maxX)*Math.max(0,to.scrollWidth-to.clientWidth);to.scrollTop=(from.scrollTop/maxY)*Math.max(0,to.scrollHeight-to.clientHeight);syncingPan=false};
+    const bindPan=(pane,other)=>{pane.onscroll=()=>syncPan(pane,other);let start=null;pane.onpointerdown=event=>{if(event.button!==0)return;start={x:event.clientX,y:event.clientY,left:pane.scrollLeft,top:pane.scrollTop};pane.setPointerCapture(event.pointerId);pane.classList.add('panning')};pane.onpointermove=event=>{if(!start)return;pane.scrollLeft=start.left-(event.clientX-start.x);pane.scrollTop=start.top-(event.clientY-start.y)};pane.onpointerup=event=>{start=null;pane.classList.remove('panning');if(pane.hasPointerCapture(event.pointerId))pane.releasePointerCapture(event.pointerId)}};
+    bindPan(source.parentElement,previewPane);bindPan(previewPane,source.parentElement);
+    document.querySelector('#visionCrop').onclick=async()=>{try{const proposal=await api(`/api/v1/media/${item.media_id}/crop-vision-analysis`,{method:'POST'});inputs.forEach((n,i)=>n.value=proposal.box[i]);document.querySelector('#proposalMethod').textContent='vision';draw();toast('Vision proposal loaded')}catch(error){toast(error.message,true)}};
+    document.querySelector('#applyCrop').onclick=async()=>{if(!confirm('Apply this crop? The original is kept in version history.'))return;try{await api(`/api/v1/crop-analyses/${id}/apply`,{method:'POST',body:JSON.stringify({box:box()})});toast('Crop applied');render()}catch(error){toast(error.message,true)}};
+    document.querySelectorAll('.restore-revision').forEach(n=>n.onclick=async()=>{if(!confirm('Restore this version?'))return;await api(`/api/v1/media/${item.media_id}/revisions/${n.dataset.id}/activate`,{method:'POST'});toast('Version restored');openCrop(id)}); icons();
+  };
+  if(selectedMedia?.type==='image'){try{const result=await api('/api/v1/crop-analyses',{method:'POST',body:JSON.stringify({media_id:selectedMedia.id,min_area:10,padding:.02})});if(result.id){openCrop(result.id);return}}catch{}}
+  await render('pending');
 }
 
 async function showCollections() {
@@ -403,21 +469,6 @@ async function showCollectionBuilder() {
   icons();
 }
 
-async function showSettings() {
-  setHeader('Settings'); const data=await api('/api/v1/settings');
-  const fontSize = savedFontSize();
-  const source = (name,label,fields) => `<section class="panel"><div class="panel-head">${label}</div><div class="panel-body">${fields.map(([key,type])=>`<div class="form-row"><label>${key} ${data[`${key}_configured`]?'(configured)':''}</label><input class="control" name="${key}" type="${type||'text'}" value="${type?'':esc(data[key]||'')}"></div>`).join('')}<button type="button" class="btn test-source" data-provider="${name}">Test</button></div></section>`;
-  workspace.innerHTML=`<div class="page"><form id="settingsForm" class="settings-grid"><div><h2>Limits</h2></div><div><div class="form-row"><label>Files per author</label><input class="control" name="max_items_per_author" type="number" min="1" value="${data.max_items_per_author}"></div><div class="form-row"><label>Maximum export size, bytes</label><input class="control" name="max_export_size_bytes" type="number" min="1" value="${data.max_export_size_bytes}"></div></div><div><h2>Sources</h2></div><div class="settings-sources">${source('danbooru','Danbooru',[['danbooru_login'],['danbooru_api_key','password']])}${source('e621','e621 / e926',[['e621_login'],['e621_api_key','password']])}${source('gelbooru','Gelbooru',[['gelbooru_user_id'],['gelbooru_api_key','password']])}${source('furaffinity','FurAffinity',[['furaffinity_cookie_a','password'],['furaffinity_cookie_b','password']])}<button type="button" id="faLogin" class="btn">Open login FurAffinity</button></div><div><h2>AI provider</h2></div><div><div class="form-row"><label>Format</label><select class="control" name="ai_api_format"><option value="openai" ${data.ai_api_format==='openai'?'selected':''}>OpenAI-compatible</option><option value="gemini" ${data.ai_api_format==='gemini'?'selected':''}>Gemini</option></select></div><div class="form-row"><label>API URL</label><input class="control" name="ai_api_url" value="${esc(data.ai_api_url||'')}"></div><div class="form-row"><label>Model</label><input class="control" name="ai_api_model" value="${esc(data.ai_api_model||'')}"></div><div class="form-row"><label>API key ${data.ai_api_key_configured?'(configured)':''}</label><input class="control" name="ai_api_key" type="password"></div><div class="form-row"><label>Prompt</label><textarea class="control" name="ai_tagging_prompt">${esc(data.ai_tagging_prompt)}</textarea></div><div class="form-actions"><button type="button" id="testProvider" class="btn">Test</button><button class="btn primary">Save</button></div></div></form></div>`;
-  document.querySelector('#settingsForm').onsubmit=async event=>{event.preventDefault();const form=new FormData(event.currentTarget);const payload={max_items_per_author:Number(form.get('max_items_per_author')),max_export_size_bytes:Number(form.get('max_export_size_bytes')),ai_api_format:form.get('ai_api_format'),ai_api_url:form.get('ai_api_url')||null,ai_api_model:form.get('ai_api_model')||null,ai_tagging_prompt:form.get('ai_tagging_prompt')};['ai_api_key','danbooru_login','danbooru_api_key','e621_login','e621_api_key','gelbooru_user_id','gelbooru_api_key','furaffinity_cookie_a','furaffinity_cookie_b'].forEach(k=>{if(form.get(k))payload[k]=form.get(k)});try{await api('/api/v1/settings',{method:'PATCH',body:JSON.stringify(payload)});toast('Settings saved');}catch(error){toast(error.message,true);}};
-  document.querySelector('#settingsForm').insertAdjacentHTML('afterbegin', `<div><h2>Interface</h2></div><div><div class="form-row"><label>Text size</label><div class="size-options" role="group" aria-label="Text size">${allowedFontSizes.map(size => `<button type="button" class="size-option${size === fontSize ? ' active' : ''}" data-font-size="${size}">${size} px</button>`).join('')}</div></div></div>`);
-  document.querySelectorAll('[data-font-size]').forEach(node => node.onclick = () => {
-    applyFontSize(node.dataset.fontSize);
-    document.querySelectorAll('[data-font-size]').forEach(option => option.classList.toggle('active', option === node));
-  });
-  document.querySelectorAll('.test-source').forEach(node=>node.onclick=async()=>{try{await api(`/api/v1/settings/source-providers/${node.dataset.provider}/test`,{method:'POST'});toast('Connection successful')}catch(error){toast(error.message,true)}}); document.querySelector('#faLogin').onclick=()=>api('/api/v1/settings/furaffinity/open-login',{method:'POST'});
-  document.querySelector('#testProvider').onclick=async()=>{try{await api('/api/v1/settings/ai-provider/test',{method:'POST'});toast('Connection successful');}catch(error){toast(error.message,true);}};
-}
-
 async function showSettingsPage() {
   setHeader('Settings', 'Interface, limits, and connections');
   const [data, tagConfig] = await Promise.all([
@@ -448,7 +499,8 @@ async function showSettingsPage() {
       ${provider('gelbooru','Gelbooru','User ID and API key',[field('gelbooru_user_id','User ID'),field('gelbooru_api_key','API key',{type:'password',secret:true})])}
       ${provider('furaffinity','FurAffinity','Cookie a and b from an active session',[field('furaffinity_cookie_a','Cookie a',{type:'password',secret:true}),field('furaffinity_cookie_b','Cookie b',{type:'password',secret:true})],'<a class="btn" href="https://www.furaffinity.net/login/" target="_blank" rel="noopener"><i data-lucide="external-link"></i>Open login</a>')}
     </div></details>
-    <details class="settings-section"><summary><span class="section-icon"><i data-lucide="sparkles"></i></span><span><strong>AI tags</strong><small>Compatible API, model, and prompt</small></span><i data-lucide="chevron-down"></i></summary><div class="settings-section-body"><div class="settings-fields-2"><div class="form-row"><label>Format API</label><select class="control" name="ai_api_format"><option value="openai" ${data.ai_api_format==='openai'?'selected':''}>OpenAI-compatible</option><option value="gemini" ${data.ai_api_format==='gemini'?'selected':''}>Gemini</option></select></div>${field('ai_api_url','API URL',{placeholder:'https://…'})}${field('ai_api_model','Model')}${field('ai_api_key','API key',{type:'password',secret:true})}</div><div class="form-row"><label>Tagging prompt</label><small class="field-hint">The prompt sent with each image.</small><textarea class="control prompt-control" name="ai_tagging_prompt">${esc(data.ai_tagging_prompt)}</textarea></div><div class="section-actions"><button type="button" id="testProvider" class="btn"><i data-lucide="plug-zap"></i>Test AI</button></div></div></details>
+    <details class="settings-section" open><summary><span class="section-icon"><i data-lucide="crop"></i></span><span><strong>Crop analysis</strong><small>Local detector thresholds and selected-image analysis mode</small></span><i data-lucide="chevron-down"></i></summary><div class="settings-section-body"><div class="settings-fields-2"><div class="form-row"><label>Detector preset</label><select class="control" name="crop_background_tolerance"><option value="14" ${data.crop_background_tolerance===14?'selected':''}>Cautious</option><option value="20" ${data.crop_background_tolerance===20?'selected':''}>Normal</option><option value="28" ${data.crop_background_tolerance===28?'selected':''}>Sensitive</option></select></div><div class="form-row"><label>Selected image analysis</label><select class="control" name="crop_selected_analysis"><option value="local" ${data.crop_selected_analysis==='local'?'selected':''}>Local</option><option value="vision" ${data.crop_selected_analysis==='vision'?'selected':''}>Vision model</option></select></div><div class="form-row"><label>Minimum removable area, %</label><input class="control" name="crop_min_area_percent" type="number" min="1" max="50" step="1" value="${data.crop_min_area_percent}"></div><div class="form-row"><label>Content padding, %</label><input class="control" name="crop_padding_percent" type="number" min="0" max="10" step=".5" value="${data.crop_padding_percent}"></div></div></div></details>
+    <details class="settings-section"><summary><span class="section-icon"><i data-lucide="scan-line"></i></span><span><strong>Crop vision model</strong><small>Optional single-image analysis through a local or remote vision model</small></span><i data-lucide="chevron-down"></i></summary><div class="settings-section-body"><div class="settings-fields-2"><div class="form-row"><label>Format API</label><select class="control" name="crop_vision_format"><option value="openai" ${data.crop_vision_format==='openai'?'selected':''}>OpenAI-compatible</option><option value="gemini" ${data.crop_vision_format==='gemini'?'selected':''}>Gemini</option></select></div>${field('crop_vision_url','API URL',{placeholder:'http://127.0.0.1:1234/v1/chat/completions'})}${field('crop_vision_model','Model')}${field('crop_vision_key','API key',{type:'password',secret:true})}</div><small class="field-hint">The full original is sent only when you explicitly run Vision analysis for one image.</small></div></details>
     <details class="settings-section"><summary><span class="section-icon"><i data-lucide="tags"></i></span><span><strong>Tag rules</strong><small>Preferred tags, blocked tags, and aliases</small></span><i data-lucide="chevron-down"></i></summary><div class="settings-section-body"><div class="settings-fields-2"><div class="form-row"><label>Preferred tags</label><small class="field-hint">One tag per line.</small><textarea class="control tag-rule-editor" name="preferred_tags">${esc(tagConfig.preferred.join('\n'))}</textarea></div><div class="form-row"><label>Blocked tags</label><small class="field-hint">Rejected from AI suggestions.</small><textarea class="control tag-rule-editor" name="blocked_tags">${esc(tagConfig.blocked.join('\n'))}</textarea></div></div><div class="form-row"><label>Aliases</label><small class="field-hint">Format: canonical_tag = alias_1, alias_2</small><textarea class="control tag-rule-editor" name="tag_aliases">${esc(Object.entries(tagConfig.aliases).map(([canonical,aliases]) => `${canonical} = ${aliases.join(', ')}`).join('\n'))}</textarea></div></div></details>
     <div class="settings-savebar"><span id="settingsState">Interface changes are saved immediately</span><button class="btn primary"><i data-lucide="save"></i>Save settings</button></div>
   </form></div>`;
@@ -481,8 +533,8 @@ async function showSettingsPage() {
   document.querySelector('#settingsForm').onsubmit = async event => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    const payload = {media_path:form.get('media_path'),export_path:form.get('export_path'),thumbnail_path:form.get('thumbnail_path'),import_staging_path:form.get('import_staging_path'),max_items_per_author:Number(form.get('max_items_per_author')),max_export_size_bytes:Number(form.get('max_export_size_mb'))*1048576,block_previously_deleted:form.has('block_previously_deleted'),ai_api_format:form.get('ai_api_format'),ai_api_url:form.get('ai_api_url')||null,ai_api_model:form.get('ai_api_model')||null,ai_tagging_prompt:form.get('ai_tagging_prompt')};
-    ['ai_api_key','danbooru_login','danbooru_api_key','e621_login','e621_api_key','gelbooru_user_id','gelbooru_api_key','furaffinity_cookie_a','furaffinity_cookie_b'].forEach(key => { if (form.get(key)) payload[key]=form.get(key); });
+    const payload = {media_path:form.get('media_path'),export_path:form.get('export_path'),thumbnail_path:form.get('thumbnail_path'),import_staging_path:form.get('import_staging_path'),max_items_per_author:Number(form.get('max_items_per_author')),max_export_size_bytes:Number(form.get('max_export_size_mb'))*1048576,block_previously_deleted:form.has('block_previously_deleted'),crop_vision_format:form.get('crop_vision_format'),crop_vision_url:form.get('crop_vision_url')||null,crop_vision_model:form.get('crop_vision_model')||null,crop_min_area_percent:Number(form.get('crop_min_area_percent')),crop_padding_percent:Number(form.get('crop_padding_percent')),crop_background_tolerance:Number(form.get('crop_background_tolerance')),crop_selected_analysis:form.get('crop_selected_analysis')};
+    ['crop_vision_key','danbooru_login','danbooru_api_key','e621_login','e621_api_key','gelbooru_user_id','gelbooru_api_key','furaffinity_cookie_a','furaffinity_cookie_b'].forEach(key => { if (form.get(key)) payload[key]=form.get(key); });
     const lines = name => String(form.get(name) || '').split(/\r?\n/).map(value => value.trim()).filter(Boolean);
     const aliases = {};
     for (const line of lines('tag_aliases')) {
@@ -493,15 +545,14 @@ async function showSettingsPage() {
     catch(error) { toast(error.message,true); }
   };
   document.querySelectorAll('.test-source').forEach(node => node.onclick = async () => { try { await api(`/api/v1/settings/source-providers/${node.dataset.provider}/test`,{method:'POST'});toast('Connection successful'); } catch(error) { toast(error.message,true); } });
-  document.querySelector('#testProvider').onclick = async () => { try { await api('/api/v1/settings/ai-provider/test',{method:'POST'});toast('Connection successful'); } catch(error) { toast(error.message,true); } };
   icons();
 }
 
-async function refreshCounts(){try{const [reviews,tags]=await Promise.all([api('/api/v1/review-items?limit=1'),api('/api/v1/tag-suggestions?status=pending')]);const total=reviews.page.total+tags.items.length;document.querySelector('#reviewCount').textContent=total||'';}catch{}}
+async function refreshCounts(){try{const [reviews,crops]=await Promise.all([api('/api/v1/review-items?limit=1'),api('/api/v1/crop-analyses?status=pending')]);document.querySelector('#reviewCount').textContent=reviews.page.total||'';document.querySelector('#cropCount').textContent=crops.items.length||'';}catch{}}
 function formatBytes(value){if(value==null)return 'unknown size';const units=['B','KB','MB','GB'];let size=value,index=0;while(size>=1024&&index<3){size/=1024;index++;}return `${size.toFixed(index?1:0)} ${units[index]}`;}
 
-const views={library:showLibrary,import:showImport,review:showReview,duplicates:showDuplicates,collections:showCollections,settings:showSettingsPage};
+const views={library:showLibrary,import:showImport,review:showReview,duplicates:showDuplicates,editor:showEditor,collections:showCollections,settings:showSettingsPage};
 async function navigate(view){currentView=view;document.querySelectorAll('.nav-item').forEach(node=>node.classList.toggle('active',node.dataset.view===view));workspace.innerHTML='<div class="empty">Loading...</div>';try{await views[view]();}catch(error){workspace.innerHTML='<div class="empty">Could not load this section</div>';toast(error.message,true);}icons();}
 document.querySelectorAll('.nav-item').forEach(node=>node.onclick=()=>navigate(node.dataset.view));
 window.addEventListener('hashchange',()=>navigate(location.hash.slice(1)||'library'));
-navigate(location.hash.slice(1)||'library');refreshCounts();icons();
+navigate(location.hash.slice(1)||'library');refreshCounts();restoreCropScanMonitor();icons();

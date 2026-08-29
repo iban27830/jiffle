@@ -446,11 +446,6 @@ def _legacy_runtime_settings(settings, config_path):
     values = {
         "max_items_per_author": _positive_int(payload.get("max_per_author")) or settings.max_items_per_author,
         "max_export_size_bytes": (_positive_int(payload.get("max_export_size_mb")) or 50) * 1024 * 1024,
-        "ai_api_url": _string_or_none(payload.get("ai_api_url")),
-        "ai_api_key": _string_or_none(payload.get("ai_api_key")),
-        "ai_api_model": _string_or_none(payload.get("ai_api_model")),
-        "ai_api_format": payload.get("ai_api_format") if payload.get("ai_api_format") in {"openai", "gemini"} else "openai",
-        "ai_tagging_prompt": _string_or_none(payload.get("ai_api_prompt")) or settings.ai_tagging_prompt,
         "danbooru_login": _auth_value(danbooru, "login"),
         "danbooru_api_key": _auth_value(danbooru, "api_key"),
         "e621_login": _auth_value(e621, "login"),

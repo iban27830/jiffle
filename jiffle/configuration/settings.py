@@ -18,11 +18,14 @@ class Settings:
     max_items_per_author: int = 5
     max_export_size_bytes: int = 50 * 1024 * 1024
     block_previously_deleted: bool = False
-    ai_api_url: str | None = None
-    ai_api_key: str | None = None
-    ai_api_model: str | None = None
-    ai_api_format: str = "openai"
-    ai_tagging_prompt: str = "Return JSON with a tags array describing this media."
+    crop_vision_url: str | None = None
+    crop_vision_key: str | None = None
+    crop_vision_model: str | None = None
+    crop_vision_format: str = "openai"
+    crop_min_area_percent: float = 10.0
+    crop_padding_percent: float = 2.0
+    crop_background_tolerance: int = 14
+    crop_selected_analysis: str = "local"
     danbooru_login: str | None = None
     danbooru_api_key: str | None = None
     e621_login: str | None = None
@@ -62,10 +65,10 @@ class Settings:
             export_path=Path(
                 os.environ.get("JIFFLE_EXPORT_PATH", project_root / "collections")
             ).resolve(),
-            ai_api_url=os.environ.get("JIFFLE_AI_API_URL"),
-            ai_api_key=os.environ.get("JIFFLE_AI_API_KEY"),
-            ai_api_model=os.environ.get("JIFFLE_AI_API_MODEL"),
-            ai_api_format=os.environ.get("JIFFLE_AI_API_FORMAT", "openai"),
+            crop_vision_url=os.environ.get("JIFFLE_CROP_VISION_URL"),
+            crop_vision_key=os.environ.get("JIFFLE_CROP_VISION_KEY"),
+            crop_vision_model=os.environ.get("JIFFLE_CROP_VISION_MODEL"),
+            crop_vision_format=os.environ.get("JIFFLE_CROP_VISION_FORMAT", "openai"),
         )
         legacy_configuration_path = data_root / "settings.json"
         source_path = (
@@ -75,11 +78,15 @@ class Settings:
         )
         if source_path.is_file():
             payload = json.loads(source_path.read_text(encoding="utf-8"))
+            legacy_ai_keys = {
+                "ai_api_url", "ai_api_key", "ai_api_model", "ai_api_format",
+                "ai_tagging_prompt", "ai_api_prompt",
+            }
             allowed = {
                 "media_path", "thumbnail_path", "import_staging_path", "export_path",
                 "max_items_per_author", "max_export_size_bytes", "block_previously_deleted",
-                "ai_api_url",
-                "ai_api_key", "ai_api_model", "ai_api_format", "ai_tagging_prompt",
+                "crop_vision_url", "crop_vision_key", "crop_vision_model", "crop_vision_format",
+                "crop_min_area_percent", "crop_padding_percent", "crop_background_tolerance", "crop_selected_analysis",
                 "danbooru_login", "danbooru_api_key", "e621_login", "e621_api_key",
                 "gelbooru_user_id", "gelbooru_api_key", "furaffinity_cookie_a",
                 "furaffinity_cookie_b",
@@ -89,6 +96,8 @@ class Settings:
                 if key in values and values[key]:
                     values[key] = Path(values[key]).resolve()
             settings = replace(settings, **values)
+            if legacy_ai_keys.intersection(payload):
+                persist_settings(settings)
         return settings
 
 
@@ -104,11 +113,14 @@ def persist_settings(settings: Settings) -> None:
         "max_items_per_author": settings.max_items_per_author,
         "max_export_size_bytes": settings.max_export_size_bytes,
         "block_previously_deleted": settings.block_previously_deleted,
-        "ai_api_url": settings.ai_api_url,
-        "ai_api_key": settings.ai_api_key,
-        "ai_api_model": settings.ai_api_model,
-        "ai_api_format": settings.ai_api_format,
-        "ai_tagging_prompt": settings.ai_tagging_prompt,
+        "crop_vision_url": settings.crop_vision_url,
+        "crop_vision_key": settings.crop_vision_key,
+        "crop_vision_model": settings.crop_vision_model,
+        "crop_vision_format": settings.crop_vision_format,
+        "crop_min_area_percent": settings.crop_min_area_percent,
+        "crop_padding_percent": settings.crop_padding_percent,
+        "crop_background_tolerance": settings.crop_background_tolerance,
+        "crop_selected_analysis": settings.crop_selected_analysis,
         "danbooru_login": settings.danbooru_login,
         "danbooru_api_key": settings.danbooru_api_key,
         "e621_login": settings.e621_login,
