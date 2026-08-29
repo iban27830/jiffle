@@ -1,5 +1,6 @@
 from collections.abc import Callable
 import sqlite3
+from urllib.parse import urlsplit, urlunsplit
 
 from jiffle.infrastructure.database.connection import get_database
 
@@ -312,6 +313,54 @@ def migration_12(connection: sqlite3.Connection) -> None:
     )
 
 
+def migration_13(connection: sqlite3.Connection) -> None:
+    connection.execute("ALTER TABLE import_candidates ADD COLUMN source_metadata_json TEXT")
+
+    # Repair URL imports that were accepted from Review before source metadata
+    # was retained on the candidate.
+    rows = connection.execute(
+        "SELECT candidate.media_item_id, url.submitted_url "
+        "FROM import_candidates candidate "
+        "JOIN url_import_candidates url ON url.job_id=candidate.job_id "
+        "WHERE candidate.status='accepted' AND candidate.media_item_id IS NOT NULL"
+    ).fetchall()
+    for media_item_id, submitted_url in rows:
+        parsed = urlsplit(submitted_url)
+        canonical_url = urlunsplit(
+            (parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", "")
+        )
+        source = connection.execute(
+            "SELECT media_item_id, canonical_url, direct_media_url, provider, "
+            "remote_id, author, domain FROM media_sources WHERE canonical_url=?",
+            (canonical_url,),
+        ).fetchone()
+        if source is None or int(source[0]) == int(media_item_id):
+            continue
+        if connection.execute(
+            "SELECT 1 FROM media_sources WHERE media_item_id=?", (media_item_id,)
+        ).fetchone():
+            continue
+        old_media_item_id = int(source[0])
+        old_item = connection.execute(
+            "SELECT deleted_at FROM media_items WHERE id=?", (old_media_item_id,)
+        ).fetchone()
+        if old_item is None or old_item[0] is None:
+            continue
+        connection.execute(
+            "UPDATE media_items SET source_url=?, author=?, domain=? WHERE id=?",
+            (source[1], source[5], source[6], media_item_id),
+        )
+        connection.execute(
+            "INSERT OR IGNORE INTO media_tags (media_item_id, tag) "
+            "SELECT ?, tag FROM media_tags WHERE media_item_id=?",
+            (media_item_id, old_media_item_id),
+        )
+        connection.execute(
+            "UPDATE media_sources SET media_item_id=? WHERE media_item_id=?",
+            (media_item_id, old_media_item_id),
+        )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -325,6 +374,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (10, migration_10),
     (11, migration_11),
     (12, migration_12),
+    (13, migration_13),
 )
 
 

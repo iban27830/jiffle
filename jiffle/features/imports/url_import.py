@@ -89,10 +89,11 @@ def run_url_import_job(
             cursor = connection.execute(
                 "INSERT INTO import_candidates "
                 "(job_id,source_path,original_name,media_type,content_hash,width,height,"
-                "file_size,status,stored_path) VALUES (?,?,?,?,?,?,?,?, 'review', ?)",
+                "file_size,status,stored_path,source_metadata_json) "
+                "VALUES (?,?,?,?,?,?,?,?, 'review', ?, ?)",
                 (job_id, submitted_url, Path(temporary).name, inspection.media_type,
                  inspection.content_hash, inspection.width, inspection.height,
-                 inspection.file_size, temporary.name),
+                 inspection.file_size, temporary.name, _serialize_source(source)),
             )
             review = connection.execute(
                 "INSERT INTO review_items (import_candidate_id, reason) VALUES (?, 'previously_deleted')",
@@ -164,6 +165,19 @@ def _attach_source(connection, media_item_id, source) -> None:
             source.provider, source.remote_id, source.author, source.domain,
         ),
     )
+
+
+def _serialize_source(source) -> str:
+    return json.dumps({
+        "canonical_url": source.canonical_url,
+        "direct_media_url": source.direct_media_url,
+        "provider": source.provider,
+        "remote_id": source.remote_id,
+        "author": source.author,
+        "domain": source.domain,
+        "tags": list(source.tags),
+        "file_extension": source.file_extension,
+    })
 
 
 def _running(connection, job_id):

@@ -23,6 +23,7 @@ def accept_review_item(
     source: SourceMedia | None = None,
 ) -> int:
     row = _pending_review(connection, review_id)
+    source = source or _candidate_source(row["source_metadata_json"])
     staged = _staged_path(settings, row["stored_path"])
     if not staged.is_file():
         raise ReviewFailure("review.file_missing", "The staged file is unavailable.")
@@ -163,7 +164,8 @@ def _pending_review(connection: sqlite3.Connection, review_id: int) -> sqlite3.R
     row = connection.execute(
         "SELECT review.id, review.status, candidate.id AS candidate_id, "
         "candidate.stored_path, candidate.media_type, candidate.content_hash, "
-        "candidate.width, candidate.height, candidate.file_size "
+        "candidate.width, candidate.height, candidate.file_size, "
+        "candidate.source_metadata_json "
         "FROM review_items review JOIN import_candidates candidate "
         "ON candidate.id=review.import_candidate_id WHERE review.id=?",
         (review_id,),
@@ -175,6 +177,22 @@ def _pending_review(connection: sqlite3.Connection, review_id: int) -> sqlite3.R
     if not row["stored_path"]:
         raise ReviewFailure("review.file_missing", "The staged file is unavailable.")
     return row
+
+
+def _candidate_source(raw_metadata: str | None) -> SourceMedia | None:
+    if not raw_metadata:
+        return None
+    payload = json.loads(raw_metadata)
+    return SourceMedia(
+        canonical_url=payload["canonical_url"],
+        direct_media_url=payload["direct_media_url"],
+        provider=payload["provider"],
+        remote_id=payload["remote_id"],
+        author=payload.get("author"),
+        domain=payload["domain"],
+        tags=tuple(payload.get("tags", ())),
+        file_extension=payload["file_extension"],
+    )
 
 
 def _staged_path(settings: Settings, stored_path: str) -> Path:
