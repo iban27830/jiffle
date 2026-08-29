@@ -1,0 +1,125 @@
+from dataclasses import dataclass
+from dataclasses import replace
+import json
+import os
+from pathlib import Path
+
+
+@dataclass(frozen=True)
+class Settings:
+    database_path: Path
+    media_path: Path
+    thumbnail_path: Path
+    configuration_file_path: Path | None = None
+    import_staging_path: Path | None = None
+    export_path: Path | None = None
+    initialize_database: bool = True
+    run_jobs_inline: bool = False
+    max_items_per_author: int = 5
+    max_export_size_bytes: int = 50 * 1024 * 1024
+    block_previously_deleted: bool = False
+    ai_api_url: str | None = None
+    ai_api_key: str | None = None
+    ai_api_model: str | None = None
+    ai_api_format: str = "openai"
+    ai_tagging_prompt: str = "Return JSON with a tags array describing this media."
+    danbooru_login: str | None = None
+    danbooru_api_key: str | None = None
+    e621_login: str | None = None
+    e621_api_key: str | None = None
+    gelbooru_user_id: str | None = None
+    gelbooru_api_key: str | None = None
+    furaffinity_cookie_a: str | None = None
+    furaffinity_cookie_b: str | None = None
+
+    @property
+    def resolved_import_staging_path(self) -> Path:
+        return self.import_staging_path or self.database_path.parent / "import-staging"
+
+    @property
+    def resolved_export_path(self) -> Path:
+        return self.export_path or self.database_path.parent / "exports"
+
+    @property
+    def configuration_path(self) -> Path:
+        return self.configuration_file_path or self.database_path.parent / "settings.json"
+
+    @classmethod
+    def from_environment(cls) -> "Settings":
+        project_root = Path(__file__).resolve().parents[2]
+        data_root = Path(os.environ.get("JIFFLE_DATA_ROOT", project_root / "jiffle-data")).resolve()
+        configuration_path = Path(
+            os.environ.get("JIFFLE_CONFIG_PATH", project_root / "settings.json")
+        ).resolve()
+        settings = cls(
+            database_path=data_root / "jiffle-v2.db",
+            media_path=Path(os.environ.get("JIFFLE_MEDIA_PATH", project_root / "media")).resolve(),
+            thumbnail_path=Path(
+                os.environ.get("JIFFLE_THUMBNAIL_PATH", project_root / "thumbnails")
+            ).resolve(),
+            configuration_file_path=configuration_path,
+            import_staging_path=project_root / "import-staging",
+            export_path=Path(
+                os.environ.get("JIFFLE_EXPORT_PATH", project_root / "collections")
+            ).resolve(),
+            ai_api_url=os.environ.get("JIFFLE_AI_API_URL"),
+            ai_api_key=os.environ.get("JIFFLE_AI_API_KEY"),
+            ai_api_model=os.environ.get("JIFFLE_AI_API_MODEL"),
+            ai_api_format=os.environ.get("JIFFLE_AI_API_FORMAT", "openai"),
+        )
+        legacy_configuration_path = data_root / "settings.json"
+        source_path = (
+            settings.configuration_path
+            if settings.configuration_path.is_file()
+            else legacy_configuration_path
+        )
+        if source_path.is_file():
+            payload = json.loads(source_path.read_text(encoding="utf-8"))
+            allowed = {
+                "media_path", "thumbnail_path", "import_staging_path", "export_path",
+                "max_items_per_author", "max_export_size_bytes", "block_previously_deleted",
+                "ai_api_url",
+                "ai_api_key", "ai_api_model", "ai_api_format", "ai_tagging_prompt",
+                "danbooru_login", "danbooru_api_key", "e621_login", "e621_api_key",
+                "gelbooru_user_id", "gelbooru_api_key", "furaffinity_cookie_a",
+                "furaffinity_cookie_b",
+            }
+            values = {key: value for key, value in payload.items() if key in allowed}
+            for key in ("media_path", "thumbnail_path", "import_staging_path", "export_path"):
+                if key in values and values[key]:
+                    values[key] = Path(values[key]).resolve()
+            settings = replace(settings, **values)
+        return settings
+
+
+def persist_settings(settings: Settings) -> None:
+    path = settings.configuration_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    payload = {
+        "media_path": str(settings.media_path),
+        "thumbnail_path": str(settings.thumbnail_path),
+        "import_staging_path": str(settings.resolved_import_staging_path),
+        "export_path": str(settings.resolved_export_path),
+        "max_items_per_author": settings.max_items_per_author,
+        "max_export_size_bytes": settings.max_export_size_bytes,
+        "block_previously_deleted": settings.block_previously_deleted,
+        "ai_api_url": settings.ai_api_url,
+        "ai_api_key": settings.ai_api_key,
+        "ai_api_model": settings.ai_api_model,
+        "ai_api_format": settings.ai_api_format,
+        "ai_tagging_prompt": settings.ai_tagging_prompt,
+        "danbooru_login": settings.danbooru_login,
+        "danbooru_api_key": settings.danbooru_api_key,
+        "e621_login": settings.e621_login,
+        "e621_api_key": settings.e621_api_key,
+        "gelbooru_user_id": settings.gelbooru_user_id,
+        "gelbooru_api_key": settings.gelbooru_api_key,
+        "furaffinity_cookie_a": settings.furaffinity_cookie_a,
+        "furaffinity_cookie_b": settings.furaffinity_cookie_b,
+    }
+    with temporary.open("w", encoding="utf-8") as file:
+        json.dump(payload, file, indent=2)
+        file.flush()
+        os.fsync(file.fileno())
+    os.replace(temporary, path)

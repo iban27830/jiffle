@@ -1,0 +1,27 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local development tools and assistant instructions
+AGENTS.md
+/run-tests.ps1
+/docs/
+/tests/
+.codex/
+.idea/
+.vscode/
+*.code-workspace
+
+# User data and secrets
+/settings.json
+/jiffle-data/
+/thumbnails/
+/collections/
+/media/
+/import-staging/
+*.tmp
+*.log

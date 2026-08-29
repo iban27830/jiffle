@@ -1,0 +1,507 @@
+﻿import {api, waitForJob} from './api.js';
+
+import {parseLibrarySearch, withAuthorFilter, toggleSearchTerm} from './library_search.js';
+import {droppedUrl} from './import_drop.js';
+
+const workspace = document.querySelector('#workspace');
+const title = document.querySelector('#viewTitle');
+const meta = document.querySelector('#viewMeta');
+const actions = document.querySelector('#headerActions');
+const statusText = document.querySelector('#statusText');
+const jobStatus = document.querySelector('#jobStatus');
+let currentView = 'library';
+let libraryOffset = 0;
+let selectedMedia = null;
+let includeTag = ''; let excludeTag = '';
+let librarySearch = '';
+let reloadLibrary = null;
+
+const FONT_SIZE_KEY = 'jiffle-font-size';
+const allowedFontSizes = [14, 16, 18, 20];
+const LIBRARY_PREFS_KEY = 'jiffle-library-preferences';
+const defaultLibraryPrefs = {pageSize: 40, cardSize: 'medium', showCardInfo: true, inspectorWidth: 320};
+function libraryPrefs() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(LIBRARY_PREFS_KEY) || '{}');
+    return {...defaultLibraryPrefs, ...saved};
+  } catch { return {...defaultLibraryPrefs}; }
+}
+function saveLibraryPrefs(changes) {
+  const next = {...libraryPrefs(), ...changes};
+  try { localStorage.setItem(LIBRARY_PREFS_KEY, JSON.stringify(next)); } catch {}
+  return next;
+}
+function applyLibraryPrefs() {
+  const prefs = libraryPrefs();
+  const cardWidths = {small: 130, medium: 175, large: 230};
+  document.documentElement.style.setProperty('--gallery-card-min', `${cardWidths[prefs.cardSize] || cardWidths.medium}px`);
+  document.documentElement.style.setProperty('--inspector-width', `${prefs.inspectorWidth}px`);
+  document.documentElement.classList.toggle('hide-card-info', !prefs.showCardInfo);
+  return prefs;
+}
+function applyFontSize(value) {
+  const size = allowedFontSizes.includes(Number(value)) ? Number(value) : 16;
+  document.documentElement.style.setProperty('--base-font-size', `${size}px`);
+  try { localStorage.setItem(FONT_SIZE_KEY, String(size)); } catch {}
+  return size;
+}
+function savedFontSize() {
+  try { return Number(localStorage.getItem(FONT_SIZE_KEY)) || 16; } catch { return 16; }
+}
+applyFontSize(savedFontSize());
+applyLibraryPrefs();
+
+const icons = () => window.lucide?.createIcons();
+const button = (label, icon, extra = '') => `<button class="btn ${extra}"><i data-lucide="${icon}"></i>${label}</button>`;
+const esc = value => String(value ?? '').replace(/[&<>"]/g, character => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[character]));
+
+function toast(message, error = false) {
+  const node = document.querySelector('#toast');
+  node.textContent = message;
+  node.className = `toast visible${error ? ' error' : ''}`;
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => node.className = 'toast', 2600);
+}
+
+function setHeader(name, detail = '', controls = '') {
+  title.textContent = name;
+  meta.textContent = detail;
+  actions.innerHTML = controls;
+  icons();
+}
+
+function activeFiltersHtml() {
+  return parseLibrarySearch(librarySearch).terms.map(term => {
+    const excluded = term.startsWith('-');
+    const value = excluded ? term.slice(1) : term;
+    return `<span class="filter-chip${excluded ? ' excluded' : ''}">${excluded ? 'Not: ' : ''}${esc(value)}<button type="button" data-remove-term="${esc(term)}" title="Remove filter"><i data-lucide="x"></i></button></span>`;
+  }).join('');
+}
+
+function tagHtml(tag) {
+  const terms = parseLibrarySearch(librarySearch).terms;
+  const included = terms.includes(tag);
+  const excluded = terms.includes(`-${tag}`);
+  const state = included ? ' included' : excluded ? ' excluded' : '';
+  return `<span class="tag tag-filter${state}" data-include-tag="${esc(tag)}" role="button" tabindex="0" title="Add to search">${esc(tag)}<button type="button" class="tag-exclude" data-exclude-tag="${esc(tag)}" title="Exclude from search"><i data-lucide="circle-minus"></i></button></span>`;
+}
+
+function authorHtml(author) {
+  if (!author) return '<span class="muted-value">Unknown author</span>';
+  const selectedAuthors = parseLibrarySearch(librarySearch).authors;
+  return author.split(',').map(value => value.trim()).filter(Boolean).map(value => {
+    const selected = selectedAuthors.includes(value) ? ' included' : '';
+    return `<button type="button" class="tag tag-filter author-filter${selected}" data-include-author="${esc(value)}" title="Search by author">${esc(value)}</button>`;
+  }).join('');
+}
+
+function bindAuthorFilters(container = document) {
+  container.querySelectorAll('[data-include-author]').forEach(node => {
+    node.onclick = () => applyAuthorFilter(node.dataset.includeAuthor);
+  });
+}
+
+function applyAuthorFilter(author) {
+  const input = document.querySelector('#search');
+  if (!input) return;
+  librarySearch = withAuthorFilter(input.value.trim(), author);
+  input.value = librarySearch;
+  libraryOffset = 0;
+  if (reloadLibrary) reloadLibrary(); else showLibrary();
+}
+
+function appendSearchTerm(term) {
+  const input = document.querySelector('#search');
+  if (!input) return;
+  librarySearch = toggleSearchTerm(input.value.trim(), term);
+  input.value = librarySearch;
+  libraryOffset = 0;
+  if (reloadLibrary) reloadLibrary(); else showLibrary();
+}
+
+function bindLibraryFilters(load) {
+  document.querySelectorAll('[data-remove-term]').forEach(node => node.onclick = () => appendSearchTerm(node.dataset.removeTerm));
+}
+
+async function runJob(start, onCreated) {
+  const created = await start();
+  onCreated?.(created);
+  const job = await waitForJob(created.status_url, value => {
+    jobStatus.textContent = `${value.type}: ${value.progress}%`;
+  });
+  jobStatus.textContent = '';
+  return job;
+}
+
+async function showLibrary() {
+  const prefs = applyLibraryPrefs();
+  setHeader('Library', '', button('Import', 'upload', 'primary'));
+  actions.querySelector('button').onclick = () => navigate('import');
+  workspace.innerHTML = `<div class="library-layout"><div class="library-main">
+    <div class="toolbar"><input id="search" class="control search" placeholder="Tag, author, domain, or source"><select id="mediaType" class="control toolbar-select"><option value="">All types</option><option value="image">Images</option><option value="video">Videos</option></select><label class="toolbar-count" title="Items per page"><span>Per page</span><select id="pageSize" class="control">${[20,40,60,100].map(size => `<option value="${size}" ${size === prefs.pageSize ? 'selected' : ''}>${size}</option>`).join('')}</select></label><button id="searchBtn" class="icon-btn" title="Search"><i data-lucide="search"></i></button><div id="activeFilters" class="active-filters"></div></div>
+    <div id="gallery" class="gallery"></div><div id="pager" class="pager"></div></div><div id="inspectorResize" class="inspector-resize" title="Resize panel"></div><aside id="inspector" class="inspector"><div class="empty">Select a file</div></aside></div>`;
+  document.querySelector('#search').value = librarySearch;
+  const load = async () => {
+    const pageSize = libraryPrefs().pageSize;
+    librarySearch = document.querySelector('#search').value.trim();
+    const parsedSearch = parseLibrarySearch(librarySearch);
+    const query = '';
+    const authorFilter = parsedSearch.authors.length ? `&author=${encodeURIComponent(parsedSearch.authors.at(-1))}` : '';
+    const type = document.querySelector('#mediaType').value;
+    const filters = `${parsedSearch.includedTags.map(tag => `&tag=${encodeURIComponent(tag)}`).join('')}${parsedSearch.excludedTags.map(tag => `&exclude_tag=${encodeURIComponent(tag)}`).join('')}`;
+    const data = await api(`/api/v1/media?limit=${pageSize}&offset=${libraryOffset}&q=${query}&type=${type}${authorFilter}${filters}`);
+    meta.textContent = `${data.page.total} files`;
+    statusText.textContent = `Showing ${data.items.length}`;
+    document.querySelector('#activeFilters').innerHTML = activeFiltersHtml();
+    document.querySelector('#gallery').innerHTML = data.items.length ? data.items.map(item => `<button class="media-card" data-id="${item.id}"><img loading="lazy" src="${item.thumbnail_url}" alt=""><span class="media-card-body"><strong>${esc(item.author || 'Unknown author')}</strong><small>${esc(item.domain || item.type)} · ${item.width || '?'}×${item.height || '?'}</small></span></button>`).join('') : '<div class="empty">The library is empty</div>';
+    document.querySelectorAll('.media-card').forEach(card => card.onclick = () => inspectMedia(Number(card.dataset.id)));
+    if (selectedMedia) document.querySelector(`.media-card[data-id="${selectedMedia.id}"]`)?.classList.add('selected');
+    const from = data.page.total ? libraryOffset + 1 : 0;
+    const to = Math.min(libraryOffset + data.items.length, data.page.total);
+    document.querySelector('#pager').innerHTML = `<span class="page-range">${from}-${to} of ${data.page.total}</span><button class="btn" id="prev" ${libraryOffset === 0 ? 'disabled' : ''}><i data-lucide="chevron-left"></i>Previous</button><button class="btn" id="next" ${libraryOffset + pageSize >= data.page.total ? 'disabled' : ''}>Next<i data-lucide="chevron-right"></i></button>`;
+    document.querySelector('#prev').onclick = () => { libraryOffset = Math.max(0, libraryOffset - pageSize); load(); };
+    document.querySelector('#next').onclick = () => { libraryOffset += pageSize; load(); };
+    bindLibraryFilters(load);
+    if (selectedMedia) {
+      const authorContainer = document.querySelector('#inspector .author-tags');
+      if (authorContainer) {
+        authorContainer.innerHTML = authorHtml(selectedMedia.author);
+        bindAuthorFilters(authorContainer);
+      }
+      const tagContainer = document.querySelector('#inspector .tag-scroll .tags');
+      if (tagContainer) {
+        tagContainer.innerHTML = selectedMedia.tags.map(tagHtml).join('') || 'No tags';
+        tagContainer.querySelectorAll('[data-include-tag]').forEach(node => {
+          const include = () => appendSearchTerm(node.dataset.includeTag);
+          node.onclick = event => { if (!event.target.closest('[data-exclude-tag]')) include(); };
+          node.onkeydown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); include(); } };
+        });
+        tagContainer.querySelectorAll('[data-exclude-tag]').forEach(node => node.onclick = event => { event.stopPropagation(); appendSearchTerm(`-${node.dataset.excludeTag}`); });
+        icons();
+      }
+    }
+    icons();
+  };
+  reloadLibrary = load;
+  document.querySelector('#searchBtn').onclick = () => { libraryOffset = 0; load(); };
+  document.querySelector('#search').onkeydown = event => { if (event.key === 'Enter') { libraryOffset = 0; load(); } };
+  document.querySelector('#mediaType').onchange = () => { libraryOffset = 0; load(); };
+  document.querySelector('#pageSize').onchange = event => { saveLibraryPrefs({pageSize:Number(event.target.value)}); libraryOffset = 0; load(); };
+  bindInspectorResize();
+  icons(); await load();
+}
+
+function bindInspectorResize() {
+  const handle = document.querySelector('#inspectorResize');
+  const layout = document.querySelector('.library-layout');
+  if (!handle || !layout) return;
+  handle.onpointerdown = event => {
+    if (matchMedia('(max-width: 900px)').matches) return;
+    handle.setPointerCapture(event.pointerId);
+    document.body.classList.add('resizing-inspector');
+  };
+  handle.onpointermove = event => {
+    if (!handle.hasPointerCapture(event.pointerId)) return;
+    const bounds = layout.getBoundingClientRect();
+    const width = Math.round(Math.min(bounds.width * .45, Math.max(260, bounds.right - event.clientX)));
+    document.documentElement.style.setProperty('--inspector-width', `${width}px`);
+  };
+  handle.onpointerup = event => {
+    if (!handle.hasPointerCapture(event.pointerId)) return;
+    handle.releasePointerCapture(event.pointerId);
+    document.body.classList.remove('resizing-inspector');
+    const width = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--inspector-width'), 10);
+    saveLibraryPrefs({inspectorWidth:width});
+  };
+}
+
+async function inspectMedia(id) {
+  selectedMedia = await api(`/api/v1/media/${id}`);
+  document.querySelectorAll('.media-card').forEach(card => card.classList.toggle('selected', Number(card.dataset.id) === id));
+  const pane = document.querySelector('#inspector');
+  const preview = selectedMedia.type === 'video' ? `<video class="inspector-preview" src="${selectedMedia.content_url}" controls></video>` : `<img class="inspector-preview" src="${selectedMedia.content_url}" alt="">`;
+  pane.classList.add('has-media');
+  pane.innerHTML = `<button id="closeInspector" class="icon-btn inspector-close" title="Close"><i data-lucide="x"></i></button>${preview}<h2>${esc(selectedMedia.author || 'Unknown author')}</h2><div class="field"><label>Source</label><a href="${esc(selectedMedia.source_url || '#')}" target="_blank" rel="noopener" class="ellipsis">${esc(selectedMedia.source_url || 'Not specified')}</a></div><div class="field"><label>Size</label>${selectedMedia.width || '?'} × ${selectedMedia.height || '?'} · ${formatBytes(selectedMedia.file_size)}</div><details class="tag-section field" open><summary><span>Tags</span><span class="badge">${selectedMedia.tags.length}</span></summary><div class="tag-scroll"><div class="tags">${selectedMedia.tags.map(tagHtml).join('') || 'No tags'}</div></div></details><div class="form-actions inspector-actions"><button id="addCollection" class="btn"><i data-lucide="folder-plus"></i>Build collection</button><button id="deleteMedia" class="icon-btn danger" title="Delete"><i data-lucide="trash-2"></i></button></div>`;
+  const authorHeading = pane.querySelector('h2');
+  authorHeading.insertAdjacentHTML('beforebegin', '<div class="field author-field"><label>Author</label></div>');
+  authorHeading.className = 'author-value';
+  authorHeading.dataset.includeAuthor = selectedMedia.author || '';
+  authorHeading.title = selectedMedia.author ? 'Search by author' : '';
+  authorHeading.outerHTML = `<div class="tags author-tags">${authorHtml(selectedMedia.author)}</div>`;
+  bindAuthorFilters(pane);
+  document.querySelector('#closeInspector').onclick = () => pane.classList.remove('has-media');
+  pane.querySelectorAll('[data-include-tag]').forEach(node => {
+    const include = () => appendSearchTerm(node.dataset.includeTag);
+    node.onclick = event => { if (!event.target.closest('[data-exclude-tag]')) include(); };
+    node.onkeydown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); include(); } };
+  });
+  pane.querySelectorAll('[data-exclude-tag]').forEach(node => node.onclick = event => { event.stopPropagation(); appendSearchTerm(`-${node.dataset.excludeTag}`); });
+  document.querySelector('#deleteMedia').onclick = async () => { if (!confirm('Delete this file?')) return; try { await api(`/api/v1/media/${id}`, {method:'DELETE'}); toast('File deleted'); selectedMedia=null; showLibrary(); } catch(error) { toast(error.message,true); } };
+  document.querySelector('#addCollection').onclick = () => showCollectionBuilder();
+  icons();
+}
+
+async function showImport() {
+  setHeader('Import', 'Drop an image or paste a link');
+  const history = await api('/api/v1/history?limit=100&entity_type=background_job');
+  const historyLabels = {'import.pending':'Importing','import.accepted':'Imported','import.review':'Waiting for review','import.duplicate':'Already imported or awaiting review','import.failed':'Import failed'};
+  const historyRows = history.items.map(item=>`<article class="history-row"><i data-lucide="${item.event_type === 'import.pending' ? 'loader-circle' : 'activity'}" class="${item.event_type === 'import.pending' ? 'spin' : ''}"></i><div><strong>${esc(historyLabels[item.event_type] || item.event_type)}</strong><small>Import #${item.entity_id}</small></div><time>${esc(item.created_at)}</time></article>`).join('');
+  workspace.innerHTML = `<div class="page"><section id="dropImport" class="drop-import" tabindex="0"><i data-lucide="upload-cloud"></i><strong>Drop an image, video, or link here</strong><span>or paste a supported source URL</span><input id="fileImport" type="file" accept="image/*,video/*" hidden><button id="chooseImport" type="button" class="btn primary"><i data-lucide="file-up"></i>Choose file</button><input id="pasteImport" class="control" type="url" placeholder="https://..." aria-label="Image URL"><button id="submitUrlImport" type="button" class="btn"><i data-lucide="link"></i>Import URL</button></section><section class="import-history"><div class="page-head"><h2>Import history</h2><span class="badge">${history.page.total}</span></div><div class="item-list">${historyRows || '<div class="empty">History is empty</div>'}</div></section></div>`;
+  const drop = document.querySelector('#dropImport'); const fileInput = document.querySelector('#fileImport');
+  const showQueued = created => { const list=document.querySelector('.import-history .item-list'); const empty=list.querySelector('.empty'); if(empty) empty.remove(); list.insertAdjacentHTML('afterbegin',`<article class="history-row"><i data-lucide="loader-circle" class="spin"></i><div><strong>Importing</strong><small>Import #${created.job_id}</small></div><time>now</time></article>`); document.querySelector('.import-history .badge').textContent=String(Number(document.querySelector('.import-history .badge').textContent)+1); icons(); };
+  const submitFile = async file => { if (!file) return; try { const body = new FormData(); body.append('file', file); const job = await runJob(() => api('/api/v1/import-uploads',{method:'POST',body}),showQueued); toast(`Import: ${job.result.outcome}`); refreshCounts(); showImport(); } catch (error) { toast(error.message,true); showImport(); } };
+  document.querySelector('#chooseImport').onclick = () => fileInput.click(); fileInput.onchange = () => submitFile(fileInput.files[0]);
+  const submitUrl = async url => { if (!url) return; try { const job=await runJob(()=>api('/api/v1/url-import-jobs',{method:'POST',body:JSON.stringify({url})}),showQueued); toast(`Import: ${job.result.outcome}`); refreshCounts(); showImport(); } catch(error){toast(error.message,true);showImport();} };
+  drop.ondragover = event => { event.preventDefault(); drop.classList.add('dragging'); }; drop.ondragleave = () => drop.classList.remove('dragging'); drop.ondrop = event => { event.preventDefault(); drop.classList.remove('dragging'); const file=event.dataTransfer.files[0]; if (file) submitFile(file); else submitUrl(droppedUrl(event.dataTransfer)); };
+  document.querySelector('#submitUrlImport').onclick = () => submitUrl(document.querySelector('#pasteImport').value.trim());
+  icons();
+}
+
+async function showReview() {
+  setHeader('Review');
+  const data = await api('/api/v1/review-items?limit=100');
+  const sourceItems = data.items.map(item => `<article class="queue-item"><img src="${item.thumbnail_url}" alt=""><div><strong>${esc(item.original_name)}</strong><small class="ellipsis">${esc(item.reason)} · ${item.width || '?'}×${item.height || '?'}</small></div><div class="actions"><button class="btn accept" data-id="${item.id}"><i data-lucide="check"></i>Accept</button><button class="btn source" data-id="${item.id}"><i data-lucide="link"></i>Source</button><button class="icon-btn danger reject" data-id="${item.id}" title="Reject"><i data-lucide="trash-2"></i></button></div></article>`).join('');
+  const groups = data.items.reduce((acc,item)=>(acc[item.reason]=(acc[item.reason]||0)+1,acc),{});
+  const summary = Object.entries(groups).map(([reason,count])=>`<span class="badge">${esc(reason)}: ${count}</span>`).join('');
+  workspace.innerHTML = `<div class="page"><div class="page-head"><h2>Needs attention</h2><span class="badge">${data.page.total}</span></div><div class="review-summary">${summary}</div><div class="item-list">${sourceItems || '<div class="empty">Nothing needs review</div>'}</div></div>`;
+  document.querySelectorAll('.accept').forEach(node => node.onclick = () => reviewAction(node.dataset.id, 'accept'));
+  document.querySelectorAll('.reject').forEach(node => node.onclick = () => reviewAction(node.dataset.id, 'reject'));
+  document.querySelectorAll('.source').forEach(node => node.onclick = async () => {
+    const url = prompt('Source URL'); if (!url) return;
+    try { await runJob(() => api(`/api/v1/review-items/${node.dataset.id}/source`,{method:'POST',body:JSON.stringify({url})})); toast('Source applied'); showReview(); }
+    catch (error) { toast(error.message,true); }
+  });
+  meta.textContent = `${data.page.total} awaiting review`; icons(); await refreshCounts();
+}
+
+async function reviewAction(id, action) {
+  try { await api(`/api/v1/review-items/${id}/${action}`,{method:'POST'}); toast(action === 'accept' ? 'File accepted' : 'File rejected'); showReview(); }
+  catch (error) { toast(error.message,true); }
+}
+
+async function showDuplicates() {
+  setHeader('Duplicates','',button('Scan','scan-search','primary'));
+  actions.querySelector('button').onclick = async () => { try { await runJob(() => api('/api/v1/duplicate-scan-jobs',{method:'POST',body:JSON.stringify({threshold:90})})); showDuplicates(); } catch(error){toast(error.message,true);} };
+  const data = await api('/api/v1/duplicate-matches');
+  workspace.innerHTML = `<div class="page item-list">${data.items.length ? data.items.map(match => `<section class="panel"><div class="panel-head">Match ${match.confidence}%</div><div class="panel-body"><div class="compare"><img src="${match.left.thumbnail_url}" alt=""><img src="${match.right.thumbnail_url}" alt=""></div><div class="actions" style="margin-top:10px"><button class="btn resolve" data-id="${match.id}" data-keep="left">Keep left</button><button class="btn resolve" data-id="${match.id}" data-keep="right">Keep right</button><button class="btn ignore" data-id="${match.id}">Ignore</button></div></div></section>`).join('') : '<div class="empty">No matches</div>'}</div>`;
+  document.querySelectorAll('.ignore').forEach(node => node.onclick = async () => { await api(`/api/v1/duplicate-matches/${node.dataset.id}/ignore`,{method:'POST'}); showDuplicates(); });
+  document.querySelectorAll('.resolve').forEach(node => node.onclick = async () => { try { await api(`/api/v1/duplicate-matches/${node.dataset.id}/resolve`,{method:'POST',body:JSON.stringify({keep:node.dataset.keep,merge_metadata:true})}); showDuplicates(); } catch(error){toast(error.message,true);} }); icons();
+}
+
+async function showCollections() {
+  setHeader('Collections','',button('Create','plus','primary'));
+  actions.querySelector('button').onclick = showCollectionBuilder;
+  const data = await api('/api/v1/collections');
+  data.items.sort((left, right) => {
+    const byDate = String(right.created_at || '').localeCompare(String(left.created_at || ''));
+    return byDate || Number(right.id) - Number(left.id);
+  });
+  const prefs = JSON.parse(localStorage.getItem('jiffle.collection-prefs') || '{"pageSize":20,"view":"list"}');
+  let page = 1;
+  const render = async () => {
+    const query = (document.querySelector('#collectionSearch')?.value || '').trim().toLowerCase();
+    const filtered = data.items.filter(item => item.name.toLowerCase().includes(query));
+    const pageSize = Math.max(1, Number(document.querySelector('#collectionPageSize')?.value || prefs.pageSize));
+    const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize)); page = Math.min(page, totalPages);
+    const visible = filtered.slice((page-1)*pageSize, page*pageSize);
+    const smart = document.querySelector('#collectionView')?.value === 'cards';
+    const warning = item => Number(item.author_warning_count) > 0 ? `<span class="badge warn" title="Author limit exceeded"><i data-lucide="triangle-alert"></i>${item.author_warning_count}</span>` : '';
+    const body = smart ? visible.map(item => `<article class="smart-collection"><div class="smart-previews">${item.cover_urls.map(url => `<img src="${url}" loading="lazy" alt="">`).join('') || '<div class="empty">No files</div>'}</div><div class="smart-body"><strong>${esc(item.name)}</strong><small>${item.item_count} files · ${esc(item.created_at || '')}</small><div class="actions">${warning(item)}<button class="btn open" data-id="${item.id}"><i data-lucide="eye"></i>Open</button><button class="btn export" data-id="${item.id}"><i data-lucide="download"></i>Export</button><button class="icon-btn danger delete" data-id="${item.id}" title="Delete"><i data-lucide="trash-2"></i></button></div></div></article>`).join('') : visible.map(item => `<article class="collection-item"><i data-lucide="folder"></i><div><strong>${esc(item.name)}</strong><small>${item.item_count} files · created ${esc(item.created_at || '')}</small></div><div class="actions">${warning(item)}<button class="btn open" data-id="${item.id}"><i data-lucide="eye"></i>Open</button><button class="btn export" data-id="${item.id}"><i data-lucide="download"></i>Export</button><button class="icon-btn danger delete" data-id="${item.id}" title="Delete"><i data-lucide="trash-2"></i></button></div></article>`).join('');
+    document.querySelector('#collectionResults').innerHTML = body || '<div class="empty">No collections found</div>';
+    document.querySelector('#collectionPager').innerHTML = `<span>${filtered.length} collections</span><button class="icon-btn" id="collectionPrev" title="Previous" ${page===1?'disabled':''}><i data-lucide="chevron-left"></i></button><span>Page ${page} of ${totalPages}</span><button class="icon-btn" id="collectionNext" title="Next" ${page===totalPages?'disabled':''}><i data-lucide="chevron-right"></i></button>`;
+    document.querySelector('#collectionPrev').onclick=()=>{page--;render()}; document.querySelector('#collectionNext').onclick=()=>{page++;render()};
+    bindCollectionActions(); icons();
+  };
+  workspace.innerHTML = `<div class="page"><div class="collection-toolbar"><input id="collectionSearch" class="control" placeholder="Search by name"><select id="collectionPageSize" class="control"><option value="10">10 per page</option><option value="20">20 per page</option><option value="50">50 per page</option></select><select id="collectionView" class="control"><option value="list">List</option><option value="cards">Smart cards</option></select></div><div id="collectionResults" class="item-list"></div><div id="collectionPager" class="collection-pager"></div></div>`;
+  document.querySelector('#collectionPageSize').value=String(prefs.pageSize); document.querySelector('#collectionView').value=prefs.view;
+  document.querySelector('#collectionSearch').oninput=()=>{page=1;render()}; document.querySelector('#collectionPageSize').onchange=event=>{prefs.pageSize=Number(event.target.value);localStorage.setItem('jiffle.collection-prefs',JSON.stringify(prefs));page=1;render()}; document.querySelector('#collectionView').onchange=event=>{prefs.view=event.target.value;localStorage.setItem('jiffle.collection-prefs',JSON.stringify(prefs));render()};
+  await render();
+  const collectionMedia = item => `<figure class="collection-media">${item.media_type === 'video' ? `<video class="collection-preview" src="${item.content_url}" poster="${item.thumbnail_url}" controls preload="metadata"></video>` : `<a href="${item.content_url}" target="_blank" rel="noopener"><img class="collection-preview" src="${item.thumbnail_url}" loading="lazy" alt=""></a>`}<figcaption>${item.source_url ? `<a href="${esc(item.source_url)}" target="_blank" rel="noopener">Source</a>` : '<span>Unknown source</span>'}</figcaption></figure>`;
+  document.querySelectorAll('.open').forEach(node => node.onclick = async () => {
+    const c=await api(`/api/v1/collections/${node.dataset.id}`);
+    workspace.innerHTML=`<div class="page collection-page"><div class="page-head"><button class="btn" id="backCollections"><i data-lucide="chevron-left"></i>Collections</button><h2>${esc(c.name)}</h2><span class="badge">${c.items.length}</span></div><div class="collection-meta"><span>Created: ${esc(c.created_at)}</span><form id="jiggieForm"><label for="jiggieUrl">URL Jiggie</label><div class="jiggie-control"><input id="jiggieUrl" class="control" type="url" value="${esc(c.jiggie_url||'')}" placeholder="https://jiggie.fun/..."><button class="btn primary"><i data-lucide="save"></i>Save</button>${c.jiggie_url ? `<a class="icon-btn" href="${esc(c.jiggie_url)}" target="_blank" rel="noopener" title="Open Jiggie"><i data-lucide="external-link"></i></a>` : ''}</div></form></div><div class="collection-gallery">${c.items.map(collectionMedia).join('')}</div></div>`;
+    document.querySelector('#backCollections').onclick=showCollections;
+    document.querySelector('#jiggieForm').onsubmit=async event=>{event.preventDefault();try{await api(`/api/v1/collections/${c.id}`,{method:'PATCH',body:JSON.stringify({jiggie_url:document.querySelector('#jiggieUrl').value})});toast('URL saved');showCollections();}catch(error){toast(error.message,true);}};
+    icons();
+  });
+  function bindCollectionActions(){ document.querySelectorAll('.export').forEach(node => node.onclick = async () => { try{const job=await runJob(()=>api(`/api/v1/collections/${node.dataset.id}/export-jobs`,{method:'POST'}));toast(`Exported: ${job.result.item_count}`);}catch(error){toast(error.message,true);} }); document.querySelectorAll('.delete').forEach(node => node.onclick = async () => { await api(`/api/v1/collections/${node.dataset.id}`,{method:'DELETE'});showCollections(); }); document.querySelectorAll('.open').forEach(node => node.onclick = openCollection); }
+  async function openCollection(event){ const c=await api(`/api/v1/collections/${event.currentTarget.dataset.id}`); workspace.innerHTML=`<div class="page collection-page"><div class="page-head"><button class="btn" id="backCollections"><i data-lucide="chevron-left"></i>Collections</button><h2>${esc(c.name)}</h2><span class="badge">${c.items.length}</span></div><div class="collection-meta"><span>Created: ${esc(c.created_at)}</span><form id="jiggieForm"><label for="jiggieUrl">URL Jiggie</label><div class="jiggie-control"><input id="jiggieUrl" class="control" type="url" value="${esc(c.jiggie_url||'')}" placeholder="https://jiggie.fun/..."><button class="btn primary"><i data-lucide="save"></i>Save</button></div></form></div><div class="collection-gallery">${c.items.map(collectionMedia).join('')}</div></div>`; document.querySelector('#backCollections').onclick=showCollections; document.querySelector('#jiggieForm').onsubmit=async e=>{e.preventDefault();try{await api(`/api/v1/collections/${c.id}`,{method:'PATCH',body:JSON.stringify({jiggie_url:document.querySelector('#jiggieUrl').value})});toast('URL saved');}catch(error){toast(error.message,true);}}; icons(); }
+}
+
+async function showCollectionBuilder() {
+  setHeader('Collection builder');
+  const presets = await api('/api/v1/collection-presets');
+  let preview = null;
+  let rejectedIds = [];
+  const tagValues = value => [...new Set(String(value || '').split(/\s+/).map(tag => tag.trim().toLowerCase()).filter(Boolean))];
+  workspace.innerHTML = `<div class="page collection-builder"><section class="panel"><div class="panel-head"><i data-lucide="wand-sparkles"></i>Selection rules</div><div class="panel-body builder-fields"><div class="form-row"><label>Preset</label><select id="builderPreset" class="control"><option value="">No preset</option>${presets.items.map(item => `<option value="${item.id}">${esc(item.name)}</option>`).join('')}</select></div><div class="form-row"><label>Collection name</label><input id="builderName" class="control" maxlength="120"></div><div class="form-row"><label>Required tags</label><input id="builderInclude" class="control" placeholder="portrait blue_eyes"><div id="builderIncludeChips" class="search-chips"></div></div><div class="form-row"><label>Exclude tags</label><input id="builderExclude" class="control" placeholder="comic animated"><div id="builderExcludeChips" class="search-chips"></div></div><div class="form-row"><label>Count</label><input id="builderCount" class="control" type="number" min="1" max="1000" value="10"></div><div class="builder-actions"><button id="savePreset" class="btn"><i data-lucide="bookmark-plus"></i>Save preset</button><button id="deletePreset" class="icon-btn danger" title="Delete selected preset"><i data-lucide="trash-2"></i></button><button id="generateCollection" class="btn primary"><i data-lucide="shuffle"></i>Generate</button></div></div></section><div id="builderSummary" class="builder-summary"></div><div id="builderPreview" class="collection-preview-grid"><div class="empty">Enter tags and generate a selection</div></div><div class="builder-savebar"><button id="cancelBuilder" class="btn"><i data-lucide="chevron-left"></i>Collections</button><span id="builderStatus">No collection generated yet</span><button id="commitCollection" class="btn primary" disabled><i data-lucide="save"></i>Save collection</button></div></div>`;
+  const fields = () => ({
+    included_tags: tagValues(document.querySelector('#builderInclude').value),
+    excluded_tags: tagValues(document.querySelector('#builderExclude').value),
+    requested_count: Number(document.querySelector('#builderCount').value),
+  });
+  const renderBuilderChips = () => {
+    const chips = (selector, inputSelector, excluded) => document.querySelector(selector).innerHTML = tagValues(document.querySelector(inputSelector).value).map(tag => `<span class="filter-chip${excluded ? ' excluded' : ''}">${esc(tag)}<button type="button" data-builder-remove="${excluded ? '-' : ''}${esc(tag)}"><i data-lucide="x"></i></button></span>`).join('');
+    chips('#builderIncludeChips','#builderInclude',false); chips('#builderExcludeChips','#builderExclude',true);
+    document.querySelectorAll('[data-builder-remove]').forEach(node => node.onclick = () => { const value=node.dataset.builderRemove; const input=value.startsWith('-')?document.querySelector('#builderExclude'):document.querySelector('#builderInclude'); input.value=tagValues(input.value).filter(tag=>tag !== value.replace(/^-/, '')).join(' '); renderBuilderChips(); }); icons();
+  };
+  document.querySelector('#builderInclude').oninput = renderBuilderChips;
+  document.querySelector('#builderExclude').oninput = renderBuilderChips;
+  const renderPreview = () => {
+    if (!preview) return;
+    const similar = preview.most_similar_collection ? `Similarity ${Math.round(preview.max_similarity * 100)}% with "${esc(preview.most_similar_collection.name)}"` : '';
+    document.querySelector('#builderSummary').innerHTML = `<span class="badge ${preview.can_save ? 'good' : 'warn'}">Available ${preview.available_count}, selected ${preview.items.length} of ${preview.requested_count}</span>${similar ? `<span>${similar}</span>` : ''}`;
+    document.querySelector('#builderPreview').innerHTML = preview.items.map((item,index) => `<article class="builder-card${item.author_limit_exceeded ? ' limit-warning' : ''}"><div class="builder-image"><img src="${item.thumbnail_url}" loading="lazy" alt="">${item.author_limit_exceeded ? '<span class="limit-icon" title="Author item limit exceeded"><i data-lucide="triangle-alert"></i></span>' : ''}<button class="icon-btn swap-builder-item" data-index="${index}" title="Replace"><i data-lucide="refresh-cw"></i></button></div><div><strong>${esc(item.author || 'Unknown author')}</strong><small>${item.usage_count} collections${item.last_used_at ? ` · ${esc(item.last_used_at)}` : ' · never used'}</small></div></article>`).join('') || '<div class="empty">No matching images</div>';
+    document.querySelector('#commitCollection').disabled = !preview.can_save || !document.querySelector('#builderName').value.trim();
+    document.querySelector('#builderStatus').textContent = preview.can_save ? 'Selection is ready to save' : 'Not enough matching images';
+    document.querySelectorAll('.swap-builder-item').forEach(node => node.onclick = async () => {
+      const index = Number(node.dataset.index);
+      const old = preview.items[index];
+      try {
+        const replacement = await api('/api/v1/collection-previews/replacement', {method:'POST', body:JSON.stringify({...fields(), current_ids:preview.items.filter((_,itemIndex)=>itemIndex!==index).map(item=>item.id), rejected_ids:[...rejectedIds,old.id]})});
+        rejectedIds.push(old.id);
+        preview.items[index] = replacement;
+        renderPreview();
+      } catch (error) { toast(error.message, true); }
+    });
+    icons();
+  };
+  document.querySelector('#builderPreset').onchange = event => {
+    const preset = presets.items.find(item => item.id === Number(event.target.value));
+    if (!preset) return;
+    document.querySelector('#builderInclude').value = preset.included_tags.join(' ');
+    document.querySelector('#builderExclude').value = preset.excluded_tags.join(' ');
+    document.querySelector('#builderCount').value = preset.requested_count;
+    renderBuilderChips();
+  };
+  document.querySelector('#generateCollection').onclick = async () => {
+    try { rejectedIds = []; preview = await api('/api/v1/collection-previews', {method:'POST',body:JSON.stringify(fields())}); renderPreview(); }
+    catch (error) { toast(error.message, true); }
+  };
+  document.querySelector('#builderName').oninput = () => preview && renderPreview();
+  document.querySelector('#savePreset').onclick = async () => {
+    const name = prompt('Preset name');
+    if (!name) return;
+    try {
+      const saved = await api('/api/v1/collection-presets', {method:'POST',body:JSON.stringify({name,...fields()})});
+      presets.items.push(saved);
+      document.querySelector('#builderPreset').add(new Option(saved.name,String(saved.id),true,true));
+      toast('Preset saved');
+    } catch (error) { toast(error.message, true); }
+  };
+  document.querySelector('#deletePreset').onclick = async () => {
+    const id = Number(document.querySelector('#builderPreset').value);
+    if (!id) return;
+    try { await api(`/api/v1/collection-presets/${id}`,{method:'DELETE'}); presets.items=presets.items.filter(item=>item.id!==id); document.querySelector(`#builderPreset option[value="${id}"]`).remove(); toast('Preset deleted'); }
+    catch (error) { toast(error.message, true); }
+  };
+  document.querySelector('#commitCollection').onclick = async () => {
+    try { await api('/api/v1/collections',{method:'POST',body:JSON.stringify({name:document.querySelector('#builderName').value.trim(),...fields(),media_item_ids:preview.items.map(item=>item.id)})}); toast('Collection saved'); showCollections(); }
+    catch (error) { toast(error.message, true); }
+  };
+  document.querySelector('#cancelBuilder').onclick = showCollections;
+  icons();
+}
+
+async function showSettings() {
+  setHeader('Settings'); const data=await api('/api/v1/settings');
+  const fontSize = savedFontSize();
+  const source = (name,label,fields) => `<section class="panel"><div class="panel-head">${label}</div><div class="panel-body">${fields.map(([key,type])=>`<div class="form-row"><label>${key} ${data[`${key}_configured`]?'(configured)':''}</label><input class="control" name="${key}" type="${type||'text'}" value="${type?'':esc(data[key]||'')}"></div>`).join('')}<button type="button" class="btn test-source" data-provider="${name}">Test</button></div></section>`;
+  workspace.innerHTML=`<div class="page"><form id="settingsForm" class="settings-grid"><div><h2>Limits</h2></div><div><div class="form-row"><label>Files per author</label><input class="control" name="max_items_per_author" type="number" min="1" value="${data.max_items_per_author}"></div><div class="form-row"><label>Maximum export size, bytes</label><input class="control" name="max_export_size_bytes" type="number" min="1" value="${data.max_export_size_bytes}"></div></div><div><h2>Sources</h2></div><div class="settings-sources">${source('danbooru','Danbooru',[['danbooru_login'],['danbooru_api_key','password']])}${source('e621','e621 / e926',[['e621_login'],['e621_api_key','password']])}${source('gelbooru','Gelbooru',[['gelbooru_user_id'],['gelbooru_api_key','password']])}${source('furaffinity','FurAffinity',[['furaffinity_cookie_a','password'],['furaffinity_cookie_b','password']])}<button type="button" id="faLogin" class="btn">Open login FurAffinity</button></div><div><h2>AI provider</h2></div><div><div class="form-row"><label>Format</label><select class="control" name="ai_api_format"><option value="openai" ${data.ai_api_format==='openai'?'selected':''}>OpenAI-compatible</option><option value="gemini" ${data.ai_api_format==='gemini'?'selected':''}>Gemini</option></select></div><div class="form-row"><label>API URL</label><input class="control" name="ai_api_url" value="${esc(data.ai_api_url||'')}"></div><div class="form-row"><label>Model</label><input class="control" name="ai_api_model" value="${esc(data.ai_api_model||'')}"></div><div class="form-row"><label>API key ${data.ai_api_key_configured?'(configured)':''}</label><input class="control" name="ai_api_key" type="password"></div><div class="form-row"><label>Prompt</label><textarea class="control" name="ai_tagging_prompt">${esc(data.ai_tagging_prompt)}</textarea></div><div class="form-actions"><button type="button" id="testProvider" class="btn">Test</button><button class="btn primary">Save</button></div></div></form></div>`;
+  document.querySelector('#settingsForm').onsubmit=async event=>{event.preventDefault();const form=new FormData(event.currentTarget);const payload={max_items_per_author:Number(form.get('max_items_per_author')),max_export_size_bytes:Number(form.get('max_export_size_bytes')),ai_api_format:form.get('ai_api_format'),ai_api_url:form.get('ai_api_url')||null,ai_api_model:form.get('ai_api_model')||null,ai_tagging_prompt:form.get('ai_tagging_prompt')};['ai_api_key','danbooru_login','danbooru_api_key','e621_login','e621_api_key','gelbooru_user_id','gelbooru_api_key','furaffinity_cookie_a','furaffinity_cookie_b'].forEach(k=>{if(form.get(k))payload[k]=form.get(k)});try{await api('/api/v1/settings',{method:'PATCH',body:JSON.stringify(payload)});toast('Settings saved');}catch(error){toast(error.message,true);}};
+  document.querySelector('#settingsForm').insertAdjacentHTML('afterbegin', `<div><h2>Interface</h2></div><div><div class="form-row"><label>Text size</label><div class="size-options" role="group" aria-label="Text size">${allowedFontSizes.map(size => `<button type="button" class="size-option${size === fontSize ? ' active' : ''}" data-font-size="${size}">${size} px</button>`).join('')}</div></div></div>`);
+  document.querySelectorAll('[data-font-size]').forEach(node => node.onclick = () => {
+    applyFontSize(node.dataset.fontSize);
+    document.querySelectorAll('[data-font-size]').forEach(option => option.classList.toggle('active', option === node));
+  });
+  document.querySelectorAll('.test-source').forEach(node=>node.onclick=async()=>{try{await api(`/api/v1/settings/source-providers/${node.dataset.provider}/test`,{method:'POST'});toast('Connection successful')}catch(error){toast(error.message,true)}}); document.querySelector('#faLogin').onclick=()=>api('/api/v1/settings/furaffinity/open-login',{method:'POST'});
+  document.querySelector('#testProvider').onclick=async()=>{try{await api('/api/v1/settings/ai-provider/test',{method:'POST'});toast('Connection successful');}catch(error){toast(error.message,true);}};
+}
+
+async function showSettingsPage() {
+  setHeader('Settings', 'Interface, limits, and connections');
+  const [data, tagConfig] = await Promise.all([
+    api('/api/v1/settings'), api('/api/v1/tag-rules'),
+  ]);
+  const prefs = libraryPrefs();
+  const fontSize = savedFontSize();
+  const defaultPaths = {media_path:'media', thumbnail_path:'thumbnails', import_staging_path:'import-staging', export_path:'collections'};
+  const field = (name, label, options = {}) => `<div class="form-row"><label for="setting-${name}">${label}</label>${options.hint ? `<small class="field-hint">${options.hint}</small>` : ''}<div class="${options.pathPicker ? 'path-control' : ''}"><input id="setting-${name}" class="control" name="${name}" type="${options.type || 'text'}" value="${options.secret ? '' : esc(data[name] || '')}" placeholder="${options.secret && data[`${name}_configured`] ? 'Configured - leave blank to keep unchanged' : esc(options.placeholder || (defaultPaths[name] ? `Default: folder ${defaultPaths[name]} next to the application` : ''))}">${options.pathPicker ? `<button type="button" class="icon-btn choose-directory" data-target="setting-${name}" title="Choose folder"><i data-lucide="folder-open"></i></button>` : ''}</div></div>`;
+  const provider = (name, label, description, fields, extra = '') => `<details class="settings-subsection"><summary><span><strong>${label}</strong><small>${description}</small></span><i data-lucide="chevron-down"></i></summary><div class="settings-subsection-body">${fields.join('')}<div class="section-actions"><button type="button" class="btn test-source" data-provider="${name}"><i data-lucide="plug-zap"></i>Test</button>${extra}</div></div></details>`;
+  workspace.innerHTML = `<div class="settings-page"><form id="settingsForm" class="settings-form">
+    <details class="settings-section" open><summary><span class="section-icon"><i data-lucide="hard-drive"></i></span><span><strong>Storage</strong><small>Source files, exports, and service directories</small></span><i data-lucide="chevron-down"></i></summary><div class="settings-section-body">
+      ${field('media_path','Source media',{hint:'The folder where Jiffle stores accepted images and videos.',pathPicker:true})}
+      ${field('export_path','Exported collections',{hint:'The folder for exported collections.',pathPicker:true})}
+      <div class="settings-fields-2">${field('thumbnail_path','Thumbnails',{hint:'Cached previews for the media library.',pathPicker:true})}${field('import_staging_path','Temporary imports',{hint:'Working directory for incomplete imports.',pathPicker:true})}</div>
+      <small class="field-hint settings-restart-note">New paths take full effect after restarting the application. Existing files are not moved automatically.</small>
+    </div></details>
+    <details class="settings-section" open><summary><span class="section-icon"><i data-lucide="monitor-cog"></i></span><span><strong>Interface</strong><small>Text size and library display</small></span><i data-lucide="chevron-down"></i></summary><div class="settings-section-body">
+      <div class="setting-line"><div><label>Text size</label><small>Applies immediately and is saved in this browser.</small></div><div class="size-options">${allowedFontSizes.map(size => `<button type="button" class="size-option${size === fontSize ? ' active' : ''}" data-font-size="${size}">${size} px</button>`).join('')}</div></div>
+      <div class="setting-line"><div><label for="libraryPageSize">Items per page</label><small>More items reduce paging but use more memory.</small></div><select id="libraryPageSize" class="control compact-control">${[20,40,60,100].map(size => `<option value="${size}" ${size === prefs.pageSize ? 'selected' : ''}>${size}</option>`).join('')}</select></div>
+      <div class="setting-line"><div><label for="libraryCardSize">Card size</label><small>Controls grid density on large screens.</small></div><select id="libraryCardSize" class="control compact-control"><option value="small" ${prefs.cardSize==='small'?'selected':''}>Compact</option><option value="medium" ${prefs.cardSize==='medium'?'selected':''}>Medium</option><option value="large" ${prefs.cardSize==='large'?'selected':''}>Large</option></select></div>
+      <label class="setting-line toggle-line"><span><strong>Labels below images</strong><small>Author, source, and resolution are already available in the side panel.</small></span><input id="showCardInfo" type="checkbox" ${prefs.showCardInfo?'checked':''}><span class="toggle" aria-hidden="true"></span></label>
+    </div></details>
+    <details class="settings-section" open><summary><span class="section-icon"><i data-lucide="sliders-horizontal"></i></span><span><strong>Import and limits</strong><small>Deleted media, collection, and export rules</small></span><i data-lucide="chevron-down"></i></summary><div class="settings-section-body"><label class="setting-line toggle-line"><span><strong>Never re-import deleted media</strong><small>When enabled, a deleted file is blocked immediately. When disabled, it is sent to Review for confirmation.</small></span><input name="block_previously_deleted" type="checkbox" ${data.block_previously_deleted?'checked':''}><span class="toggle" aria-hidden="true"></span></label><div class="settings-fields-2">${field('max_items_per_author','Items per author',{type:'number',hint:'Maximum items by one author in a collection.'})}<div class="form-row"><label for="maxExportMb">Maximum export, MB</label><small class="field-hint">Maximum total size of one export.</small><input id="maxExportMb" class="control" name="max_export_size_mb" type="number" min="1" value="${Math.max(1, Math.round(data.max_export_size_bytes / 1048576))}"></div></div></div></details>
+    <details class="settings-section"><summary><span class="section-icon"><i data-lucide="waypoints"></i></span><span><strong>Sources</strong><small>Booru and FurAffinity credentials</small></span><i data-lucide="chevron-down"></i></summary><div class="settings-section-body settings-sources">
+      ${provider('danbooru','Danbooru','Login and API key',[field('danbooru_login','Login'),field('danbooru_api_key','API key',{type:'password',secret:true})])}
+      ${provider('e621','e621 / e926','Username and API key',[field('e621_login','Username'),field('e621_api_key','API key',{type:'password',secret:true})])}
+      ${provider('gelbooru','Gelbooru','User ID and API key',[field('gelbooru_user_id','User ID'),field('gelbooru_api_key','API key',{type:'password',secret:true})])}
+      ${provider('furaffinity','FurAffinity','Cookie a and b from an active session',[field('furaffinity_cookie_a','Cookie a',{type:'password',secret:true}),field('furaffinity_cookie_b','Cookie b',{type:'password',secret:true})],'<a class="btn" href="https://www.furaffinity.net/login/" target="_blank" rel="noopener"><i data-lucide="external-link"></i>Open login</a>')}
+    </div></details>
+    <details class="settings-section"><summary><span class="section-icon"><i data-lucide="sparkles"></i></span><span><strong>AI tags</strong><small>Compatible API, model, and prompt</small></span><i data-lucide="chevron-down"></i></summary><div class="settings-section-body"><div class="settings-fields-2"><div class="form-row"><label>Format API</label><select class="control" name="ai_api_format"><option value="openai" ${data.ai_api_format==='openai'?'selected':''}>OpenAI-compatible</option><option value="gemini" ${data.ai_api_format==='gemini'?'selected':''}>Gemini</option></select></div>${field('ai_api_url','API URL',{placeholder:'https://…'})}${field('ai_api_model','Model')}${field('ai_api_key','API key',{type:'password',secret:true})}</div><div class="form-row"><label>Tagging prompt</label><small class="field-hint">The prompt sent with each image.</small><textarea class="control prompt-control" name="ai_tagging_prompt">${esc(data.ai_tagging_prompt)}</textarea></div><div class="section-actions"><button type="button" id="testProvider" class="btn"><i data-lucide="plug-zap"></i>Test AI</button></div></div></details>
+    <details class="settings-section"><summary><span class="section-icon"><i data-lucide="tags"></i></span><span><strong>Tag rules</strong><small>Preferred tags, blocked tags, and aliases</small></span><i data-lucide="chevron-down"></i></summary><div class="settings-section-body"><div class="settings-fields-2"><div class="form-row"><label>Preferred tags</label><small class="field-hint">One tag per line.</small><textarea class="control tag-rule-editor" name="preferred_tags">${esc(tagConfig.preferred.join('\n'))}</textarea></div><div class="form-row"><label>Blocked tags</label><small class="field-hint">Rejected from AI suggestions.</small><textarea class="control tag-rule-editor" name="blocked_tags">${esc(tagConfig.blocked.join('\n'))}</textarea></div></div><div class="form-row"><label>Aliases</label><small class="field-hint">Format: canonical_tag = alias_1, alias_2</small><textarea class="control tag-rule-editor" name="tag_aliases">${esc(Object.entries(tagConfig.aliases).map(([canonical,aliases]) => `${canonical} = ${aliases.join(', ')}`).join('\n'))}</textarea></div></div></details>
+    <div class="settings-savebar"><span id="settingsState">Interface changes are saved immediately</span><button class="btn primary"><i data-lucide="save"></i>Save settings</button></div>
+  </form></div>`;
+
+  document.querySelectorAll('[data-font-size]').forEach(node => node.onclick = () => {
+    applyFontSize(node.dataset.fontSize);
+    document.querySelectorAll('[data-font-size]').forEach(option => option.classList.toggle('active', option === node));
+  });
+  document.querySelector('#libraryPageSize').onchange = event => saveLibraryPrefs({pageSize:Number(event.target.value)});
+  document.querySelector('#libraryCardSize').onchange = event => { saveLibraryPrefs({cardSize:event.target.value}); applyLibraryPrefs(); };
+  document.querySelector('#showCardInfo').onchange = event => { saveLibraryPrefs({showCardInfo:event.target.checked}); applyLibraryPrefs(); };
+  document.querySelectorAll('.choose-directory').forEach(button => button.onclick = async () => {
+    const input = document.getElementById(button.dataset.target);
+    try {
+      const result = await api('/api/v1/settings/choose-directory',{method:'POST',body:JSON.stringify({initial_path:input.value})});
+      if (result.path) {
+        const suffixes = {
+          'setting-thumbnail_path': 'thumbnails',
+          'setting-import_staging_path': 'import-staging',
+          'setting-export_path': 'collections',
+        };
+        const suffix = suffixes[input.id];
+        const selected = result.path.replace(/[\\/]$/, '');
+        input.value = suffix && selected.split(/[\\/]/).pop().toLowerCase() !== suffix
+          ? `${selected}/${suffix}`
+          : selected;
+      }
+    } catch(error) { toast(error.message,true); }
+  });
+  document.querySelector('#settingsForm').onsubmit = async event => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const payload = {media_path:form.get('media_path'),export_path:form.get('export_path'),thumbnail_path:form.get('thumbnail_path'),import_staging_path:form.get('import_staging_path'),max_items_per_author:Number(form.get('max_items_per_author')),max_export_size_bytes:Number(form.get('max_export_size_mb'))*1048576,block_previously_deleted:form.has('block_previously_deleted'),ai_api_format:form.get('ai_api_format'),ai_api_url:form.get('ai_api_url')||null,ai_api_model:form.get('ai_api_model')||null,ai_tagging_prompt:form.get('ai_tagging_prompt')};
+    ['ai_api_key','danbooru_login','danbooru_api_key','e621_login','e621_api_key','gelbooru_user_id','gelbooru_api_key','furaffinity_cookie_a','furaffinity_cookie_b'].forEach(key => { if (form.get(key)) payload[key]=form.get(key); });
+    const lines = name => String(form.get(name) || '').split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+    const aliases = {};
+    for (const line of lines('tag_aliases')) {
+      const [canonical, rawAliases] = line.split('=', 2);
+      if (canonical?.trim() && rawAliases != null) aliases[canonical.trim()] = rawAliases.split(',').map(value => value.trim()).filter(Boolean);
+    }
+    try { await Promise.all([api('/api/v1/settings',{method:'PATCH',body:JSON.stringify(payload)}),api('/api/v1/tag-rules',{method:'PUT',body:JSON.stringify({preferred:lines('preferred_tags'),blocked:lines('blocked_tags'),aliases})})]); toast('Settings saved'); document.querySelector('#settingsState').textContent='Settings saved'; }
+    catch(error) { toast(error.message,true); }
+  };
+  document.querySelectorAll('.test-source').forEach(node => node.onclick = async () => { try { await api(`/api/v1/settings/source-providers/${node.dataset.provider}/test`,{method:'POST'});toast('Connection successful'); } catch(error) { toast(error.message,true); } });
+  document.querySelector('#testProvider').onclick = async () => { try { await api('/api/v1/settings/ai-provider/test',{method:'POST'});toast('Connection successful'); } catch(error) { toast(error.message,true); } };
+  icons();
+}
+
+async function refreshCounts(){try{const [reviews,tags]=await Promise.all([api('/api/v1/review-items?limit=1'),api('/api/v1/tag-suggestions?status=pending')]);const total=reviews.page.total+tags.items.length;document.querySelector('#reviewCount').textContent=total||'';}catch{}}
+function formatBytes(value){if(value==null)return 'unknown size';const units=['B','KB','MB','GB'];let size=value,index=0;while(size>=1024&&index<3){size/=1024;index++;}return `${size.toFixed(index?1:0)} ${units[index]}`;}
+
+const views={library:showLibrary,import:showImport,review:showReview,duplicates:showDuplicates,collections:showCollections,settings:showSettingsPage};
+async function navigate(view){currentView=view;document.querySelectorAll('.nav-item').forEach(node=>node.classList.toggle('active',node.dataset.view===view));workspace.innerHTML='<div class="empty">Loading...</div>';try{await views[view]();}catch(error){workspace.innerHTML='<div class="empty">Could not load this section</div>';toast(error.message,true);}icons();}
+document.querySelectorAll('.nav-item').forEach(node=>node.onclick=()=>navigate(node.dataset.view));
+window.addEventListener('hashchange',()=>navigate(location.hash.slice(1)||'library'));
+navigate(location.hash.slice(1)||'library');refreshCounts();icons();
