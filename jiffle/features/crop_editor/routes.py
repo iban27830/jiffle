@@ -136,18 +136,33 @@ def _crop_error(error):
 def _run_scan(database_path,settings,job_id,parameters):
     connection=sqlite3.connect(database_path); connection.row_factory=sqlite3.Row; connection.execute("PRAGMA foreign_keys=ON")
     try:
-        rows=connection.execute("SELECT id,active_revision_id FROM media_items WHERE deleted_at IS NULL AND media_type='image' ORDER BY id").fetchall(); state=connection.execute("SELECT scanned_count,candidate_count FROM crop_scan_jobs WHERE job_id=?",(job_id,)).fetchone(); start=int(state[0] or 0); candidates=int(state[1] or 0); signature=_scan_signature(parameters); connection.execute("UPDATE background_jobs SET status='running',started_at=COALESCE(started_at,CURRENT_TIMESTAMP) WHERE id=?",(job_id,)); connection.commit()
-        for index,row in enumerate(rows[start:],start=start):
+        signature=_scan_signature(parameters)
+        total=connection.execute("SELECT COUNT(*) FROM media_items WHERE deleted_at IS NULL AND media_type='image'").fetchone()[0]
+        rows=connection.execute(
+            "SELECT m.id,m.active_revision_id FROM media_items m "
+            "LEFT JOIN crop_scan_results r ON r.revision_id=m.active_revision_id AND r.parameter_signature=? "
+            "WHERE m.deleted_at IS NULL AND m.media_type='image' AND r.revision_id IS NULL ORDER BY m.id",
+            (signature,),
+        ).fetchall()
+        state=connection.execute("SELECT candidate_count FROM crop_scan_jobs WHERE job_id=?",(job_id,)).fetchone()
+        candidates=int(state[0] or 0)
+        completed=total-len(rows)
+        connection.execute("UPDATE background_jobs SET status='running',started_at=COALESCE(started_at,CURRENT_TIMESTAMP) WHERE id=?",(job_id,))
+        connection.execute("UPDATE crop_scan_jobs SET scanned_count=? WHERE job_id=?",(completed,job_id))
+        connection.commit()
+        for batch_index,row in enumerate(rows,1):
             if connection.execute("SELECT cancel_requested FROM crop_scan_jobs WHERE job_id=?",(job_id,)).fetchone()[0]:
-                result=json.dumps({"scanned":index,"candidates":candidates,"cancelled":True}); connection.execute("UPDATE background_jobs SET status='completed',progress=100,result_json=?,finished_at=CURRENT_TIMESTAMP WHERE id=?",(result,job_id)); connection.commit(); return
-            cached=connection.execute("SELECT candidate_found FROM crop_scan_results WHERE revision_id=? AND parameter_signature=?",(row["active_revision_id"],signature)).fetchone()
+                scanned=completed+batch_index-1; result=json.dumps({"scanned":scanned,"candidates":candidates,"cancelled":True}); connection.execute("UPDATE background_jobs SET status='completed',progress=100,result_json=?,finished_at=CURRENT_TIMESTAMP WHERE id=?",(result,job_id)); connection.execute("UPDATE crop_scan_jobs SET scanned_count=?,candidate_count=? WHERE job_id=?",(scanned,candidates,job_id)); connection.commit(); return
             try:
-                if cached is None:
-                    found=analyze_image(connection,settings,int(row["id"]),min_area=parameters["min_area"],padding=parameters["padding"],tolerance=parameters["tolerance"]); candidates+=int(found is not None)
-                    connection.execute("INSERT OR REPLACE INTO crop_scan_results (revision_id,parameter_signature,candidate_found) VALUES (?,?,?)",(row["active_revision_id"],signature,int(found is not None)))
-            except CropFailure:pass
-            progress=1+int(98*(index+1)/max(len(rows),1)); connection.execute("UPDATE background_jobs SET progress=? WHERE id=?",(progress,job_id)); connection.execute("UPDATE crop_scan_jobs SET scanned_count=?,candidate_count=? WHERE job_id=?",(index+1,candidates,job_id)); connection.commit()
-        result=json.dumps({"scanned":len(rows),"candidates":candidates,"cancelled":False}); connection.execute("UPDATE background_jobs SET status='completed',progress=100,result_json=?,finished_at=CURRENT_TIMESTAMP WHERE id=?",(result,job_id)); connection.commit()
+                found=analyze_image(connection,settings,int(row["id"]),min_area=parameters["min_area"],padding=parameters["padding"],tolerance=parameters["tolerance"]); candidates+=int(found is not None)
+                connection.execute("INSERT OR REPLACE INTO crop_scan_results (revision_id,parameter_signature,candidate_found) VALUES (?,?,?)",(row["active_revision_id"],signature,int(found is not None)))
+            except CropFailure as error:
+                if error.code == "crop.animated_unsupported":
+                    connection.execute("INSERT OR REPLACE INTO crop_scan_results (revision_id,parameter_signature,candidate_found) VALUES (?,?,0)",(row["active_revision_id"],signature))
+            scanned=completed+batch_index
+            if batch_index % 25 == 0:
+                progress=1+int(98*scanned/max(total,1)); connection.execute("UPDATE background_jobs SET progress=? WHERE id=?",(progress,job_id)); connection.execute("UPDATE crop_scan_jobs SET scanned_count=?,candidate_count=? WHERE job_id=?",(scanned,candidates,job_id)); connection.commit()
+        result=json.dumps({"scanned":total,"candidates":candidates,"cancelled":False}); connection.execute("UPDATE background_jobs SET status='completed',progress=100,result_json=?,finished_at=CURRENT_TIMESTAMP WHERE id=?",(result,job_id)); connection.execute("UPDATE crop_scan_jobs SET scanned_count=?,candidate_count=? WHERE job_id=?",(total,candidates,job_id)); connection.commit()
     except Exception:
         connection.rollback(); connection.execute("UPDATE background_jobs SET status='failed',error_code='crop.scan_failed',error_message='Crop scan failed.',finished_at=CURRENT_TIMESTAMP WHERE id=?",(job_id,)); connection.commit(); raise
     finally:connection.close()
