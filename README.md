@@ -59,7 +59,7 @@ Some sources require account credentials configured under **Settings**. A direct
 - Select an author in the item details to add an `author:name` filter without clearing the current search. The active author and selected media card remain highlighted while results update. Items with multiple authors show each author separately.
 - Select an item to inspect its source, dimensions, tags, edits, and available actions. Images whose active version was changed in Editor have an edit icon on the library thumbnail; restoring the original removes the icon while keeping version history.
 - Open **Duplicates** and select **Scan** to find similar files.
-- Open **Editor** to find images with removable empty margins. Use **Scan library** for a background scan with progress and cancellation, or select an image in **Library** and choose **Open in Editor**.
+- Open **Editor** to find images with removable empty margins. Use **Find crop candidates** for a background scan with progress and cancellation, or select an image in **Library** and choose **Open in Editor**.
 - Use the library button beside a crop candidate or in the crop review screen to return to that image in **Library** with its details open.
 - Completed scans remember images that produced no crop candidate. Repeating a scan with the same detector settings skips their image analysis; changing minimum area, padding, or detector sensitivity makes them eligible for analysis again.
 - Navigation state such as library filters, the selected image, editor status, crop coordinates, zoom, scroll position, and expanded Settings sections survives page refreshes for the current browser session. Unsaved Settings values are not stored.
