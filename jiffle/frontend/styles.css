@@ -161,7 +161,8 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
 .collection-preview-grid { display: grid; grid-template-columns: repeat(auto-fill,minmax(min(100%,180px),1fr)); gap: 10px; align-items: start; }
 .editor-image { display:block; max-width:100%; max-height:520px; object-fit:contain; background:#1b1e20; border-radius:6px; }
 .editor-page { max-width: 1440px; }
-.editor-toolbar { display:grid; grid-template-columns:160px 150px 130px auto auto; gap:8px; align-items:end; margin-bottom:16px; }
+.editor-toolbar { display:grid; grid-template-columns:160px 150px 130px minmax(100px,auto) minmax(190px,auto); gap:8px; align-items:end; margin-bottom:16px; }
+.editor-toolbar button { min-width:0; white-space:normal; }
 .editor-toolbar label, .crop-controls label { color:var(--muted); font-size:.82em; }
 .crop-workspace { display:grid; grid-template-columns:minmax(0,1.4fr) minmax(280px,1fr); gap:12px; min-height:420px; }
 .crop-source, .crop-preview-pane { width:100%; height:min(70vh,680px); min-height:360px; overflow:auto; background:#1b1e20; border-radius:6px; cursor:grab; user-select:none; }
