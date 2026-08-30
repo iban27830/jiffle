@@ -393,8 +393,13 @@ async function showEditor() {
     document.querySelector('#backEditor').insertAdjacentHTML('afterend',`<button class="icon-btn" id="cropOpenLibrary" title="Open in Library"><i data-lucide="images"></i></button>`);
     document.querySelector('#cropOpenLibrary').onclick=()=>openMediaInLibrary(item.media_id);
     document.querySelector('#backEditor').onclick=()=>{saveViewState('editor',{analysisId:null});render()};
-    document.querySelector('#noCrop').onclick=async()=>{await api(`/api/v1/crop-analyses/${id}/no_crop_needed`,{method:'POST'});render()};
-    document.querySelector('#skipCrop').onclick=render;
+    const openNextPending = async () => {
+      await render('pending');
+      const next = document.querySelector('.open-crop');
+      if (next) await openCrop(Number(next.dataset.id));
+    };
+    document.querySelector('#noCrop').onclick=async()=>{try{await api(`/api/v1/crop-analyses/${id}/no_crop_needed`,{method:'POST'});await openNextPending()}catch(error){toast(error.message,true)}};
+    document.querySelector('#skipCrop').onclick=async()=>{try{await api(`/api/v1/crop-analyses/${id}/deferred`,{method:'POST'});await openNextPending()}catch(error){toast(error.message,true)}};
     const source=document.querySelector('#cropSource'),canvas=document.querySelector('#cropPreview'),inputs=[...document.querySelectorAll('.crop-coordinate')];
     const savedState=viewState('editor'); const savedBox=Number(savedState.boxRevisionId)===Number(item.revision_id)?savedState.box:null;
     if(Array.isArray(savedBox)&&savedBox.length===4)inputs.forEach((n,i)=>n.value=savedBox[i]);
@@ -408,7 +413,7 @@ async function showEditor() {
     const bindPan=(pane,other)=>{pane.onscroll=()=>syncPan(pane,other);let start=null;pane.onpointerdown=event=>{if(event.button!==0)return;start={x:event.clientX,y:event.clientY,left:pane.scrollLeft,top:pane.scrollTop};pane.setPointerCapture(event.pointerId);pane.classList.add('panning')};pane.onpointermove=event=>{if(!start)return;pane.scrollLeft=start.left-(event.clientX-start.x);pane.scrollTop=start.top-(event.clientY-start.y)};pane.onpointerup=event=>{start=null;pane.classList.remove('panning');if(pane.hasPointerCapture(event.pointerId))pane.releasePointerCapture(event.pointerId)}};
     bindPan(source.parentElement,previewPane);bindPan(previewPane,source.parentElement);
     document.querySelector('#visionCrop').onclick=async()=>{try{const proposal=await api(`/api/v1/media/${item.media_id}/crop-vision-analysis`,{method:'POST'});inputs.forEach((n,i)=>n.value=proposal.box[i]);document.querySelector('#proposalMethod').textContent='vision';draw();toast('Vision proposal loaded')}catch(error){toast(error.message,true)}};
-    document.querySelector('#applyCrop').onclick=async()=>{if(!confirm('Apply this crop? The original is kept in version history.'))return;try{await api(`/api/v1/crop-analyses/${id}/apply`,{method:'POST',body:JSON.stringify({box:box()})});toast('Crop applied');render()}catch(error){toast(error.message,true)}};
+    document.querySelector('#applyCrop').onclick=async()=>{if(!confirm('Apply this crop? The original is kept in version history.'))return;try{await api(`/api/v1/crop-analyses/${id}/apply`,{method:'POST',body:JSON.stringify({box:box()})});toast('Crop applied');await openNextPending()}catch(error){toast(error.message,true)}};
     document.querySelectorAll('.restore-revision').forEach(n=>n.onclick=async()=>{if(!confirm('Restore this version?'))return;await api(`/api/v1/media/${item.media_id}/revisions/${n.dataset.id}/activate`,{method:'POST'});toast('Version restored');openMediaEditor(item.media_id)}); icons();
   };
   const targetMediaId=Number(editorState.targetMediaId || 0);
