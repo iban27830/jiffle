@@ -6,6 +6,10 @@ import random
 import re
 import shutil
 import sqlite3
+import subprocess
+from uuid import uuid4
+
+from PIL import Image, ImageSequence
 
 from jiffle.configuration.settings import Settings
 
@@ -167,8 +171,6 @@ def preview_export(
     ):
         if settings.max_items_per_author > 0:
             warnings.append("author_limit_exceeded")
-    if total_size > settings.max_export_size_bytes:
-        violations.append("export_size_exceeded")
     if not rows:
         violations.append("collection_empty")
     return ExportPreview(len(rows), total_size, author_counts, tuple(violations), tuple(warnings))
@@ -215,14 +217,25 @@ def run_export_job(
         staging_root.mkdir(parents=True, exist_ok=True)
         staging = staging_root / f"run-{job_id}.part"
         staging.mkdir()
+        exported_items = []
         for index, row in enumerate(rows, start=1):
             source = _media_path(settings.media_path, row["file_path"])
             if source is None or not source.is_file():
                 raise CollectionFailure(
                     "exports.media_missing", f"Media item {row['id']} is unavailable."
                 )
-            destination = staging / f"{index:04d}-{source.name}"
-            shutil.copy2(source, destination)
+            original_size = source.stat().st_size
+            exported = _export_media(source, row["media_type"], settings, staging, index)
+            exported_items.append({
+                "position": row["position"], "media_item_id": row["id"],
+                "source_url": row["source_url"], "filename": exported.name,
+                "format": exported.suffix.lower().lstrip("."),
+                "file_size": exported.stat().st_size,
+                "converted": (
+                    exported.suffix.lower() != source.suffix.lower()
+                    or exported.stat().st_size != original_size
+                ),
+            })
             progress = 10 + int(80 * index / len(rows))
             connection.execute(
                 "UPDATE background_jobs SET progress=? WHERE id=?", (progress, job_id)
@@ -230,10 +243,7 @@ def run_export_job(
         manifest = {
             "collection_id": collection_id,
             "name": collection["name"],
-            "items": [{
-                "position": row["position"], "media_item_id": row["id"],
-                "source_url": row["source_url"],
-            } for row in rows],
+            "items": exported_items,
         }
         (staging / "manifest.json").write_text(
             json.dumps(manifest, indent=2), encoding="utf-8"
@@ -242,15 +252,16 @@ def run_export_job(
         destination = export_root / f"{collection_id}-{_safe_name(collection['name'])}-run-{job_id}"
         os.replace(staging, destination)
         staging = None
+        total_size = sum(item["file_size"] for item in exported_items)
         result = json.dumps({
             "export_run_id": _export_run_id(connection, job_id),
             "destination": str(destination), "item_count": preview.item_count,
-            "total_size": preview.total_size,
+            "total_size": total_size,
         })
         connection.execute(
             "UPDATE export_runs SET status='completed', destination_path=?, item_count=?, "
             "total_size=?, finished_at=CURRENT_TIMESTAMP WHERE job_id=?",
-            (str(destination), preview.item_count, preview.total_size, job_id),
+            (str(destination), preview.item_count, total_size, job_id),
         )
         connection.execute(
             "UPDATE background_jobs SET status='completed', progress=100, result_json=?, "
@@ -416,6 +427,142 @@ def _media_path(root_path, stored_path):
     root = root_path.resolve()
     candidate = (root / stored_path).resolve()
     return candidate if candidate.is_relative_to(root) else None
+
+
+def _export_media(source, media_type, settings, staging, index):
+    rules = dict(settings.export_format_rules)
+    source_format = source.suffix.lower().lstrip(".")
+    target_format = rules.get(source_format, source_format)
+    prefix = f"{index:04d}-{source.stem}"
+    destination = staging / f"{prefix}.{target_format}"
+    output_type = "video" if target_format == "mp4" else media_type
+    limit = (
+        settings.max_video_export_size_bytes
+        if output_type == "video"
+        else settings.max_image_export_size_bytes
+    )
+    if target_format == source_format and source.stat().st_size <= limit:
+        shutil.copy2(source, destination)
+    elif output_type == "video":
+        _transcode_video(source, destination, limit)
+    else:
+        _compress_image(source, destination, target_format, limit)
+    size = destination.stat().st_size if destination.is_file() else 0
+    if size > limit:
+        destination.unlink(missing_ok=True)
+        raise CollectionFailure(
+            "exports.file_size_exceeded",
+            f"{source.name} could not be reduced below {limit / 1048576:.0f} MB.",
+        )
+    return destination
+
+
+def _transcode_video(source, destination, limit):
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise CollectionFailure(
+            "exports.ffmpeg_unavailable",
+            "FFmpeg is required to convert this file. Install FFmpeg and add it to PATH.",
+        )
+    try:
+        probe = subprocess.run(
+            [ffmpeg, "-i", str(source)], capture_output=True, text=True, timeout=60,
+        )
+        match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", probe.stderr)
+        if not match:
+            raise ValueError("duration missing")
+        hours, minutes, seconds = match.groups()
+        duration = max(int(hours) * 3600 + int(minutes) * 60 + float(seconds), 0.1)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        raise CollectionFailure(
+            "exports.media_invalid", f"Could not read {source.name} for conversion."
+        ) from error
+    total_bitrate = min(max(int(limit * 8 * 0.90 / duration), 160000), 50_000_000)
+    has_audio = source.suffix.lower() != ".gif"
+    audio_bitrate = 128000 if has_audio and total_bitrate > 320000 else 0
+    video_bitrate = max(total_bitrate - audio_bitrate, 120000)
+    temporary = destination.with_name(f".{destination.stem}-{uuid4().hex}.mp4")
+    try:
+        for _ in range(4):
+            command = [
+                ffmpeg, "-y", "-i", str(source), "-map", "0:v:0",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                "-b:v", str(video_bitrate), "-maxrate", str(video_bitrate),
+                "-bufsize", str(video_bitrate * 2), "-movflags", "+faststart",
+            ]
+            if has_audio:
+                command += ["-map", "0:a?", "-c:a", "aac", "-b:a", str(audio_bitrate)]
+            else:
+                command += ["-an"]
+            command.append(str(temporary))
+            try:
+                subprocess.run(command, check=True, capture_output=True, timeout=1800)
+            except (OSError, subprocess.SubprocessError) as error:
+                raise CollectionFailure(
+                    "exports.transcode_failed", f"Could not convert {source.name}."
+                ) from error
+            if temporary.stat().st_size <= limit:
+                os.replace(temporary, destination)
+                return
+            temporary.unlink(missing_ok=True)
+            video_bitrate = max(int(video_bitrate * 0.72), 80000)
+        raise CollectionFailure(
+            "exports.file_size_exceeded",
+            f"{source.name} could not be reduced below {limit / 1048576:.0f} MB.",
+        )
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _compress_image(source, destination, target_format, limit):
+    save_format = {"jpg": "JPEG", "jpeg": "JPEG", "png": "PNG", "webp": "WEBP", "gif": "GIF"}.get(target_format)
+    if save_format is None:
+        raise CollectionFailure(
+            "exports.unsupported_conversion", f"Conversion to {target_format} is not supported."
+        )
+    try:
+        with Image.open(source) as opened:
+            frames = [frame.copy().convert("RGBA") for frame in ImageSequence.Iterator(opened)]
+            durations = [frame.info.get("duration", opened.info.get("duration", 100)) for frame in ImageSequence.Iterator(opened)]
+            loop = opened.info.get("loop", 0)
+    except (OSError, ValueError) as error:
+        raise CollectionFailure("exports.media_invalid", f"Could not read {source.name}.") from error
+    scale = 1.0
+    quality = 90
+    temporary = destination.with_name(f".{destination.stem}-{uuid4().hex}{destination.suffix}")
+    try:
+        for _ in range(12):
+            resized = []
+            for frame in frames:
+                width = max(1, int(frame.width * scale))
+                height = max(1, int(frame.height * scale))
+                item = frame if (width, height) == frame.size else frame.resize((width, height), Image.Resampling.LANCZOS)
+                if save_format == "JPEG":
+                    background = Image.new("RGB", item.size, "white")
+                    background.paste(item, mask=item.getchannel("A"))
+                    item = background
+                resized.append(item)
+            options = {"format": save_format, "optimize": True}
+            if save_format in {"JPEG", "WEBP"}:
+                options["quality"] = quality
+            if save_format == "GIF" and len(resized) > 1:
+                options.update(save_all=True, append_images=resized[1:], duration=durations, loop=loop)
+            resized[0].save(temporary, **options)
+            if temporary.stat().st_size <= limit:
+                os.replace(temporary, destination)
+                return
+            temporary.unlink(missing_ok=True)
+            if quality > 45 and save_format in {"JPEG", "WEBP"}:
+                quality -= 10
+            else:
+                scale *= 0.82
+        raise CollectionFailure(
+            "exports.file_size_exceeded",
+            f"{source.name} could not be reduced below {limit / 1048576:.0f} MB.",
+        )
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _safe_name(name):

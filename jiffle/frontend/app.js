@@ -77,6 +77,8 @@ function editSummary(operations=[]) {
 
 function toast(message, error = false) {
   const node = document.querySelector('#toast');
+  const savebar = document.querySelector('.builder-savebar');
+  node.style.bottom = savebar ? `${window.innerHeight-savebar.getBoundingClientRect().top+10}px` : '';
   node.textContent = message;
   node.className = `toast visible${error ? ' error' : ''}`;
   clearTimeout(toast.timer);
@@ -533,8 +535,15 @@ async function showCollectionBuilder() {
   };
   document.querySelector('#commitCollection').onclick = async () => {
     try { await api('/api/v1/collections',{method:'POST',body:JSON.stringify({name:document.querySelector('#builderName').value.trim(),...fields(),media_item_ids:preview.items.map(item=>item.id)})}); toast('Collection saved'); showCollections(); }
-    catch (error) { toast(error.message, true); }
+    catch (error) {
+      const status=document.querySelector('#builderStatus');
+      const name=document.querySelector('#builderName');
+      status.textContent=error.message;
+      if(/name already exists/i.test(error.message)){name.classList.add('invalid');name.focus();}
+      toast(error.message, true);
+    }
   };
+  document.querySelector('#builderName').oninput=event=>{event.target.classList.remove('invalid');document.querySelector('#commitCollection').disabled=!preview?.can_save||!event.target.value.trim();};
   document.querySelector('#cancelBuilder').onclick = showCollections;
   icons();
 }
@@ -562,7 +571,7 @@ async function showSettingsPage() {
       <div class="setting-line"><div><label for="libraryCardSize">Card size</label><small>Controls grid density on large screens.</small></div><select id="libraryCardSize" class="control compact-control"><option value="small" ${prefs.cardSize==='small'?'selected':''}>Compact</option><option value="medium" ${prefs.cardSize==='medium'?'selected':''}>Medium</option><option value="large" ${prefs.cardSize==='large'?'selected':''}>Large</option></select></div>
       <label class="setting-line toggle-line"><span><strong>Labels below images</strong><small>Author, source, and resolution are already available in the side panel.</small></span><input id="showCardInfo" type="checkbox" ${prefs.showCardInfo?'checked':''}><span class="toggle" aria-hidden="true"></span></label>
     </div></details>
-    <details class="settings-section" open><summary><span class="section-icon"><i data-lucide="sliders-horizontal"></i></span><span><strong>Import and limits</strong><small>Deleted media, collection, and export rules</small></span><i data-lucide="chevron-down"></i></summary><div class="settings-section-body"><label class="setting-line toggle-line"><span><strong>Never re-import deleted media</strong><small>When enabled, a deleted file is blocked immediately. When disabled, it is sent to Review for confirmation.</small></span><input name="block_previously_deleted" type="checkbox" ${data.block_previously_deleted?'checked':''}><span class="toggle" aria-hidden="true"></span></label><div class="settings-fields-2">${field('max_items_per_author','Items per author',{type:'number',hint:'Maximum items by one author in a collection.'})}<div class="form-row"><label for="maxExportMb">Maximum export, MB</label><small class="field-hint">Maximum total size of one export.</small><input id="maxExportMb" class="control" name="max_export_size_mb" type="number" min="1" value="${Math.max(1, Math.round(data.max_export_size_bytes / 1048576))}"></div></div></div></details>
+    <details class="settings-section" open><summary><span class="section-icon"><i data-lucide="sliders-horizontal"></i></span><span><strong>Import and limits</strong><small>Deleted media, collection, and export rules</small></span><i data-lucide="chevron-down"></i></summary><div class="settings-section-body"><label class="setting-line toggle-line"><span><strong>Never re-import deleted media</strong><small>When enabled, a deleted file is blocked immediately. When disabled, it is sent to Review for confirmation.</small></span><input name="block_previously_deleted" type="checkbox" ${data.block_previously_deleted?'checked':''}><span class="toggle" aria-hidden="true"></span></label><div class="settings-fields-2">${field('max_items_per_author','Items per author',{type:'number',hint:'Maximum items by one author in a collection.'})}<div class="form-row"><label>Maximum image file, MB</label><small class="field-hint">Per exported image.</small><input class="control" name="max_image_export_size_mb" type="number" min="1" value="${Math.max(1,Math.round(data.max_image_export_size_bytes/1048576))}"></div><div class="form-row"><label>Maximum video file, MB</label><small class="field-hint">Per exported video.</small><input class="control" name="max_video_export_size_mb" type="number" min="1" value="${Math.max(1,Math.round(data.max_video_export_size_bytes/1048576))}"></div></div><div class="form-row"><label>Export format conversions</label><small class="field-hint">Files are converted only in exported collections; library originals stay unchanged.</small><div id="exportFormatRules" class="format-rules"></div><button id="addExportFormatRule" class="btn" type="button"><i data-lucide="plus"></i>Add conversion</button></div></div></details>
     <details class="settings-section"><summary><span class="section-icon"><i data-lucide="waypoints"></i></span><span><strong>Sources</strong><small>Booru and FurAffinity credentials</small></span><i data-lucide="chevron-down"></i></summary><div class="settings-section-body settings-sources">
       ${provider('danbooru','Danbooru','Login and API key',[field('danbooru_login','Login'),field('danbooru_api_key','API key',{type:'password',secret:true})])}
       ${provider('e621','e621 / e926','Username and API key',[field('e621_login','Username'),field('e621_api_key','API key',{type:'password',secret:true})])}
@@ -604,10 +613,17 @@ async function showSettingsPage() {
       }
     } catch(error) { toast(error.message,true); }
   });
+  const sourceFormats=['gif','webm','mp4','jpg','jpeg','png','webp'];
+  const rulesNode=document.querySelector('#exportFormatRules');
+  const targetsFor=source=>['gif','webm','mp4'].includes(source)?['mp4']:['jpg','png','webp'];
+  const addRule=(source='gif',target='mp4')=>{const row=document.createElement('div');row.className='format-rule';row.innerHTML=`<select class="control rule-source">${sourceFormats.map(value=>`<option value="${value}" ${value===source?'selected':''}>.${value}</option>`).join('')}</select><i data-lucide="arrow-right"></i><select class="control rule-target"></select><button class="icon-btn danger" type="button" title="Remove conversion"><i data-lucide="trash-2"></i></button>`;const sourceNode=row.querySelector('.rule-source');const targetNode=row.querySelector('.rule-target');const renderTargets=selected=>{const targets=targetsFor(sourceNode.value);targetNode.innerHTML=targets.map(value=>`<option value="${value}" ${value===selected?'selected':''}>.${value}</option>`).join('');};renderTargets(target);sourceNode.onchange=()=>renderTargets();row.querySelector('button').onclick=()=>row.remove();rulesNode.append(row);icons();};
+  Object.entries(data.export_format_rules||{}).forEach(([source,target])=>addRule(source,target));
+  document.querySelector('#addExportFormatRule').onclick=()=>addRule();
   document.querySelector('#settingsForm').onsubmit = async event => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    const payload = {media_path:form.get('media_path'),export_path:form.get('export_path'),thumbnail_path:form.get('thumbnail_path'),import_staging_path:form.get('import_staging_path'),max_items_per_author:Number(form.get('max_items_per_author')),max_export_size_bytes:Number(form.get('max_export_size_mb'))*1048576,block_previously_deleted:form.has('block_previously_deleted'),crop_vision_format:form.get('crop_vision_format'),crop_vision_url:form.get('crop_vision_url')||null,crop_vision_model:form.get('crop_vision_model')||null,crop_min_area_percent:Number(form.get('crop_min_area_percent')),crop_padding_percent:Number(form.get('crop_padding_percent')),crop_background_tolerance:Number(form.get('crop_background_tolerance')),crop_selected_analysis:form.get('crop_selected_analysis')};
+    const export_format_rules={};document.querySelectorAll('.format-rule').forEach(row=>export_format_rules[row.querySelector('.rule-source').value]=row.querySelector('.rule-target').value);
+    const payload = {media_path:form.get('media_path'),export_path:form.get('export_path'),thumbnail_path:form.get('thumbnail_path'),import_staging_path:form.get('import_staging_path'),max_items_per_author:Number(form.get('max_items_per_author')),max_image_export_size_bytes:Number(form.get('max_image_export_size_mb'))*1048576,max_video_export_size_bytes:Number(form.get('max_video_export_size_mb'))*1048576,export_format_rules,block_previously_deleted:form.has('block_previously_deleted'),crop_vision_format:form.get('crop_vision_format'),crop_vision_url:form.get('crop_vision_url')||null,crop_vision_model:form.get('crop_vision_model')||null,crop_min_area_percent:Number(form.get('crop_min_area_percent')),crop_padding_percent:Number(form.get('crop_padding_percent')),crop_background_tolerance:Number(form.get('crop_background_tolerance')),crop_selected_analysis:form.get('crop_selected_analysis')};
     ['crop_vision_key','danbooru_login','danbooru_api_key','e621_login','e621_api_key','gelbooru_user_id','gelbooru_api_key','furaffinity_cookie_a','furaffinity_cookie_b'].forEach(key => { if (form.get(key)) payload[key]=form.get(key); });
     const lines = name => String(form.get(name) || '').split(/\r?\n/).map(value => value.trim()).filter(Boolean);
     const aliases = {};

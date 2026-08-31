@@ -25,7 +25,8 @@ def update_settings():
         return _error("settings.invalid_request", "A JSON object is required.", 400)
     allowed = {
         "media_path", "thumbnail_path", "import_staging_path", "export_path",
-        "max_items_per_author", "max_export_size_bytes", "block_previously_deleted",
+        "max_items_per_author", "max_image_export_size_bytes",
+        "max_video_export_size_bytes", "export_format_rules", "block_previously_deleted",
         "crop_vision_url", "crop_vision_key", "crop_vision_model", "crop_vision_format",
         "crop_min_area_percent", "crop_padding_percent", "crop_background_tolerance", "crop_selected_analysis",
         "danbooru_login", "danbooru_api_key", "e621_login", "e621_api_key",
@@ -183,10 +184,32 @@ def _validated_update(settings, payload):
         value = values["max_items_per_author"]
         if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 1000:
             raise ValueError("max_items_per_author must be an integer from 0 to 1000.")
-    if "max_export_size_bytes" in values:
-        value = values["max_export_size_bytes"]
+    for field in ("max_image_export_size_bytes", "max_video_export_size_bytes"):
+        if field not in values:
+            continue
+        value = values[field]
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-            raise ValueError("max_export_size_bytes must be a positive integer.")
+            raise ValueError(f"{field} must be a positive integer.")
+    if "export_format_rules" in values:
+        rules = values["export_format_rules"]
+        if not isinstance(rules, dict):
+            raise ValueError("export_format_rules must be an object.")
+        allowed_sources = {"jpg", "jpeg", "png", "gif", "webp", "mp4", "webm"}
+        allowed_targets = {"jpg", "png", "webp", "mp4"}
+        normalized = []
+        for source, target in rules.items():
+            if not isinstance(source, str) or not isinstance(target, str):
+                raise ValueError("Export format rules must contain string formats.")
+            source = source.strip().lower().lstrip(".")
+            target = target.strip().lower().lstrip(".")
+            if source not in allowed_sources or target not in allowed_targets:
+                raise ValueError("An export format rule contains an unsupported format.")
+            if target == "mp4" and source not in {"gif", "mp4", "webm"}:
+                raise ValueError("Only GIF and video formats can be converted to MP4.")
+            if source in {"mp4", "webm"} and target != "mp4":
+                raise ValueError("Video formats can only be converted to MP4.")
+            normalized.append((source, target))
+        values["export_format_rules"] = tuple(normalized)
     if "block_previously_deleted" in values and not isinstance(
         values["block_previously_deleted"], bool
     ):
@@ -221,7 +244,9 @@ def _public_settings(settings):
         "import_staging_path": str(settings.resolved_import_staging_path),
         "export_path": str(settings.resolved_export_path),
         "max_items_per_author": settings.max_items_per_author,
-        "max_export_size_bytes": settings.max_export_size_bytes,
+        "max_image_export_size_bytes": settings.max_image_export_size_bytes,
+        "max_video_export_size_bytes": settings.max_video_export_size_bytes,
+        "export_format_rules": dict(settings.export_format_rules),
         "block_previously_deleted": settings.block_previously_deleted,
         "crop_vision_url": settings.crop_vision_url,
         "crop_vision_model": settings.crop_vision_model,

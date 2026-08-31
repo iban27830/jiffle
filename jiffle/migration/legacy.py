@@ -445,7 +445,9 @@ def _legacy_runtime_settings(settings, config_path):
     furaffinity = auth.get("furaffinity.net", {})
     values = {
         "max_items_per_author": _positive_int(payload.get("max_per_author")) or settings.max_items_per_author,
-        "max_export_size_bytes": (_positive_int(payload.get("max_export_size_mb")) or 50) * 1024 * 1024,
+        "max_image_export_size_bytes": 50 * 1024 * 1024,
+        "max_video_export_size_bytes": 50 * 1024 * 1024,
+        "export_format_rules": {"gif": "mp4", "webm": "mp4"},
         "danbooru_login": _auth_value(danbooru, "login"),
         "danbooru_api_key": _auth_value(danbooru, "api_key"),
         "e621_login": _auth_value(e621, "login"),

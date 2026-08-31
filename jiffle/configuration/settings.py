@@ -5,6 +5,9 @@ import os
 from pathlib import Path
 
 
+DEFAULT_EXPORT_FORMAT_RULES = (("gif", "mp4"), ("webm", "mp4"))
+
+
 @dataclass(frozen=True)
 class Settings:
     database_path: Path
@@ -16,7 +19,9 @@ class Settings:
     initialize_database: bool = True
     run_jobs_inline: bool = False
     max_items_per_author: int = 5
-    max_export_size_bytes: int = 50 * 1024 * 1024
+    max_image_export_size_bytes: int = 50 * 1024 * 1024
+    max_video_export_size_bytes: int = 50 * 1024 * 1024
+    export_format_rules: tuple[tuple[str, str], ...] = DEFAULT_EXPORT_FORMAT_RULES
     block_previously_deleted: bool = False
     crop_vision_url: str | None = None
     crop_vision_key: str | None = None
@@ -84,7 +89,9 @@ class Settings:
             }
             allowed = {
                 "media_path", "thumbnail_path", "import_staging_path", "export_path",
-                "max_items_per_author", "max_export_size_bytes", "block_previously_deleted",
+                "max_items_per_author", "max_image_export_size_bytes",
+                "max_video_export_size_bytes", "export_format_rules",
+                "block_previously_deleted",
                 "crop_vision_url", "crop_vision_key", "crop_vision_model", "crop_vision_format",
                 "crop_min_area_percent", "crop_padding_percent", "crop_background_tolerance", "crop_selected_analysis",
                 "danbooru_login", "danbooru_api_key", "e621_login", "e621_api_key",
@@ -92,6 +99,12 @@ class Settings:
                 "furaffinity_cookie_b",
             }
             values = {key: value for key, value in payload.items() if key in allowed}
+            if "export_format_rules" in values:
+                rules = values["export_format_rules"]
+                if isinstance(rules, dict):
+                    values["export_format_rules"] = tuple(rules.items())
+                elif isinstance(rules, list):
+                    values["export_format_rules"] = tuple(tuple(rule) for rule in rules)
             for key in ("media_path", "thumbnail_path", "import_staging_path", "export_path"):
                 if key in values and values[key]:
                     values[key] = Path(values[key]).resolve()
@@ -111,7 +124,9 @@ def persist_settings(settings: Settings) -> None:
         "import_staging_path": str(settings.resolved_import_staging_path),
         "export_path": str(settings.resolved_export_path),
         "max_items_per_author": settings.max_items_per_author,
-        "max_export_size_bytes": settings.max_export_size_bytes,
+        "max_image_export_size_bytes": settings.max_image_export_size_bytes,
+        "max_video_export_size_bytes": settings.max_video_export_size_bytes,
+        "export_format_rules": dict(settings.export_format_rules),
         "block_previously_deleted": settings.block_previously_deleted,
         "crop_vision_url": settings.crop_vision_url,
         "crop_vision_key": settings.crop_vision_key,
