@@ -6,6 +6,7 @@ Jiffle is a local application for importing, organizing, tagging, editing, and c
 
 - Windows
 - Python 3.11 or newer
+- FFmpeg available in `PATH` for GIF/WebM conversion and oversized video export
 
 ## Installation
 
@@ -14,6 +15,14 @@ Open PowerShell in the Jiffle folder and install the required packages:
 ```powershell
 python -m pip install flask requests pillow
 ```
+
+Install FFmpeg for export conversion, for example with Windows Package Manager:
+
+```powershell
+winget install Gyan.FFmpeg
+```
+
+Restart PowerShell after installation so `ffmpeg` is available in `PATH`.
 
 ## Running Jiffle
 
@@ -67,7 +76,8 @@ Some sources require account credentials configured under **Settings**. A direct
 - The crop scan checks static images for almost-uniform white, black, colored, or transparent margins on any side. Animated images and videos are not scanned. **No crop needed** excludes the current version from later scans; **Skip** leaves it pending. Use **Reopen review** to reconsider an earlier decision. The coordinate reset button restores the saved crop proposal only.
 - Configure the detector under **Settings → Crop analysis**: choose the cautious, normal, or sensitive preset, set the minimum removable area and retained padding, and select Local or Vision analysis for an image opened directly in Editor. Library-wide scans always use the local detector.
 - Optional Vision analysis is available for one open image at a time. Configure the OpenAI-compatible or Gemini endpoint, model, and API key under **Settings → Crop vision model**, then select **Vision model** in the crop editor. The full original is sent only after this explicit action. An OpenAI-compatible URL may point to a local model server.
-- Open **Collections** to create reusable selections and export them.
+- Open **Collections** to create reusable selections and export them. Export limits apply to each file, not to the combined collection. By default, images and videos are each limited to 50 MB per file; oversized files are compressed only in the exported copy.
+- Jiggie-compatible export conversions are configured under **Settings → Import and limits**. New installations convert GIF and WebM files to MP4 by default. Add, change, or remove conversion rows as needed; originals in the library are never changed.
 
 ### Import and review
 
@@ -86,6 +96,7 @@ Open **Settings** to configure source accounts, library display options, storage
 - If the page does not open automatically, visit `http://127.0.0.1:5001/` manually.
 - If an online import fails, check the source credentials under **Settings** and confirm that the source URL is accessible in a browser.
 - If Vision crop analysis fails, verify that the configured model accepts images and returns JSON coordinates. Local crop scanning and manual crop controls remain available without a model.
+- If collection export reports that FFmpeg is unavailable, install FFmpeg, add its executable directory to `PATH`, and restart Jiffle. If a file cannot be reduced below its configured image or video limit, increase the corresponding per-file limit under **Settings → Import and limits**.
 
 ## License
 
