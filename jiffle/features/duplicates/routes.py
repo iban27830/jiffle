@@ -19,8 +19,8 @@ def start_duplicate_scan():
         threshold = float(payload.get("threshold", 90))
     except (TypeError, ValueError):
         return _error("duplicates.invalid_threshold", "Threshold must be numeric.", 400)
-    if not 0 <= threshold <= 100:
-        return _error("duplicates.invalid_threshold", "Threshold must be between 0 and 100.", 400)
+    if not 70 <= threshold <= 100:
+        return _error("duplicates.invalid_threshold", "Threshold must be between 70 and 100.", 400)
     job_id = create_duplicate_scan_job(get_database(), threshold)
     settings: Settings = current_app.config["JIFFLE_SETTINGS"]
     arguments = (settings.database_path, settings, job_id, threshold)

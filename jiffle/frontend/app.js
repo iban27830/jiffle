@@ -346,10 +346,14 @@ function openMediaInLibrary(mediaId) {
 }
 
 async function showDuplicates() {
-  setHeader('Duplicates','',button('Scan','scan-search','primary'));
-  actions.querySelector('button').onclick = async () => { try { await runJob(() => api('/api/v1/duplicate-scan-jobs',{method:'POST',body:JSON.stringify({threshold:90})})); showDuplicates(); } catch(error){toast(error.message,true);} };
+  setHeader('Duplicates','');
+  const duplicateState=viewState('duplicates');
+  const threshold=Math.min(100,Math.max(70,Number(duplicateState.threshold)||90));
   const data = await api('/api/v1/duplicate-matches');
-  workspace.innerHTML = `<div class="page item-list">${data.items.length ? data.items.map(match => `<section class="panel"><div class="panel-head">Match ${match.confidence}%</div><div class="panel-body"><div class="compare"><img src="${match.left.thumbnail_url}" alt=""><img src="${match.right.thumbnail_url}" alt=""></div><div class="actions" style="margin-top:10px"><button class="btn resolve" data-id="${match.id}" data-keep="left">Keep left</button><button class="btn resolve" data-id="${match.id}" data-keep="right">Keep right</button><button class="btn ignore" data-id="${match.id}">Ignore</button></div></div></section>`).join('') : '<div class="empty">No matches</div>'}</div>`;
+  workspace.innerHTML = `<div class="duplicates-toolbar"><label for="duplicateThreshold">Similarity threshold</label><input id="duplicateThreshold" type="range" min="70" max="100" step="1" value="${threshold}"><output id="duplicateThresholdValue" for="duplicateThreshold">${threshold}%</output><button id="scanDuplicates" class="btn primary"><i data-lucide="scan-search"></i>Scan</button></div><div class="page item-list">${data.items.length ? data.items.map(match => `<section class="panel"><div class="panel-head">Match ${match.confidence}%</div><div class="panel-body"><div class="compare"><img src="${match.left.thumbnail_url}" alt=""><img src="${match.right.thumbnail_url}" alt=""></div><div class="actions" style="margin-top:10px"><button class="btn resolve" data-id="${match.id}" data-keep="left">Keep left</button><button class="btn resolve" data-id="${match.id}" data-keep="right">Keep right</button><button class="btn ignore" data-id="${match.id}">Ignore</button></div></div></section>`).join('') : '<div class="empty">No matches</div>'}</div>`;
+  const slider=document.querySelector('#duplicateThreshold');
+  slider.oninput=()=>{document.querySelector('#duplicateThresholdValue').value=`${slider.value}%`;saveViewState('duplicates',{threshold:Number(slider.value)});};
+  document.querySelector('#scanDuplicates').onclick = async () => { try { await runJob(() => api('/api/v1/duplicate-scan-jobs',{method:'POST',body:JSON.stringify({threshold:Number(slider.value)})})); showDuplicates(); } catch(error){toast(error.message,true);} };
   document.querySelectorAll('.ignore').forEach(node => node.onclick = async () => { await api(`/api/v1/duplicate-matches/${node.dataset.id}/ignore`,{method:'POST'}); showDuplicates(); });
   document.querySelectorAll('.resolve').forEach(node => node.onclick = async () => { try { await api(`/api/v1/duplicate-matches/${node.dataset.id}/resolve`,{method:'POST',body:JSON.stringify({keep:node.dataset.keep,merge_metadata:true})}); showDuplicates(); } catch(error){toast(error.message,true);} }); icons();
 }

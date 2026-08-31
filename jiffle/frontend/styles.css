@@ -41,6 +41,11 @@ button { color: inherit; }
 .btn:disabled { opacity: .5; cursor: default; }
 .control { width: 100%; min-width: 0; height: 36px; padding: 0 10px; border: 1px solid var(--line); border-radius: 5px; background: #fff; color: var(--text); }
 textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
+.duplicates-toolbar { display: grid; grid-template-columns: auto minmax(160px,360px) 48px auto; align-items: center; gap: 10px; padding: 10px 18px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.duplicates-toolbar label { font-weight: 650; }
+.duplicates-toolbar input { width: 100%; accent-color: var(--accent); }
+.duplicates-toolbar output { color: var(--muted); font-variant-numeric: tabular-nums; }
+.duplicates-toolbar .btn { justify-self: end; }
 .library-layout { height: 100%; display: grid; grid-template-columns: minmax(0,1fr) 7px minmax(260px,var(--inspector-width)); }
 .library-main { min-width: 0; display: grid; grid-template-rows: auto minmax(0,1fr) auto; }
 .toolbar { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); background: var(--surface); }
@@ -271,6 +276,8 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
 @media (max-width: 560px) {
   .topbar { padding: 0 10px; }
   .topbar h1 { font-size: 16px; }
+  .duplicates-toolbar { grid-template-columns: minmax(0,1fr) 48px auto; padding: 10px; }
+  .duplicates-toolbar label { grid-column: 1/-1; }
   #headerActions .btn [data-lucide] { width: 17px; height: 17px; }
   .page { padding: 11px; }
   .gallery { padding: 8px; gap: 7px; }
