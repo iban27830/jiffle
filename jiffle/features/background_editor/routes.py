@@ -234,10 +234,15 @@ def cancel_scan(job_id):
 @background_blueprint.post("/api/v1/media/<int:media_id>/background-preview")
 def create_preview(media_id):
     configured = current_app.config.get("JIFFLE_BACKGROUND_REMOVER")
+    settings = current_app.config["JIFFLE_SETTINGS"]
+    remover = configured or (
+        lambda image, model_root: remove_background(
+            image, model_root, settings.huggingface_token
+        )
+    )
     try:
         row = create_background_preview(
-            get_database(), current_app.config["JIFFLE_SETTINGS"], media_id,
-            configured or remove_background,
+            get_database(), settings, media_id, remover,
         )
     except BackgroundFailure as error:
         return _background_error(error)
@@ -450,9 +455,13 @@ def _background_error(error):
         status = 409
     elif error.code in {
         "background.runtime_install_failed", "background.model_download_failed",
-        "background.inference_failed",
+        "background.inference_failed", "background.huggingface_unavailable",
     }:
         status = 503
+    elif error.code == "background.huggingface_token_invalid":
+        status = 401
+    elif error.code == "background.huggingface_access_denied":
+        status = 403
     elif error.code in {
         "background.decode_failed", "background.animated_unsupported",
         "background.unsupported_media", "background.unsupported_format",

@@ -268,6 +268,8 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
 .setting-line > div:first-child, .toggle-line > span:first-child { display: grid; gap: 3px; }
 .setting-line label, .setting-line strong { font-weight: 650; }
 .setting-line small, .field-hint { color: var(--muted); font-size: .82em; font-weight: 400; }
+#huggingFaceStatus.good { color: var(--good); }
+#huggingFaceStatus.error { color: var(--bad); }
 .compact-control { width: min(100%,310px); justify-self: end; }
 .toggle-line { position: relative; cursor: pointer; }
 .toggle-line input { position: absolute; opacity: 0; pointer-events: none; }

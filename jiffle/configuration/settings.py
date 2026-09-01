@@ -31,6 +31,7 @@ class Settings:
     crop_padding_percent: float = 2.0
     crop_background_tolerance: int = 14
     crop_selected_analysis: str = "local"
+    huggingface_token: str | None = None
     danbooru_login: str | None = None
     danbooru_api_key: str | None = None
     e621_login: str | None = None
@@ -74,6 +75,7 @@ class Settings:
             crop_vision_key=os.environ.get("JIFFLE_CROP_VISION_KEY"),
             crop_vision_model=os.environ.get("JIFFLE_CROP_VISION_MODEL"),
             crop_vision_format=os.environ.get("JIFFLE_CROP_VISION_FORMAT", "openai"),
+            huggingface_token=os.environ.get("JIFFLE_HUGGINGFACE_TOKEN"),
         )
         legacy_configuration_path = data_root / "settings.json"
         source_path = (
@@ -94,6 +96,7 @@ class Settings:
                 "block_previously_deleted",
                 "crop_vision_url", "crop_vision_key", "crop_vision_model", "crop_vision_format",
                 "crop_min_area_percent", "crop_padding_percent", "crop_background_tolerance", "crop_selected_analysis",
+                "huggingface_token",
                 "danbooru_login", "danbooru_api_key", "e621_login", "e621_api_key",
                 "gelbooru_user_id", "gelbooru_api_key", "furaffinity_cookie_a",
                 "furaffinity_cookie_b",
@@ -136,6 +139,7 @@ def persist_settings(settings: Settings) -> None:
         "crop_padding_percent": settings.crop_padding_percent,
         "crop_background_tolerance": settings.crop_background_tolerance,
         "crop_selected_analysis": settings.crop_selected_analysis,
+        "huggingface_token": settings.huggingface_token,
         "danbooru_login": settings.danbooru_login,
         "danbooru_api_key": settings.danbooru_api_key,
         "e621_login": settings.e621_login,

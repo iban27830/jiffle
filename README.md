@@ -97,13 +97,14 @@ Background replacement is available for static images in **Library** and **Edito
 To replace a background:
 
 1. Open **Editor** and select **Find background candidates** to scan the whole library, or select an image in **Library** and choose **Replace background**. For one image, **Analyze selected** reports the estimated background area and color.
-2. In the image editor, open **Replace background** and select **Remove background / Preview**. The first request may take several minutes while Jiffle installs the local RMBG-2.0 runtime and downloads its model weights. Network access is required only for this setup; later requests use the cached model.
-3. After a successful preview, choose a background category and select an image from the local background library. To add a new background, enter its category, choose a local image file, and select **Import background**.
-4. Adjust **Blur** and select **Apply background**. The blur control and apply action stay disabled until the foreground preview is ready and a background is selected.
+2. Before the first preview, open **Settings → Background removal**. Create a Hugging Face account, open the [RMBG-2.0 model page](https://huggingface.co/briaai/RMBG-2.0), accept the model access terms, create a token with `Read` permission on the [Hugging Face token page](https://huggingface.co/settings/tokens), paste it into **Hugging Face token**, and save settings. Select **Test access** to verify both the token and access to the gated model before starting image processing. The token itself is never shown back by the settings API.
+3. In the image editor, open **Replace background** and select **Remove background / Preview**. The first request may take several minutes while Jiffle installs the local RMBG-2.0 runtime and downloads its model weights. Network access is required only for this setup; later requests use the cached model.
+4. After a successful preview, choose a background category and select an image from the local background library. To add a new background, enter its category, choose a local image file, and select **Import background**.
+5. Adjust **Blur** and select **Apply background**. The blur control and apply action stay disabled until the foreground preview is ready and a background is selected.
 
 The composition is saved as a new PNG version. The current/original version remains active, and the new version is shown under **Versions** where it can be activated or restored later. Background files are stored in the application's data directory and are not uploaded anywhere.
 
-If model setup fails, check that Python can install packages and that the computer has network access and enough disk space for PyTorch and the model cache. A GPU is optional; CPU processing is supported but slower. If the preview reports that no usable subject was isolated, try another image or correct the source version before composing. A missing or expired preview must be generated again before applying a background.
+If **Test access** reports an invalid token, create a new read token and replace the saved value. If it reports that access is denied, accept the RMBG-2.0 terms while logged in to Hugging Face. If it reports that Hugging Face is unavailable, check the network or proxy settings. Model setup also requires enough disk space for PyTorch and the model cache. A GPU is optional; CPU processing is supported but slower. If the preview reports that no usable subject was isolated, try another image or correct the source version before composing. A missing or expired preview must be generated again before applying a background.
 
 ## Troubleshooting
 

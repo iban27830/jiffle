@@ -5,16 +5,19 @@ import sys
 import threading
 
 from PIL import Image
+import requests
 
 from .workflow import BackgroundFailure, MODEL_NAME
 
 
 _runtime_lock = threading.Lock()
 _loaded_runtime = None
+HUGGINGFACE_WHOAMI_URL = "https://huggingface.co/api/whoami-v2"
+MODEL_CONFIG_URL = f"https://huggingface.co/{MODEL_NAME}/resolve/main/config.json"
 
 
-def remove_background(image, model_root):
-    model, torch, transforms, device = _load_runtime(model_root)
+def remove_background(image, model_root, huggingface_token=None):
+    model, torch, transforms, device = _load_runtime(model_root, huggingface_token)
     try:
         preprocessing = transforms.Compose(
             [
@@ -50,13 +53,67 @@ def remove_background(image, model_root):
         ) from error
 
 
-def _load_runtime(model_root):
+def validate_huggingface_token(token):
+    token = token.strip() if isinstance(token, str) else ""
+    if not token:
+        raise BackgroundFailure(
+            "background.huggingface_token_required",
+            "Add a Hugging Face access token in Settings before loading RMBG-2.0.",
+        )
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        identity = requests.get(HUGGINGFACE_WHOAMI_URL, headers=headers, timeout=20)
+    except requests.RequestException as error:
+        raise BackgroundFailure(
+            "background.huggingface_unavailable",
+            "Hugging Face could not be reached. Check the network connection and try again.",
+        ) from error
+    if identity.status_code in {401, 403}:
+        raise BackgroundFailure(
+            "background.huggingface_token_invalid",
+            "The Hugging Face token is invalid or has expired.",
+        )
+    if identity.status_code != 200:
+        raise BackgroundFailure(
+            "background.huggingface_unavailable",
+            "Hugging Face could not verify the access token. Try again later.",
+        )
+    try:
+        access = requests.get(MODEL_CONFIG_URL, headers=headers, timeout=30)
+    except requests.RequestException as error:
+        raise BackgroundFailure(
+            "background.huggingface_unavailable",
+            "Hugging Face could not verify access to RMBG-2.0. Check the network connection and try again.",
+        ) from error
+    if access.status_code in {401, 403}:
+        raise BackgroundFailure(
+            "background.huggingface_access_denied",
+            "This Hugging Face account does not have access to briaai/RMBG-2.0. Accept the model terms first.",
+        )
+    if access.status_code != 200:
+        raise BackgroundFailure(
+            "background.huggingface_unavailable",
+            "Hugging Face could not verify access to RMBG-2.0. Try again later.",
+        )
+    try:
+        payload = identity.json()
+    except ValueError:
+        payload = {}
+    return payload.get("name") or payload.get("fullname") or "authenticated"
+
+
+def _load_runtime(model_root, huggingface_token=None):
     global _loaded_runtime
     if _loaded_runtime is not None:
         return _loaded_runtime
     with _runtime_lock:
         if _loaded_runtime is not None:
             return _loaded_runtime
+        cache_available = _model_cache_available(model_root)
+        token_validated = False
+        if not cache_available:
+            validate_huggingface_token(huggingface_token)
+            token_validated = True
         _ensure_dependencies()
         try:
             import torch
@@ -70,20 +127,45 @@ def _load_runtime(model_root):
         try:
             model_root.mkdir(parents=True, exist_ok=True)
             device = "cuda" if torch.cuda.is_available() else "cpu"
-            model = AutoModelForImageSegmentation.from_pretrained(
-                MODEL_NAME,
-                trust_remote_code=True,
-                cache_dir=model_root,
-            )
+            token = huggingface_token or False
+            try:
+                model = AutoModelForImageSegmentation.from_pretrained(
+                    MODEL_NAME,
+                    trust_remote_code=True,
+                    cache_dir=model_root,
+                    local_files_only=True,
+                    token=token,
+                )
+            except Exception:
+                if not token_validated:
+                    validate_huggingface_token(huggingface_token)
+                model = AutoModelForImageSegmentation.from_pretrained(
+                    MODEL_NAME,
+                    trust_remote_code=True,
+                    cache_dir=model_root,
+                    token=huggingface_token,
+                )
             model.to(device)
             model.eval()
             _loaded_runtime = (model, torch, transforms, device)
             return _loaded_runtime
+        except BackgroundFailure:
+            raise
         except Exception as error:
             raise BackgroundFailure(
                 "background.model_download_failed",
                 "RMBG-2.0 could not be downloaded or loaded. Check network access and available disk space.",
             ) from error
+
+
+def _model_cache_available(model_root):
+    model_directory = model_root / "models--briaai--RMBG-2.0" / "snapshots"
+    if not model_directory.is_dir():
+        return False
+    return any(
+        snapshot.is_dir() and (snapshot / "config.json").is_file()
+        for snapshot in model_directory.iterdir()
+    )
 
 
 def _ensure_dependencies():
