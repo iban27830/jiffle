@@ -36,7 +36,12 @@ def _root(settings):
 @background_blueprint.get('/api/v1/background-assets')
 def list_assets():
     rows = get_database().execute('SELECT * FROM background_assets ORDER BY id DESC').fetchall()
-    return jsonify({'items':[dict(r, content_url=f'/api/v1/background-assets/{r["id"]}/content') for r in rows]})
+    items=[]
+    for row in rows:
+        item={key: row[key] for key in row.keys()}
+        item['content_url']=f'/api/v1/background-assets/{row["id"]}/content'
+        items.append(item)
+    return jsonify({'items':items})
 
 @background_blueprint.post('/api/v1/background-assets/import')
 def import_asset():
