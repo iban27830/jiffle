@@ -16,6 +16,8 @@ let includeTag = ''; let excludeTag = '';
 let librarySearch = '';
 let reloadLibrary = null;
 let monitoredCropJob = null;
+let monitoredBackgroundJob = null;
+let reloadBackgroundCandidates = null;
 
 const UI_STATE_KEY = 'jiffle-session-state-v1';
 let uiState = (() => { try { return JSON.parse(sessionStorage.getItem(UI_STATE_KEY) || '{}'); } catch { return {}; } })();
@@ -69,7 +71,7 @@ applyLibraryPrefs();
 const icons = () => window.lucide?.createIcons();
 const button = (label, icon, extra = '') => `<button class="btn ${extra}"><i data-lucide="${icon}"></i>${label}</button>`;
 const esc = value => String(value ?? '').replace(/[&<>"]/g, character => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[character]));
-const operationName = operation => ({crop:'Crop',replace:'Replace',original:'Original'})[operation] || String(operation || 'Edit').replaceAll('_',' ').replace(/^./,c=>c.toUpperCase());
+const operationName = operation => ({crop:'Crop',replace:'Replace',original:'Original',background_replace:'Background replacement'})[operation] || String(operation || 'Edit').replaceAll('_',' ').replace(/^./,c=>c.toUpperCase());
 function editSummary(operations=[]) {
   const counts=new Map(); operations.forEach(operation=>counts.set(operation,(counts.get(operation)||0)+1));
   return [...counts].map(([operation,count])=>`${operationName(operation)}${count>1?` ×${count}`:''}`).join(' + ');
@@ -178,6 +180,37 @@ async function monitorCropScan(job) {
 
 async function restoreCropScanMonitor(){try{const active=await api('/api/v1/crop-scan-jobs/active');if(active.job)monitorCropScan(active.job)}catch{}}
 
+async function monitorBackgroundScan(job) {
+  if (!job || monitoredBackgroundJob === job.id) return;
+  monitoredBackgroundJob = job.id;
+  const render = current => {
+    jobStatus.innerHTML = `<span>Background scan: ${current.progress ?? 0}% · ${current.scanned ?? 0}/${current.total ?? '?'} · ${current.candidates ?? 0} found</span><button id="stopBackgroundScan" class="status-stop" title="Stop background scan"><i data-lucide="square"></i></button>`;
+    const stop=document.querySelector('#stopBackgroundScan');
+    stop.disabled=Boolean(current.cancel_requested);
+    stop.onclick=async()=>{stop.disabled=true;await api(`/api/v1/background-scan-jobs/${current.id}/cancel`,{method:'POST'})};
+    icons();
+  };
+  try {
+    let current=job;
+    for (;;) {
+      render(current);
+      const state=await api(current.status_url);
+      if(state.status==='completed'||state.status==='failed')break;
+      await new Promise(resolve=>setTimeout(resolve,700));
+      const active=await api('/api/v1/background-scan-jobs/active');
+      if(!active.job)break;
+      current=active.job;
+    }
+  } catch {}
+  if(monitoredBackgroundJob===job.id){
+    monitoredBackgroundJob=null;
+    jobStatus.textContent='';
+    if(reloadBackgroundCandidates)reloadBackgroundCandidates();
+  }
+}
+
+async function restoreBackgroundScanMonitor(){try{const active=await api('/api/v1/background-scan-jobs/active');if(active.job)monitorBackgroundScan(active.job)}catch{}}
+
 async function showLibrary() {
   const state = viewState('library');
   librarySearch = state.search ?? librarySearch;
@@ -277,7 +310,7 @@ async function inspectMedia(id) {
   const preview = selectedMedia.type === 'video' ? `<video class="inspector-preview" src="${selectedMedia.content_url}" controls></video>` : `<img class="inspector-preview" src="${selectedMedia.content_url}" alt="">`;
   pane.classList.add('has-media');
   const edits=selectedMedia.is_edited?`<div class="field"><label>Edits</label><span class="edit-description"><i data-lucide="wand-sparkles"></i>${esc(editSummary(selectedMedia.edit_operations))}</span></div>`:'';
-  pane.innerHTML = `<button id="closeInspector" class="icon-btn inspector-close" title="Close"><i data-lucide="x"></i></button>${preview}<h2>${esc(selectedMedia.author || 'Unknown author')}</h2><div class="field"><label>Media ID</label><button type="button" id="searchMediaId" class="text-link">${selectedMedia.id}</button></div><div class="field"><label>Source</label><a href="${esc(selectedMedia.source_url || '#')}" target="_blank" rel="noopener" class="ellipsis">${esc(selectedMedia.source_url || 'Not specified')}</a></div><div class="field"><label>Size</label>${selectedMedia.width || '?'} × ${selectedMedia.height || '?'} · ${formatBytes(selectedMedia.file_size)}</div>${edits}<details class="tag-section field" open><summary><span>Tags</span><span class="badge">${selectedMedia.tags.length}</span></summary><div class="tag-scroll"><div class="tags">${selectedMedia.tags.map(tagHtml).join('') || 'No tags'}</div></div></details><div class="form-actions inspector-actions"><a class="icon-btn" href="${selectedMedia.content_url}" target="_blank" rel="noopener" title="Open full size"><i data-lucide="maximize-2"></i></a><button id="openEditor" class="btn"><i data-lucide="panel-top-open"></i>Open in Editor</button><button id="addCollection" class="btn"><i data-lucide="folder-plus"></i>Build collection</button><button id="deleteMedia" class="icon-btn danger" title="Delete"><i data-lucide="trash-2"></i></button></div>`;
+  pane.innerHTML = `<button id="closeInspector" class="icon-btn inspector-close" title="Close"><i data-lucide="x"></i></button>${preview}<h2>${esc(selectedMedia.author || 'Unknown author')}</h2><div class="field"><label>Media ID</label><button type="button" id="searchMediaId" class="text-link">${selectedMedia.id}</button></div><div class="field"><label>Source</label><a href="${esc(selectedMedia.source_url || '#')}" target="_blank" rel="noopener" class="ellipsis">${esc(selectedMedia.source_url || 'Not specified')}</a></div><div class="field"><label>Size</label>${selectedMedia.width || '?'} × ${selectedMedia.height || '?'} · ${formatBytes(selectedMedia.file_size)}</div>${edits}<details class="tag-section field" open><summary><span>Tags</span><span class="badge">${selectedMedia.tags.length}</span></summary><div class="tag-scroll"><div class="tags">${selectedMedia.tags.map(tagHtml).join('') || 'No tags'}</div></div></details><div class="form-actions inspector-actions"><a class="icon-btn" href="${selectedMedia.content_url}" target="_blank" rel="noopener" title="Open full size"><i data-lucide="maximize-2"></i></a><button id="openEditor" class="btn"><i data-lucide="panel-top-open"></i>Open in Editor</button>${selectedMedia.type==='image'?'<button id="replaceMediaBackground" class="btn"><i data-lucide="image-plus"></i>Replace background</button>':''}<button id="addCollection" class="btn"><i data-lucide="folder-plus"></i>Build collection</button><button id="deleteMedia" class="icon-btn danger" title="Delete"><i data-lucide="trash-2"></i></button></div>`;
   const authorHeading = pane.querySelector('h2');
   authorHeading.insertAdjacentHTML('beforebegin', '<div class="field author-field"><label>Author</label></div>');
   authorHeading.className = 'author-value';
@@ -295,7 +328,9 @@ async function inspectMedia(id) {
   pane.querySelectorAll('[data-exclude-tag]').forEach(node => node.onclick = event => { event.stopPropagation(); appendSearchTerm(`-${node.dataset.excludeTag}`); });
   document.querySelector('#deleteMedia').onclick = async () => { if (!confirm('Delete this file?')) return; try { await api(`/api/v1/media/${id}`, {method:'DELETE'}); toast('File deleted'); selectedMedia=null; showLibrary(); } catch(error) { toast(error.message,true); } };
   document.querySelector('#addCollection').onclick = () => showCollectionBuilder();
-  document.querySelector('#openEditor').onclick = () => { saveViewState('editor',{targetMediaId:id,analysisId:null}); navigate('editor'); };
+  document.querySelector('#openEditor').onclick = () => { saveViewState('editor',{targetMediaId:id,analysisId:null,backgroundOpen:false}); navigate('editor'); };
+  const replaceBackground=document.querySelector('#replaceMediaBackground');
+  if(replaceBackground)replaceBackground.onclick=()=>{saveViewState('editor',{targetMediaId:id,analysisId:null,backgroundOpen:true});navigate('editor')};
   icons();
 }
 
@@ -359,13 +394,32 @@ async function showDuplicates() {
 }
 
 async function showEditor() {
-  setHeader('Editor', 'Crop');
+  setHeader('Editor', 'Crop and backgrounds');
   const editorState=viewState('editor');
   let cropSettings=await api('/api/v1/settings');
   const render = async (status=editorState.status || 'pending') => {
-    saveViewState('editor',{status,analysisId:null,targetMediaId:null});
-    const data=await api(`/api/v1/crop-analyses?status=${status}`);
-    workspace.innerHTML=`<div class="page editor-page"><div class="editor-toolbar"><select id="cropStatus" class="control"><option value="pending">Pending</option><option value="cropped">Cropped</option><option value="no_crop_needed">No crop needed</option><option value="failed">Failed</option><option value="all">All</option></select><label>Minimum area <input id="cropArea" class="control" type="number" min="1" max="50" value="10"></label><label>Padding <input id="cropPadding" class="control" type="number" min="0" max="10" step=".5" value="2"></label><button id="scanSelected" class="btn"><i data-lucide="scan-line"></i>Selected</button><button id="scanAll" class="btn primary"><i data-lucide="scan-search"></i>Find crop candidates</button></div><div class="page-head"><h2>Crop candidates</h2><span class="badge">${data.items.length}</span></div><div class="item-list">${data.items.map(item=>`<article class="queue-item"><img src="${item.thumbnail_url}" alt=""><div><strong>Media #${item.media_id}</strong><small>${esc(item.status)} · ${Number(item.confidence).toFixed(0)}% confidence · removes ${Number(item.removed_area).toFixed(1)}%</small></div><div class="actions">${item.status==='pending'?`<button class="btn open-crop" data-id="${item.id}"><i data-lucide="scan-line"></i>Review</button>`:`<button class="btn reset-crop" data-id="${item.id}"><i data-lucide="rotate-ccw"></i>Reopen review</button>`}</div></article>`).join('')||'<div class="empty">No items for this status</div>'}</div></div>`;
+    saveViewState('editor',{status,analysisId:null,targetMediaId:null,backgroundOpen:false});
+    const savedBackgroundState=viewState('editor');
+    const backgroundTolerance=Math.min(80,Math.max(5,Number(savedBackgroundState.backgroundTolerance)||24));
+    const backgroundMinimumArea=Math.min(95,Math.max(5,Number(savedBackgroundState.backgroundMinimumArea)||25));
+    const candidateQuery=`tolerance=${backgroundTolerance}&min_background_percent=${backgroundMinimumArea}`;
+    const [data,backgroundData]=await Promise.all([api(`/api/v1/crop-analyses?status=${status}`),api(`/api/v1/background-candidates?${candidateQuery}`)]);
+    const backgroundItems=backgroundData.items || [];
+    const asPercent=value=>{const number=Number(value)||0;return number<=1?number*100:number};
+    const colorCss=value=>{
+      if(Array.isArray(value)&&value.length>=3)return `rgb(${value.slice(0,3).map(channel=>Math.max(0,Math.min(255,Number(channel)||0))).join(',')})`;
+      return /^#[0-9a-f]{6}$/i.test(String(value||''))?String(value):'#dfe4e6';
+    };
+    workspace.innerHTML=`<div class="page editor-page">
+      <div class="editor-toolbar"><select id="cropStatus" class="control"><option value="pending">Pending</option><option value="cropped">Cropped</option><option value="no_crop_needed">No crop needed</option><option value="failed">Failed</option><option value="all">All</option></select><label>Minimum area <input id="cropArea" class="control" type="number" min="1" max="50" value="10"></label><label>Padding <input id="cropPadding" class="control" type="number" min="0" max="10" step=".5" value="2"></label><button id="scanSelected" class="btn"><i data-lucide="scan-line"></i>Selected</button><button id="scanAll" class="btn primary"><i data-lucide="scan-search"></i>Find crop candidates</button></div>
+      <div class="page-head"><h2>Crop candidates</h2><span class="badge">${data.items.length}</span></div>
+      <div class="item-list">${data.items.map(item=>`<article class="queue-item"><img src="${item.thumbnail_url}" alt=""><div><strong>Media #${item.media_id}</strong><small>${esc(item.status)} · ${Number(item.confidence).toFixed(0)}% confidence · removes ${Number(item.removed_area).toFixed(1)}%</small></div><div class="actions"><button class="icon-btn open-library" data-media-id="${item.media_id}" title="Open in Library"><i data-lucide="images"></i></button>${item.status==='pending'?`<button class="btn open-crop" data-id="${item.id}"><i data-lucide="scan-line"></i>Review</button>`:`<button class="btn reset-crop" data-id="${item.id}"><i data-lucide="rotate-ccw"></i>Reopen review</button>`}</div></article>`).join('')||'<div class="empty">No items for this status</div>'}</div>
+      <section class="background-candidates-section">
+        <div class="page-head"><h2>Background candidates</h2><span class="badge">${backgroundItems.length}</span></div>
+        <div class="background-scan-toolbar"><label>Edge tolerance <input id="backgroundTolerance" class="control" type="number" min="5" max="80" value="${backgroundTolerance}"></label><label>Minimum background, % <input id="backgroundMinimumArea" class="control" type="number" min="5" max="95" value="${backgroundMinimumArea}"></label><button id="analyzeSelectedBackground" class="btn"><i data-lucide="scan-line"></i>Analyze selected</button><button id="scanBackgrounds" class="btn primary"><i data-lucide="scan-search"></i>Find background candidates</button></div>
+        <div class="item-list background-candidate-list">${backgroundItems.map(item=>`<article class="queue-item background-candidate"><img src="${item.thumbnail_url}" alt=""><div><strong>Media #${item.media_id}</strong><small><span class="background-color-swatch" style="background:${colorCss(item.background_color)}"></span>${asPercent(item.confidence).toFixed(0)}% confidence · ${asPercent(item.background_area_percent).toFixed(1)}% background</small></div><div class="actions"><button class="icon-btn open-background-library" data-media-id="${item.media_id}" title="Open in Library"><i data-lucide="images"></i></button><button class="btn open-background-editor" data-media-id="${item.media_id}"><i data-lucide="image-plus"></i>Replace background</button></div></article>`).join('')||'<div class="empty">No background candidates</div>'}</div>
+      </section>
+    </div>`;
     document.querySelector('#cropStatus').value=status; document.querySelector('#cropStatus').onchange=e=>render(e.target.value);
     document.querySelector('#cropStatus').insertAdjacentHTML('afterend','<label>Preset <select id="cropPreset" class="control"><option value="14">Cautious</option><option value="20">Normal</option><option value="28">Sensitive</option></select></label><label>Selected analysis <select id="cropSelectedMethod" class="control"><option value="local">Local</option><option value="vision">Vision model</option></select></label>');
     document.querySelector('#cropPreset').value=String(cropSettings.crop_background_tolerance);document.querySelector('#cropArea').value=String(cropSettings.crop_min_area_percent);document.querySelector('#cropPadding').value=String(cropSettings.crop_padding_percent);document.querySelector('#cropSelectedMethod').value=cropSettings.crop_selected_analysis;
@@ -374,11 +428,15 @@ async function showEditor() {
     const options=()=>({min_area:Number(document.querySelector('#cropArea').value),padding:Number(document.querySelector('#cropPadding').value)/100,tolerance:Number(document.querySelector('#cropPreset').value)});
     document.querySelector('#scanSelected').onclick=async()=>{if(!selectedMedia){toast('Select an image in Library first',true);return}try{const method=document.querySelector('#cropSelectedMethod').value;const result=method==='vision'?await api(`/api/v1/media/${selectedMedia.id}/crop-vision-analysis`,{method:'POST'}):await api('/api/v1/crop-analyses',{method:'POST',body:JSON.stringify({media_id:selectedMedia.id,...options()})});if(result.id){openCrop(result.id)}else{toast('No removable margins found')}}catch(error){toast(error.message,true)}};
     document.querySelector('#scanAll').onclick=async()=>{try{const created=await api('/api/v1/crop-scan-jobs',{method:'POST',body:JSON.stringify(options())});monitorCropScan({id:created.job_id,status_url:created.status_url,progress:0,scanned:0,total:'?',candidates:0});toast('Crop scan started')}catch(error){toast(error.message,true)}};
-    const backgroundSelected=async()=>{if(!selectedMedia){toast('Select an image in Library first',true);return}try{const assets=await api('/api/v1/background-assets');if(!assets.items.length){toast('Import a background image first',true);return}const chosen=prompt('Background asset id: '+assets.items.map(x=>x.id).join(', '),String(assets.items[0].id));if(!chosen)return;const blur=prompt('Background blur (0-100)','12');await api(`/api/v1/media/${selectedMedia.id}/background-compose`,{method:'POST',body:JSON.stringify({background_id:Number(chosen),blur:Number(blur||0)})});toast('Background replacement saved as a new version')}catch(error){toast(error.message,true)}};
-    const bgButton=document.createElement('button');bgButton.className='btn';bgButton.innerHTML='<i data-lucide="image-plus"></i>Replace background';bgButton.onclick=backgroundSelected;document.querySelector('#scanAll').parentElement.append(bgButton);icons();
-    const importBg=document.createElement('button');importBg.className='btn';importBg.innerHTML='<i data-lucide="upload"></i>Import background';importBg.onclick=async()=>{const path=prompt('Full path to a local background image');if(!path)return;try{await api('/api/v1/background-assets/import',{method:'POST',body:JSON.stringify({path})});toast('Background imported')}catch(error){toast(error.message,true)}};document.querySelector('#scanAll').parentElement.append(importBg);icons();
-    document.querySelectorAll('.queue-item').forEach((node,index)=>node.querySelector('.actions').insertAdjacentHTML('afterbegin',`<button class="icon-btn open-library" data-media-id="${data.items[index].media_id}" title="Open in Library"><i data-lucide="images"></i></button>`));
     document.querySelectorAll('.open-library').forEach(n=>n.onclick=()=>openMediaInLibrary(Number(n.dataset.mediaId)));
+    const backgroundOptions=()=>({tolerance:Number(document.querySelector('#backgroundTolerance').value),min_background_percent:Number(document.querySelector('#backgroundMinimumArea').value)});
+    const saveBackgroundOptions=()=>{const values=backgroundOptions();saveViewState('editor',{backgroundTolerance:values.tolerance,backgroundMinimumArea:values.min_background_percent});return values};
+    ['backgroundTolerance','backgroundMinimumArea'].forEach(id=>document.querySelector(`#${id}`).onchange=saveBackgroundOptions);
+    document.querySelector('#analyzeSelectedBackground').onclick=async()=>{if(!selectedMedia||selectedMedia.type!=='image'){toast('Select an image in Library first',true);return}try{const result=await api(`/api/v1/media/${selectedMedia.id}/background-analysis`,{method:'POST',body:JSON.stringify(saveBackgroundOptions())});if(result.status==='candidate'){saveViewState('editor',{targetMediaId:selectedMedia.id,analysisId:null,backgroundOpen:true});await openMediaEditor(selectedMedia.id)}else{toast('No replaceable background found')}}catch(error){toast(error.message,true)}};
+    document.querySelector('#scanBackgrounds').onclick=async()=>{try{const created=await api('/api/v1/background-scan-jobs',{method:'POST',body:JSON.stringify(saveBackgroundOptions())});monitorBackgroundScan({id:created.job_id,status_url:created.status_url,progress:0,scanned:0,total:'?',candidates:0});toast('Background scan started')}catch(error){toast(error.message,true)}};
+    document.querySelectorAll('.open-background-library').forEach(n=>n.onclick=()=>openMediaInLibrary(Number(n.dataset.mediaId)));
+    document.querySelectorAll('.open-background-editor').forEach(n=>n.onclick=()=>{saveViewState('editor',{targetMediaId:Number(n.dataset.mediaId),analysisId:null,backgroundOpen:true});openMediaEditor(Number(n.dataset.mediaId))});
+    reloadBackgroundCandidates=()=>{if(currentView==='editor'&&!Number(viewState('editor').targetMediaId))render(status)};
     document.querySelectorAll('.open-crop').forEach(n=>n.onclick=()=>openCrop(Number(n.dataset.id)));document.querySelectorAll('.reset-crop').forEach(n=>n.onclick=async()=>{await api(`/api/v1/crop-analyses/${n.dataset.id}/reset`,{method:'POST'});render(status)}); icons(); document.querySelector('#cropCount').textContent=status==='pending'?(data.items.length||''):document.querySelector('#cropCount').textContent;
   };
   const openMediaEditor = async mediaId => {
@@ -387,11 +445,62 @@ async function showEditor() {
     const active=revisions.items.find(revision=>revision.active);
     const original=[...revisions.items].reverse().find(revision=>revision.operation==='original'&&!revision.parent_revision_id);
     const operationDetails=revision=>revision.operation==='crop'&&Array.isArray(revision.details?.box)?`Crop: ${revision.details.box.join(', ')}${revision.details.method?` · ${operationName(revision.details.method)} analysis`:''}`:operationName(revision.operation);
-    workspace.innerHTML=`<div class="page editor-page"><div class="page-head"><button class="btn" id="backEditor"><i data-lucide="chevron-left"></i>Editor</button><button class="icon-btn" id="cropOpenLibrary" title="Open in Library"><i data-lucide="images"></i></button><h2>Image editor</h2>${state.is_edited?`<span class="badge good">${esc(editSummary(state.edit_operations))}</span>`:'<span class="badge">Original</span>'}</div><div class="editor-version-compare"><section><h3>Current version</h3><img src="${active?.content_url||state.content_url}" alt=""></section><section><h3>Original</h3><img src="${original?.content_url||state.content_url}" alt=""></section></div><div class="actions editor-state-actions"><button class="btn primary" id="analyzeCurrent"><i data-lucide="scan-line"></i>Analyze current</button><button class="btn danger" id="resetOriginal" ${state.is_edited?'':'disabled'}><i data-lucide="rotate-ccw"></i>Reset to original</button></div><section class="revision-list"><h3>Versions</h3>${revisions.items.map(revision=>`<article class="${revision.in_active_chain?'active-chain':''}"><img src="${revision.content_url}" alt=""><span><strong>${esc(operationDetails(revision))}</strong><small>${revision.width}×${revision.height} · ${formatBytes(revision.file_size)}${revision.active?' · Active':''}</small></span><button class="btn restore-revision" data-id="${revision.id}" ${revision.active?'disabled':''}>${revision.active?'Active':'Restore'}</button></article>`).join('')}</section></div>`;
-    document.querySelector('#backEditor').onclick=()=>{saveViewState('editor',{targetMediaId:null});render()};
+    const backgroundOpen=Boolean(viewState('editor').backgroundOpen);
+    workspace.innerHTML=`<div class="page editor-page">
+      <div class="page-head"><button class="btn" id="backEditor"><i data-lucide="chevron-left"></i>Editor</button><button class="icon-btn" id="cropOpenLibrary" title="Open in Library"><i data-lucide="images"></i></button><h2>Image editor</h2>${state.is_edited?`<span class="badge good">${esc(editSummary(state.edit_operations))}</span>`:'<span class="badge">Original</span>'}</div>
+      <div class="editor-version-compare"><section><h3>Current version</h3><img src="${active?.content_url||state.content_url}" alt=""></section><section><h3>Original</h3><img src="${original?.content_url||state.content_url}" alt=""></section></div>
+      <div class="actions editor-state-actions"><button class="btn primary" id="analyzeCurrent"><i data-lucide="scan-line"></i>Analyze current</button><button class="btn" id="toggleBackgroundEditor" aria-expanded="${backgroundOpen}"><i data-lucide="image-plus"></i>Replace background</button><button class="btn danger" id="resetOriginal" ${state.is_edited?'':'disabled'}><i data-lucide="rotate-ccw"></i>Reset to original</button></div>
+      <section id="backgroundPanel" class="background-panel" ${backgroundOpen?'':'hidden'}>
+        <div class="background-panel-head"><div><h3>Background replacement</h3><span id="backgroundStatus" class="background-status">Preview required</span></div><div class="actions"><button id="analyzeBackgroundCurrent" class="btn"><i data-lucide="scan-search"></i>Check candidate</button><button id="removeBackgroundPreview" class="btn primary"><i data-lucide="scan-eye"></i>Remove background / Preview</button></div></div>
+        <div class="background-preview-comparison"><figure><figcaption>Source</figcaption><img src="${active?.content_url||state.content_url}" alt=""></figure><figure class="transparent-preview"><figcaption>Removed background</figcaption><div id="backgroundPreviewResult" class="background-preview-placeholder"><i data-lucide="image"></i></div></figure></div>
+        <div id="backgroundAfterPreview" class="background-after-preview" hidden>
+          <div class="background-library-toolbar"><label>Category <select id="backgroundCategoryFilter" class="control" disabled><option value="">All backgrounds</option></select></label><label>Import category <input id="backgroundImportCategory" class="control" list="backgroundCategoryNames" maxlength="80" disabled></label><datalist id="backgroundCategoryNames"></datalist><input id="backgroundFileInput" type="file" accept="image/*" hidden><button id="chooseBackgroundFile" class="btn" disabled><i data-lucide="upload"></i>Import background</button></div>
+          <div id="backgroundLibrary" class="background-grid"><div class="empty">No backgrounds</div></div>
+          <div class="background-compose-controls"><label for="backgroundBlur">Blur <span><output id="backgroundBlurValue" for="backgroundBlur">12</output>%</span></label><input id="backgroundBlur" type="range" min="0" max="100" value="12" disabled><span class="background-save-note">A new version will be created; the current version stays active.</span><button class="btn primary" id="applyBackground" disabled><i data-lucide="check"></i>Apply background</button></div>
+        </div>
+      </section>
+      <section class="revision-list"><h3>Versions</h3>${revisions.items.map(revision=>`<article class="${revision.in_active_chain?'active-chain':''}"><img src="${revision.content_url}" alt=""><span><strong>${esc(operationDetails(revision))}</strong><small>${revision.width}×${revision.height} · ${formatBytes(revision.file_size)}${revision.active?' · Active':''}</small></span><button class="btn restore-revision" data-id="${revision.id}" ${revision.active?'disabled':''}>${revision.active?'Active':'Restore'}</button></article>`).join('')}</section>
+    </div>`;
+    document.querySelector('#backEditor').onclick=()=>{saveViewState('editor',{targetMediaId:null,backgroundOpen:false});render()};
     document.querySelector('#cropOpenLibrary').onclick=()=>openMediaInLibrary(mediaId);
     document.querySelector('#analyzeCurrent').onclick=async()=>{try{const method=cropSettings.crop_selected_analysis;const result=method==='vision'?await api(`/api/v1/media/${mediaId}/crop-vision-analysis`,{method:'POST'}):await api('/api/v1/crop-analyses',{method:'POST',body:JSON.stringify({media_id:mediaId,min_area:cropSettings.crop_min_area_percent,padding:cropSettings.crop_padding_percent/100,tolerance:cropSettings.crop_background_tolerance})});if(result.id)await openCrop(result.id);else toast('No removable margins found')}catch(error){toast(error.message,true)}};
-    const replaceButton=document.createElement('button');replaceButton.className='btn';replaceButton.innerHTML='<i data-lucide="image-plus"></i>Replace background';replaceButton.onclick=async()=>{try{const assets=await api('/api/v1/background-assets');if(!assets.items.length){toast('Import a background image first',true);return}const box=document.createElement('section');box.className='background-panel';box.innerHTML='<h3>Choose background</h3><div class="background-grid">'+assets.items.map(a=>`<button class="background-choice" data-id="${a.id}"><img src="${a.content_url}" alt=""><span>${esc(a.original_name)}</span></button>`).join('')+'</div><label>Blur <input id="backgroundBlur" type="range" min="0" max="100" value="12"><output>12</output></label><button class="btn primary" id="applyBackground" disabled>Apply background</button>';document.querySelector('.editor-state-actions').after(box);let selected=0;box.querySelectorAll('.background-choice').forEach(n=>n.onclick=()=>{selected=Number(n.dataset.id);box.querySelectorAll('.background-choice').forEach(x=>x.classList.remove('selected'));n.classList.add('selected');box.querySelector('#applyBackground').disabled=false});const range=box.querySelector('#backgroundBlur');range.oninput=()=>range.nextElementSibling.value=range.value;box.querySelector('#applyBackground').onclick=async()=>{await api(`/api/v1/media/${mediaId}/background-compose`,{method:'POST',body:JSON.stringify({background_id:selected,blur:Number(range.value)})});toast('Background replacement saved');await openMediaEditor(mediaId)}}catch(error){toast(error.message,true)}};document.querySelector('#analyzeCurrent').parentElement.append(replaceButton);icons();
+    const panel=document.querySelector('#backgroundPanel');
+    const toggleBackground=document.querySelector('#toggleBackgroundEditor');
+    const backgroundStatus=document.querySelector('#backgroundStatus');
+    const afterPreview=document.querySelector('#backgroundAfterPreview');
+    const categoryFilter=document.querySelector('#backgroundCategoryFilter');
+    const categoryInput=document.querySelector('#backgroundImportCategory');
+    const categoryNames=document.querySelector('#backgroundCategoryNames');
+    const fileInput=document.querySelector('#backgroundFileInput');
+    const chooseFile=document.querySelector('#chooseBackgroundFile');
+    const blur=document.querySelector('#backgroundBlur');
+    const applyBackground=document.querySelector('#applyBackground');
+    let preview=null;
+    let selectedBackground=0;
+    const setBackgroundStatus=(message,type='')=>{backgroundStatus.textContent=message;backgroundStatus.className=`background-status${type?` ${type}`:''}`};
+    const updateApply=()=>{applyBackground.disabled=!(preview&&selectedBackground)};
+    const renderAssets=(data,category='')=>{
+      const categories=data.categories || [];
+      categoryFilter.innerHTML=`<option value="">All backgrounds</option>${categories.map(item=>`<option value="${esc(item.name)}" ${item.name===category?'selected':''}>${esc(item.name)} (${item.count})</option>`).join('')}`;
+      categoryNames.innerHTML=categories.map(item=>`<option value="${esc(item.name)}"></option>`).join('');
+      if(!categoryInput.value&&categories.length)categoryInput.value=categories[0].name;
+      chooseFile.disabled=!categoryInput.value.trim();
+      selectedBackground=0;
+      const assets=data.items || [];
+      document.querySelector('#backgroundLibrary').innerHTML=assets.length?assets.map(asset=>`<button class="background-choice" data-id="${asset.id}"><img src="${asset.content_url}" alt=""><span><strong>${esc(asset.original_name)}</strong><small>${esc(asset.category)} · ${asset.width || '?'}×${asset.height || '?'}</small></span></button>`).join(''):'<div class="empty">No backgrounds in this category</div>';
+      document.querySelectorAll('.background-choice').forEach(node=>node.onclick=()=>{selectedBackground=Number(node.dataset.id);document.querySelectorAll('.background-choice').forEach(choice=>choice.classList.toggle('selected',choice===node));updateApply()});
+      updateApply();
+    };
+    const loadAssets=async(category='')=>{const [assets,categories]=await Promise.all([api(`/api/v1/background-assets${category?`?category=${encodeURIComponent(category)}`:''}`),api('/api/v1/background-assets/categories')]);renderAssets({...assets,categories:categories.items || []},category)};
+    toggleBackground.onclick=()=>{const open=panel.hidden;panel.hidden=!open;toggleBackground.setAttribute('aria-expanded',String(open));saveViewState('editor',{backgroundOpen:open});if(open)panel.scrollIntoView({behavior:'smooth',block:'start'})};
+    document.querySelector('#analyzeBackgroundCurrent').onclick=async()=>{const button=document.querySelector('#analyzeBackgroundCurrent');const saved=viewState('editor');const parameters={tolerance:Number(saved.backgroundTolerance)||24,min_background_percent:Number(saved.backgroundMinimumArea)||25};button.disabled=true;setBackgroundStatus('Analyzing background...');try{const result=await api(`/api/v1/media/${mediaId}/background-analysis`,{method:'POST',body:JSON.stringify(parameters)});if(result.status==='candidate'){const candidate=result.candidate;setBackgroundStatus(`Candidate · ${Number(candidate.background_area_percent).toFixed(1)}% background`,'good')}else setBackgroundStatus('No replaceable background found','warn')}catch(error){setBackgroundStatus(error.message,'error')}finally{button.disabled=false}};
+    document.querySelector('#removeBackgroundPreview').onclick=async()=>{const button=document.querySelector('#removeBackgroundPreview');button.disabled=true;setBackgroundStatus('Preparing RMBG-2.0 and removing background...');try{preview=await api(`/api/v1/media/${mediaId}/background-preview`,{method:'POST',body:'{}'});document.querySelector('#backgroundPreviewResult').innerHTML=`<img src="${preview.content_url}" alt="Removed background preview">`;afterPreview.hidden=false;categoryFilter.disabled=false;categoryInput.disabled=false;blur.disabled=false;setBackgroundStatus(`Preview ready · ${Number(preview.subject_coverage).toFixed(1)}% subject`,'good');await loadAssets('');updateApply()}catch(error){preview=null;afterPreview.hidden=true;setBackgroundStatus(error.message,'error')}finally{button.disabled=false;icons()}};
+    categoryFilter.onchange=async()=>{try{await loadAssets(categoryFilter.value)}catch(error){toast(error.message,true)}};
+    categoryInput.oninput=()=>{chooseFile.disabled=!categoryInput.value.trim()};
+    chooseFile.onclick=()=>fileInput.click();
+    fileInput.onchange=async()=>{const file=fileInput.files?.[0];const category=categoryInput.value.trim();if(!file)return;if(!category){toast('Choose a category before importing',true);fileInput.value='';return}chooseFile.disabled=true;try{const body=new FormData();body.append('file',file);body.append('category',category);await api('/api/v1/background-assets/import',{method:'POST',body});toast('Background imported');await loadAssets(category)}catch(error){toast(error.message,true)}finally{fileInput.value='';chooseFile.disabled=!categoryInput.value.trim()}};
+    blur.oninput=()=>{document.querySelector('#backgroundBlurValue').value=blur.value};
+    applyBackground.onclick=async()=>{if(!preview||!selectedBackground)return;applyBackground.disabled=true;setBackgroundStatus('Composing new version...');try{await api(`/api/v1/media/${mediaId}/background-compose`,{method:'POST',body:JSON.stringify({preview_id:preview.preview_id,background_id:selectedBackground,blur:Number(blur.value)})});toast('Background version created; current version remains active');saveViewState('editor',{backgroundOpen:true});await openMediaEditor(mediaId)}catch(error){setBackgroundStatus(error.message,'error');updateApply()}};
     document.querySelector('#resetOriginal').onclick=async()=>{if(!confirm('Reset this image to the original version? Saved versions will remain available.'))return;try{await api(`/api/v1/media/${mediaId}/reset-to-original`,{method:'POST'});toast('Original restored');await openMediaEditor(mediaId)}catch(error){toast(error.message,true)}};
     document.querySelectorAll('.restore-revision').forEach(node=>node.onclick=async()=>{if(!confirm('Restore this version?'))return;await api(`/api/v1/media/${mediaId}/revisions/${node.dataset.id}/activate`,{method:'POST'});toast('Version restored');await openMediaEditor(mediaId)}); icons();
   };
@@ -651,4 +760,4 @@ async function navigate(view){if(!views[view])view='library';saveScrollState();c
 document.querySelectorAll('.nav-item').forEach(node=>node.onclick=()=>navigate(node.dataset.view));
 window.addEventListener('hashchange',()=>navigate(location.hash.slice(1)||'library'));
 window.addEventListener('beforeunload',saveScrollState);
-navigate(location.hash.slice(1)||'library');refreshCounts();restoreCropScanMonitor();icons();
+navigate(location.hash.slice(1)||'library');refreshCounts();restoreCropScanMonitor();restoreBackgroundScanMonitor();icons();

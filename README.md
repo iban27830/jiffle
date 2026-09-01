@@ -92,7 +92,18 @@ Open **Settings** to configure source accounts, library display options, storage
 
 ### Background replacement
 
-In the image editor, local background replacement uses the RMBG-2.0 model to isolate the subject and a separate local background library for composition. The first use automatically installs the local `rembg` runtime and downloads model weights; network access is required only during that setup. Import background files through the background editor API, choose a candidate, adjust the background blur, and save the result as a new version; the original remains available in the Versions list. A GPU with at least 16 GB of VRAM is recommended.
+Background replacement is available for static images in **Library** and **Editor**. Jiffle looks for likely replacement candidates by checking whether a large connected area at the image edges is almost one color (white, black, or another uniform color). This scan is only a suggestion; always check the removal preview before saving a result.
+
+To replace a background:
+
+1. Open **Editor** and select **Find background candidates** to scan the whole library, or select an image in **Library** and choose **Replace background**. For one image, **Analyze selected** reports the estimated background area and color.
+2. In the image editor, open **Replace background** and select **Remove background / Preview**. The first request may take several minutes while Jiffle installs the local RMBG-2.0 runtime and downloads its model weights. Network access is required only for this setup; later requests use the cached model.
+3. After a successful preview, choose a background category and select an image from the local background library. To add a new background, enter its category, choose a local image file, and select **Import background**.
+4. Adjust **Blur** and select **Apply background**. The blur control and apply action stay disabled until the foreground preview is ready and a background is selected.
+
+The composition is saved as a new PNG version. The current/original version remains active, and the new version is shown under **Versions** where it can be activated or restored later. Background files are stored in the application's data directory and are not uploaded anywhere.
+
+If model setup fails, check that Python can install packages and that the computer has network access and enough disk space for PyTorch and the model cache. A GPU is optional; CPU processing is supported but slower. If the preview reports that no usable subject was isolated, try another image or correct the source version before composing. A missing or expired preview must be generated again before applying a background.
 
 ## Troubleshooting
 

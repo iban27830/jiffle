@@ -496,6 +496,56 @@ def migration_20(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE INDEX background_assets_dimensions_idx ON background_assets(width,height)")
 
 
+def migration_21(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "ALTER TABLE background_assets ADD COLUMN category TEXT NOT NULL DEFAULT 'General'"
+    )
+    connection.execute(
+        "CREATE INDEX background_assets_category_idx ON background_assets(category)"
+    )
+    connection.execute(
+        "CREATE TABLE background_scan_jobs ("
+        "job_id INTEGER PRIMARY KEY REFERENCES background_jobs(id) ON DELETE CASCADE, "
+        "cancel_requested INTEGER NOT NULL DEFAULT 0, "
+        "scanned_count INTEGER NOT NULL DEFAULT 0, "
+        "candidate_count INTEGER NOT NULL DEFAULT 0, "
+        "parameters_json TEXT NOT NULL DEFAULT '{}')"
+    )
+    connection.execute(
+        "CREATE TABLE background_candidate_results ("
+        "revision_id INTEGER NOT NULL REFERENCES media_revisions(id) ON DELETE CASCADE, "
+        "media_item_id INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE, "
+        "parameter_signature TEXT NOT NULL, "
+        "candidate_found INTEGER NOT NULL, "
+        "confidence REAL NOT NULL DEFAULT 0, "
+        "background_area_percent REAL NOT NULL DEFAULT 0, "
+        "background_color TEXT, "
+        "edge_consistency REAL NOT NULL DEFAULT 0, "
+        "analyzed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+        "PRIMARY KEY(revision_id, parameter_signature))"
+    )
+    connection.execute(
+        "CREATE INDEX background_candidates_media_idx "
+        "ON background_candidate_results(media_item_id, candidate_found)"
+    )
+    connection.execute(
+        "CREATE TABLE background_previews ("
+        "id TEXT PRIMARY KEY, "
+        "media_item_id INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE, "
+        "source_revision_id INTEGER NOT NULL REFERENCES media_revisions(id) ON DELETE CASCADE, "
+        "file_path TEXT NOT NULL UNIQUE, "
+        "width INTEGER NOT NULL, height INTEGER NOT NULL, "
+        "subject_coverage REAL NOT NULL, "
+        "model TEXT NOT NULL, "
+        "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+        "expires_at TEXT NOT NULL DEFAULT (datetime('now', '+1 day')))"
+    )
+    connection.execute(
+        "CREATE INDEX background_previews_media_idx "
+        "ON background_previews(media_item_id, source_revision_id)"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -517,6 +567,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (18, migration_18),
     (19, migration_19),
     (20, migration_20),
+    (21, migration_21),
 )
 
 

@@ -13,7 +13,7 @@ from jiffle.features.collections.routes import collections_blueprint
 from jiffle.features.settings_api.routes import settings_blueprint
 from jiffle.features.tag_management.routes import tag_management_blueprint
 from jiffle.features.crop_editor.routes import crop_blueprint, resume_crop_scans
-from jiffle.features.background_editor.routes import background_blueprint
+from jiffle.features.background_editor.routes import background_blueprint, resume_background_scans
 from jiffle.infrastructure.database.connection import close_database
 from jiffle.infrastructure.database.migrations import migrate_database
 
@@ -56,6 +56,7 @@ def create_app(
             migrate_database()
         if not resolved_settings.run_jobs_inline:
             resume_crop_scans(resolved_settings.database_path, resolved_settings)
+            resume_background_scans(resolved_settings.database_path, resolved_settings)
 
     return app
 
