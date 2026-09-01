@@ -185,6 +185,11 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
 .editor-version-compare h3 { margin:0 0 8px; font-size:15px; }
 .editor-version-compare img { display:block; width:100%; height:min(58vh,560px); object-fit:contain; background:#1b1e20; border-radius:6px; }
 .editor-state-actions { margin-top:12px; }
+.background-panel { margin-top:16px; padding-top:14px; border-top:1px solid var(--line); }
+.background-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); gap:10px; margin:10px 0; }
+.background-choice { padding:4px; border:1px solid var(--line); background:var(--surface); cursor:pointer; text-align:left; }
+.background-choice.selected { border:2px solid var(--accent); }
+.background-choice img { display:block; width:100%; aspect-ratio:4/3; object-fit:cover; }
 .builder-card { min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
 .builder-card.limit-warning { border: 2px solid #e2a11b; }
 .builder-image { position: relative; background: #20262b; }
