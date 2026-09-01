@@ -43,6 +43,11 @@ def list_assets():
         items.append(item)
     return jsonify({'items':items})
 
+@background_blueprint.get('/api/v1/media/<int:media_id>/background-candidates')
+def candidates(media_id):
+    rows=get_database().execute("SELECT id,width,height FROM media_items WHERE id<>? AND deleted_at IS NULL AND media_type='image' ORDER BY id DESC LIMIT 12",(media_id,)).fetchall()
+    return jsonify({'items':[{'id':r['id'],'width':r['width'],'height':r['height'],'thumbnail_url':f'/api/v1/media/{r["id"]}/thumbnail'} for r in rows]})
+
 @background_blueprint.post('/api/v1/background-assets/import')
 def import_asset():
     payload=request.get_json(silent=True) or {}; source=Path(str(payload.get('path',''))).expanduser()
