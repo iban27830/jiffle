@@ -13,6 +13,7 @@ from jiffle.features.collections.routes import collections_blueprint
 from jiffle.features.settings_api.routes import settings_blueprint
 from jiffle.features.tag_management.routes import tag_management_blueprint
 from jiffle.features.crop_editor.routes import crop_blueprint, resume_crop_scans
+from jiffle.features.background_editor.routes import background_blueprint
 from jiffle.infrastructure.database.connection import close_database
 from jiffle.infrastructure.database.migrations import migrate_database
 
@@ -42,6 +43,7 @@ def create_app(
     app.register_blueprint(settings_blueprint)
     app.register_blueprint(tag_management_blueprint)
     app.register_blueprint(crop_blueprint)
+    app.register_blueprint(background_blueprint)
     register_error_handlers(app)
 
     @app.get("/")

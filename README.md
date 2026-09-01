@@ -90,6 +90,10 @@ By default, previously deleted media is held in **Review** before it can be adde
 
 Open **Settings** to configure source accounts, library display options, storage folders, and tag rules.
 
+### Background replacement
+
+In the image editor, local background replacement uses the RMBG-2.0 model to isolate the subject and a separate local background library for composition. Import background files through the background editor API, choose a candidate, adjust the background blur, and save the result as a new version; the original remains available in the Versions list. RMBG runtime and model weights must be installed locally, and a GPU with at least 16 GB of VRAM is recommended.
+
 ## Troubleshooting
 
 - If `python` is not recognized, install Python and enable **Add Python to PATH** during installation.

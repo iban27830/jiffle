@@ -491,6 +491,10 @@ def migration_19(connection: sqlite3.Connection) -> None:
     connection.execute("ALTER TABLE collections ADD COLUMN preset_query TEXT")
     connection.execute("ALTER TABLE collections ADD COLUMN preset_requested_count INTEGER")
 
+def migration_20(connection: sqlite3.Connection) -> None:
+    connection.execute("CREATE TABLE background_assets (id INTEGER PRIMARY KEY AUTOINCREMENT, file_path TEXT NOT NULL UNIQUE, original_name TEXT NOT NULL, width INTEGER, height INTEGER, tags TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+    connection.execute("CREATE INDEX background_assets_dimensions_idx ON background_assets(width,height)")
+
 
 MIGRATIONS: tuple[Migration, ...] = (
     (1, migration_1),
@@ -512,6 +516,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (17, migration_17),
     (18, migration_18),
     (19, migration_19),
+    (20, migration_20),
 )
 
 
