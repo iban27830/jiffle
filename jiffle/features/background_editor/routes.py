@@ -1,5 +1,8 @@
 import json
 import shutil
+import subprocess
+import sys
+import threading
 from pathlib import Path
 from uuid import uuid4
 from flask import Blueprint, current_app, jsonify, request, send_file
@@ -8,6 +11,24 @@ from jiffle.infrastructure.database.connection import get_database
 from jiffle.features.crop_editor.workflow import CropFailure, media_path, _hash_file
 
 background_blueprint = Blueprint('background_editor', __name__)
+_model_lock = threading.Lock()
+
+def _ensure_model():
+    try:
+        from rembg import remove
+        return remove
+    except ImportError:
+        with _model_lock:
+            try:
+                from rembg import remove
+                return remove
+            except ImportError:
+                try:
+                    subprocess.run([sys.executable, '-m', 'pip', 'install', 'rembg[cpu]'], check=True, capture_output=True, text=True, timeout=1800)
+                    from rembg import remove
+                    return remove
+                except Exception as error:
+                    raise RuntimeError('RMBG-2.0 could not be installed automatically. Check network access and Python permissions.') from error
 
 def _root(settings):
     path = settings.database_path.parent / 'backgrounds'; path.mkdir(parents=True, exist_ok=True); return path
@@ -46,10 +67,8 @@ def compose(media_id):
             fg=fg.convert('RGBA'); bgim=bgim.convert('RGBA').resize(fg.size,Image.Resampling.LANCZOS)
             if blur: bgim=bgim.filter(ImageFilter.GaussianBlur(blur/5))
             # Prefer RMBG-2.0 when installed; it returns an alpha matte.
-            try:
-                from rembg import remove
-                fg=remove(fg)
-            except ImportError: return _error('background.model_missing','Install the local RMBG-2.0 model runtime to remove backgrounds.',409)
+            try: fg=_ensure_model()(fg)
+            except RuntimeError as error: return _error('background.model_install_failed',str(error),503)
             result=Image.alpha_composite(bgim,fg); target=settings.media_path/'revisions'/f'media-{media_id}-background-{uuid4().hex}.png'; target.parent.mkdir(parents=True,exist_ok=True); result.save(target,'PNG')
     except Exception as error: return _error('background.compose_failed',str(error),400)
     digest=_hash_file(target); rel=target.relative_to(settings.media_path).as_posix(); size=target.stat().st_size; details=json.dumps({'background_id':asset_id,'blur':blur,'model':'RMBG-2.0','source_revision_id':row['active_revision_id']})

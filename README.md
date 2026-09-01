@@ -92,7 +92,7 @@ Open **Settings** to configure source accounts, library display options, storage
 
 ### Background replacement
 
-In the image editor, local background replacement uses the RMBG-2.0 model to isolate the subject and a separate local background library for composition. Import background files through the background editor API, choose a candidate, adjust the background blur, and save the result as a new version; the original remains available in the Versions list. RMBG runtime and model weights must be installed locally, and a GPU with at least 16 GB of VRAM is recommended.
+In the image editor, local background replacement uses the RMBG-2.0 model to isolate the subject and a separate local background library for composition. The first use automatically installs the local `rembg` runtime and downloads model weights; network access is required only during that setup. Import background files through the background editor API, choose a candidate, adjust the background blur, and save the result as a new version; the original remains available in the Versions list. A GPU with at least 16 GB of VRAM is recommended.
 
 ## Troubleshooting
 
