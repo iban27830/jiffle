@@ -485,6 +485,13 @@ def migration_18(connection: sqlite3.Connection) -> None:
             )
 
 
+def migration_19(connection: sqlite3.Connection) -> None:
+    connection.execute("ALTER TABLE collections ADD COLUMN preset_id INTEGER REFERENCES collection_presets(id) ON DELETE SET NULL")
+    connection.execute("ALTER TABLE collections ADD COLUMN preset_name TEXT")
+    connection.execute("ALTER TABLE collections ADD COLUMN preset_query TEXT")
+    connection.execute("ALTER TABLE collections ADD COLUMN preset_requested_count INTEGER")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -504,6 +511,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (16, migration_16),
     (17, migration_17),
     (18, migration_18),
+    (19, migration_19),
 )
 
 

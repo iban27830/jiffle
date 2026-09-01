@@ -36,6 +36,9 @@ def list_collections():
     items = []
     for row in rows:
         item = dict(row)
+        tags = connection.execute("SELECT tag, disposition FROM collection_tags WHERE collection_id=? ORDER BY disposition, tag", (row["id"],)).fetchall()
+        item["included_tags"] = [tag["tag"] for tag in tags if tag["disposition"] == "include"]
+        item["excluded_tags"] = [tag["tag"] for tag in tags if tag["disposition"] == "exclude"]
         covers = connection.execute(
             "SELECT media_item_id FROM collection_items WHERE collection_id=? ORDER BY position LIMIT 2",
             (row["id"],),
@@ -55,6 +58,7 @@ def create_collection():
     query = payload.get("query", "") if isinstance(payload, dict) else ""
     included, excluded = parse_collection_query(query)
     requested_count = payload.get("requested_count") if isinstance(payload, dict) else None
+    preset_id = payload.get("preset_id") if isinstance(payload, dict) else None
     try:
         included_tags = normalize_tags(list(included))
         excluded_tags = normalize_tags(list(excluded))
@@ -65,9 +69,12 @@ def create_collection():
                 raise CollectionFailure("collections.invalid_count", "The saved composition must be complete.")
             _validate_composition(get_database(), media_ids, included_tags, excluded_tags)
         connection = get_database()
+        preset = connection.execute("SELECT id, name, requested_count FROM collection_presets WHERE id=?", (preset_id,)).fetchone() if preset_id else None
+        if preset_id and preset is None:
+            raise CollectionFailure("collections.preset_not_found", "Preset was not found.")
         cursor = connection.execute(
-            "INSERT INTO collections (name, requested_count) VALUES (?, ?)",
-            (name, requested_count),
+            "INSERT INTO collections (name, requested_count, preset_id, preset_name, preset_query, preset_requested_count) VALUES (?, ?, ?, ?, ?, ?)",
+            (name, requested_count, preset_id, preset["name"] if preset else None, query if preset else None, preset["requested_count"] if preset else None),
         )
         collection_id = int(cursor.lastrowid)
         connection.executemany(
@@ -210,9 +217,13 @@ def get_collection(collection_id: int):
         "id": collection["id"], "name": collection["name"],
         "jiggie_url": collection["jiggie_url"],
         "created_at": collection["created_at"], "updated_at": collection["updated_at"],
+        "preset": {"id": collection["preset_id"], "name": collection["preset_name"], "query": collection["preset_query"], "requested_count": collection["preset_requested_count"]} if collection["preset_name"] else None,
+        "included_tags": [r[0] for r in connection.execute("SELECT tag FROM collection_tags WHERE collection_id=? AND disposition='include' ORDER BY tag", (collection_id,))],
+        "excluded_tags": [r[0] for r in connection.execute("SELECT tag FROM collection_tags WHERE collection_id=? AND disposition='exclude' ORDER BY tag", (collection_id,))],
         "items": [{**dict(row),
             "content_url": f"/api/v1/media/{row['id']}/content",
             "thumbnail_url": f"/api/v1/media/{row['id']}/thumbnail",
+            "library_url": f"/library?id={row['id']}",
         } for row in rows],
     })
 
