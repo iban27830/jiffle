@@ -6,7 +6,7 @@ from urllib.parse import urlsplit
 
 from jiffle.configuration.settings import Settings
 from jiffle.features.collections.workflow import (
-    CollectionFailure, build_collection_preview, create_export_job, normalize_tags,
+    CollectionFailure, build_collection_preview, create_export_job, normalize_tags, parse_collection_query,
     preview_export, replace_collection_items, run_export_job,
 )
 from jiffle.infrastructure.database.connection import get_database
@@ -52,12 +52,12 @@ def create_collection():
     if not name or len(name) > 120:
         return _error("collections.invalid_name", "Collection name is invalid.", 400)
     media_ids = payload.get("media_item_ids") if isinstance(payload, dict) else None
-    included = payload.get("included_tags", []) if isinstance(payload, dict) else []
-    excluded = payload.get("excluded_tags", []) if isinstance(payload, dict) else []
+    query = payload.get("query", "") if isinstance(payload, dict) else ""
+    included, excluded = parse_collection_query(query)
     requested_count = payload.get("requested_count") if isinstance(payload, dict) else None
     try:
-        included_tags = normalize_tags(included)
-        excluded_tags = normalize_tags(excluded)
+        included_tags = normalize_tags(list(included))
+        excluded_tags = normalize_tags(list(excluded))
         if media_ids is not None:
             if not isinstance(media_ids, list) or not all(isinstance(value, int) for value in media_ids):
                 raise CollectionFailure("collections.invalid_items", "media_item_ids must be an integer array.")
@@ -97,8 +97,9 @@ def create_collection_preview():
     if not isinstance(payload, dict):
         return _error("collections.invalid_request", "A JSON object is required.", 400)
     try:
-        included = normalize_tags(payload.get("included_tags", []))
-        excluded = normalize_tags(payload.get("excluded_tags", []))
+        included, excluded = parse_collection_query(payload.get("query", ""))
+        included = normalize_tags(list(included))
+        excluded = normalize_tags(list(excluded))
         count = payload.get("requested_count")
         excluded_ids = payload.get("excluded_ids", [])
         if not isinstance(count, int) or isinstance(count, bool):
@@ -137,8 +138,9 @@ def replace_collection_preview_item():
             or not isinstance(rejected_ids, list) or not all(isinstance(value, int) for value in rejected_ids)):
         return _error("collections.invalid_items", "Replacement identifiers are invalid.", 400)
     try:
-        included = normalize_tags(payload.get("included_tags", []))
-        excluded = normalize_tags(payload.get("excluded_tags", []))
+        included, excluded = parse_collection_query(payload.get("query", ""))
+        included = normalize_tags(list(included))
+        excluded = normalize_tags(list(excluded))
         settings = current_app.config["JIFFLE_SETTINGS"]
         preview = build_collection_preview(
             get_database(), included, excluded, 1, settings.max_items_per_author,
@@ -390,8 +392,7 @@ def _preset_json(connection, row):
     return {
         "id": row["id"], "name": row["name"],
         "requested_count": row["requested_count"],
-        "included_tags": [tag["tag"] for tag in tags if tag["disposition"] == "include"],
-        "excluded_tags": [tag["tag"] for tag in tags if tag["disposition"] == "exclude"],
+        "query": " ".join(([tag["tag"] for tag in tags if tag["disposition"] == "include"] + [f'-{tag["tag"]}' for tag in tags if tag["disposition"] == "exclude"])),
     }
 
 
@@ -402,8 +403,9 @@ def _save_preset(preset_id):
     name = payload.get("name", "").strip() if isinstance(payload.get("name"), str) else ""
     count = payload.get("requested_count")
     try:
-        included = normalize_tags(payload.get("included_tags", []))
-        excluded = normalize_tags(payload.get("excluded_tags", []))
+        included, excluded = parse_collection_query(payload.get("query", ""))
+        included = normalize_tags(list(included))
+        excluded = normalize_tags(list(excluded))
         if not name or len(name) > 120:
             raise CollectionFailure("collections.invalid_name", "Preset name is invalid.")
         if not included:

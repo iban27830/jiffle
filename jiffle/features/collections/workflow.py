@@ -14,6 +14,22 @@ from PIL import Image, ImageSequence
 from jiffle.configuration.settings import Settings
 
 
+def parse_collection_query(value: object) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    if not isinstance(value, str):
+        raise CollectionFailure("collections.invalid_query", "Query must be a string.")
+    tokens = re.findall(r'(?:[^\s"]+|"[^"]*")+', value.strip())
+    included, excluded = [], []
+    for token in tokens:
+        if token.lower().startswith(("author:", "id:", "domain:", "type:")):
+            continue
+        target = excluded if token.startswith("-") and len(token) > 1 else included
+        tag = token[1:] if target is excluded else token
+        tag = tag.strip().strip('"').lower()
+        if tag and tag not in target:
+            target.append(tag)
+    return tuple(included), tuple(excluded)
+
+
 class CollectionFailure(Exception):
     def __init__(self, code: str, message: str):
         super().__init__(message)
@@ -304,11 +320,13 @@ def _collection_media(connection, collection_id):
 def _matching_candidates(connection, included_tags, excluded_tags, excluded_ids):
     aliases = {}
     for row in connection.execute("SELECT canonical_tag, alias FROM tag_aliases"):
-        aliases.setdefault(row["canonical_tag"].lower(), set()).add(row["alias"].lower())
+        canonical, alias = row["canonical_tag"].lower(), row["alias"].lower()
+        aliases.setdefault(canonical, set()).update((canonical, alias))
+        aliases.setdefault(alias, set()).update((canonical, alias))
 
     def expanded(tag):
         value = str(tag).strip().lower()
-        return {value, *aliases.get(value, set())}
+        return aliases.get(value, {value})
 
     clauses = ["item.deleted_at IS NULL"]
     parameters: list[object] = []
@@ -318,9 +336,9 @@ def _matching_candidates(connection, included_tags, excluded_tags, excluded_ids)
         parameters.extend(values)
     for tag in excluded_tags:
         clauses.append(
-            "NOT EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_item_id=item.id AND mt.tag=?)"
+            "NOT EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_item_id=item.id AND LOWER(mt.tag) IN (" + ",".join("?" for _ in expanded(tag)) + "))"
         )
-        parameters.append(tag)
+        parameters.extend(expanded(tag))
     if excluded_ids:
         clauses.append(f"item.id NOT IN ({','.join('?' for _ in excluded_ids)})")
         parameters.extend(excluded_ids)

@@ -476,19 +476,16 @@ async function showCollectionBuilder() {
   let preview = null;
   let rejectedIds = [];
   const tagValues = value => [...new Set(String(value || '').split(/\s+/).map(tag => tag.trim().toLowerCase()).filter(Boolean))];
-  workspace.innerHTML = `<div class="page collection-builder"><section class="panel"><div class="panel-head"><i data-lucide="wand-sparkles"></i>Selection rules</div><div class="panel-body builder-fields"><div class="form-row"><label>Preset</label><select id="builderPreset" class="control"><option value="">No preset</option>${presets.items.map(item => `<option value="${item.id}">${esc(item.name)}</option>`).join('')}</select></div><div class="form-row"><label>Collection name</label><input id="builderName" class="control" maxlength="120"></div><div class="form-row"><label>Required tags</label><input id="builderInclude" class="control" placeholder="portrait blue_eyes"><div id="builderIncludeChips" class="search-chips"></div></div><div class="form-row"><label>Exclude tags</label><input id="builderExclude" class="control" placeholder="comic animated"><div id="builderExcludeChips" class="search-chips"></div></div><div class="form-row"><label>Count</label><input id="builderCount" class="control" type="number" min="1" max="1000" value="10"></div><div class="builder-actions"><button id="savePreset" class="btn"><i data-lucide="bookmark-plus"></i>Save preset</button><button id="deletePreset" class="icon-btn danger" title="Delete selected preset"><i data-lucide="trash-2"></i></button><button id="generateCollection" class="btn primary"><i data-lucide="shuffle"></i>Generate</button></div></div></section><div id="builderSummary" class="builder-summary"></div><div id="builderPreview" class="collection-preview-grid"><div class="empty">Enter tags and generate a selection</div></div><div class="builder-savebar"><button id="cancelBuilder" class="btn"><i data-lucide="chevron-left"></i>Collections</button><span id="builderStatus">No collection generated yet</span><button id="commitCollection" class="btn primary" disabled><i data-lucide="save"></i>Save collection</button></div></div>`;
+  workspace.innerHTML = `<div class="page collection-builder"><section class="panel"><div class="panel-head"><i data-lucide="wand-sparkles"></i>Selection rules</div><div class="panel-body builder-fields"><div class="form-row"><label>Preset</label><select id="builderPreset" class="control"><option value="">No preset</option>${presets.items.map(item => `<option value="${item.id}">${esc(item.name)}</option>`).join('')}</select></div><div class="form-row"><label>Collection name</label><input id="builderName" class="control" maxlength="120"></div><div class="form-row"><label>Search</label><input id="builderQuery" class="control" placeholder="portrait blue_eyes -comic author:artist"><div id="builderQueryChips" class="search-chips"></div></div><div class="form-row"><label>Count</label><input id="builderCount" class="control" type="number" min="1" max="1000" value="10"></div><div class="builder-actions"><button id="savePreset" class="btn"><i data-lucide="bookmark-plus"></i>Save preset</button><button id="deletePreset" class="icon-btn danger" title="Delete selected preset"><i data-lucide="trash-2"></i></button><button id="generateCollection" class="btn primary"><i data-lucide="shuffle"></i>Generate</button></div></div></section><div id="builderSummary" class="builder-summary"></div><div id="builderPreview" class="collection-preview-grid"><div class="empty">Enter tags and generate a selection</div></div><div class="builder-savebar"><button id="cancelBuilder" class="btn"><i data-lucide="chevron-left"></i>Collections</button><span id="builderStatus">No collection generated yet</span><button id="commitCollection" class="btn primary" disabled><i data-lucide="save"></i>Save collection</button></div></div>`;
   const fields = () => ({
-    included_tags: tagValues(document.querySelector('#builderInclude').value),
-    excluded_tags: tagValues(document.querySelector('#builderExclude').value),
+    query: document.querySelector('#builderQuery').value.trim(),
     requested_count: Number(document.querySelector('#builderCount').value),
   });
   const renderBuilderChips = () => {
-    const chips = (selector, inputSelector, excluded) => document.querySelector(selector).innerHTML = tagValues(document.querySelector(inputSelector).value).map(tag => `<span class="filter-chip${excluded ? ' excluded' : ''}">${esc(tag)}<button type="button" data-builder-remove="${excluded ? '-' : ''}${esc(tag)}"><i data-lucide="x"></i></button></span>`).join('');
-    chips('#builderIncludeChips','#builderInclude',false); chips('#builderExcludeChips','#builderExclude',true);
-    document.querySelectorAll('[data-builder-remove]').forEach(node => node.onclick = () => { const value=node.dataset.builderRemove; const input=value.startsWith('-')?document.querySelector('#builderExclude'):document.querySelector('#builderInclude'); input.value=tagValues(input.value).filter(tag=>tag !== value.replace(/^-/, '')).join(' '); renderBuilderChips(); }); icons();
+    document.querySelector('#builderQueryChips').innerHTML = tagValues(document.querySelector('#builderQuery').value).map(tag => `<span class="filter-chip${tag.startsWith('-') ? ' excluded' : ''}">${esc(tag)}</span>`).join('');
+    icons();
   };
-  document.querySelector('#builderInclude').oninput = renderBuilderChips;
-  document.querySelector('#builderExclude').oninput = renderBuilderChips;
+  document.querySelector('#builderQuery').oninput = renderBuilderChips;
   const renderPreview = () => {
     if (!preview) return;
     const similar = preview.most_similar_collection ? `Similarity ${Math.round(preview.max_similarity * 100)}% with "${esc(preview.most_similar_collection.name)}"` : '';
@@ -511,8 +508,7 @@ async function showCollectionBuilder() {
   document.querySelector('#builderPreset').onchange = event => {
     const preset = presets.items.find(item => item.id === Number(event.target.value));
     if (!preset) return;
-    document.querySelector('#builderInclude').value = preset.included_tags.join(' ');
-    document.querySelector('#builderExclude').value = preset.excluded_tags.join(' ');
+    document.querySelector('#builderQuery').value = preset.query || '';
     document.querySelector('#builderCount').value = preset.requested_count;
     renderBuilderChips();
   };
