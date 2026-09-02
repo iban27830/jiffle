@@ -2,10 +2,7 @@
 
 import {parseLibrarySearch, withAuthorFilter, toggleSearchTerm} from './library_search.js';
 import {droppedUrl} from './import_drop.js';
-import {
-  drawCompositionPreview,
-  drawForegroundPreview,
-} from './background_preview.js';
+import {drawCompositionPreview, drawForegroundPreview} from './background_preview.js';
 
 const workspace = document.querySelector('#workspace');
 const title = document.querySelector('#viewTitle');
@@ -452,7 +449,8 @@ async function showEditor() {
     const editorState=viewState('editor');
     const backgroundStateMatches=Number(editorState.backgroundMediaId)===Number(mediaId);
     const backgroundOpen=Boolean(editorState.backgroundOpen);
-    const savedPreserve=backgroundStateMatches?Number(editorState.backgroundPreserve ?? savedPreview?.preserve ?? 0):Number(savedPreview?.preserve || 0);
+    const clampPreserve=value=>{const numeric=Number(value);return Number.isFinite(numeric)?Math.max(0,Math.min(100,numeric)):0};
+    const savedPreserve=clampPreserve(backgroundStateMatches?editorState.backgroundPreserve ?? savedPreview?.preserve ?? 0:savedPreview?.preserve || 0);
     const savedBlur=backgroundStateMatches?Number(editorState.backgroundBlur ?? 12):12;
     const savedAssetId=backgroundStateMatches?Number(editorState.backgroundAssetId || 0):0;
     workspace.innerHTML=`<div class="page editor-page">
@@ -464,7 +462,7 @@ async function showEditor() {
          <div class="background-zoom-control"><label for="backgroundZoom">Zoom <output id="backgroundZoomValue" for="backgroundZoom">100%</output></label><input id="backgroundZoom" type="range" min="100" max="400" value="${Number(editorState.backgroundZoom || 100)}"></div>
          <div class="background-preview-comparison"><figure><figcaption>Source</figcaption><div id="backgroundSourcePane" class="background-zoom-pane"><img id="backgroundSourceImage" src="${active?.content_url||state.content_url}" alt=""></div></figure><figure class="transparent-preview"><figcaption>Removed background</figcaption><div id="backgroundPreviewPane" class="background-zoom-pane"><div id="backgroundPreviewResult" class="background-preview-placeholder"><canvas id="backgroundPreviewCanvas" aria-label="Removed background preview"></canvas><i data-lucide="image"></i></div></div></figure></div>
          <div id="backgroundAfterPreview" class="background-after-preview" ${savedPreview?.status==='ready'?'':'hidden'}>
-           <div class="background-mask-controls"><label for="backgroundPreserve">Preserve details and shadows <output id="backgroundPreserveValue" for="backgroundPreserve">${savedPreserve}</output></label><input id="backgroundPreserve" type="range" min="-100" max="100" value="${savedPreserve}"><small>Higher values keep more particles and soft edges; lower values remove more translucent background.</small></div>
+           <div class="background-mask-controls"><label for="backgroundPreserve">Preserve details and shadows <output id="backgroundPreserveValue" for="backgroundPreserve">${savedPreserve}</output>%</label><input id="backgroundPreserve" type="range" min="0" max="100" value="${savedPreserve}"><small id="backgroundPreserveHint">Changes the transparency of soft edge pixels in the existing mask. It does not run RMBG-2.0 again.</small></div>
            <div class="background-selected-state"><span id="selectedBackgroundSummary">No background selected</span><button id="chooseBackground" class="btn" disabled><i data-lucide="images"></i>Choose background</button></div>
            <figure id="backgroundCompositionFigure" class="background-composition-figure" hidden><figcaption>Composition preview</figcaption><canvas id="backgroundCompositionCanvas" aria-label="Background composition preview"></canvas></figure>
            <div class="background-compose-controls"><label for="backgroundBlur">Blur <span><output id="backgroundBlurValue" for="backgroundBlur">${savedBlur}</output>%</span></label><input id="backgroundBlur" type="range" min="0" max="100" value="${savedBlur}" disabled><span class="background-save-note">The composition updates automatically. Apply creates a full-resolution PNG version.</span><button class="btn primary" id="applyBackground" disabled><i data-lucide="check"></i>Apply background</button></div>
@@ -494,6 +492,7 @@ async function showEditor() {
     const applyBackground=document.querySelector('#applyBackground');
     const preserve=document.querySelector('#backgroundPreserve');
     const preserveValueOutput=document.querySelector('#backgroundPreserveValue');
+    const preserveHint=document.querySelector('#backgroundPreserveHint');
     const zoom=document.querySelector('#backgroundZoom');
     const zoomValue=document.querySelector('#backgroundZoomValue');
     const sourcePane=document.querySelector('#backgroundSourcePane');
@@ -532,7 +531,7 @@ async function showEditor() {
     const loadAssets=async(category='')=>{const [assets,categories]=await Promise.all([api(`/api/v1/background-assets${category?`?category=${encodeURIComponent(category)}`:''}`),api('/api/v1/background-assets/categories')]);renderAssets({...assets,categories:categories.items||[]},category)};
     const resolveSelectedBackground=async()=>{if(!selectedBackground)return;const data=await api('/api/v1/background-assets');selectedBackgroundData=(data.items||[]).find(asset=>Number(asset.id)===selectedBackground)||null;chooseBackground.disabled=!selectedBackgroundData;updateSelectedSummary()};
     const updateSelectedSummary=()=>{const node=document.querySelector('#selectedBackgroundSummary');node.textContent=selectedBackgroundData?`Selected background: ${selectedBackgroundData.original_name} · ${selectedBackgroundData.category}`:'No background selected';};
-    const renderLocalPreview=async()=>{if(!preview)return;const dimensions=drawForegroundPreview(foregroundCanvas.getContext('2d'),foregroundImage,Number(preserve.value),preview.width,preview.height);if(selectedBackgroundData){if(!selectedBackgroundImage||selectedBackgroundImage.src!==selectedBackgroundData.content_url)selectedBackgroundImage=await loadImage(selectedBackgroundData.content_url);drawCompositionPreview(compositionResult.getContext('2d'),foregroundCanvas,selectedBackgroundImage,Number(blur.value));compositionFigure.hidden=false;compositionReady=true}else{compositionFigure.hidden=true;compositionReady=false}applyZoom();updateApply();setBackgroundStatus(selectedBackgroundData?'Composition preview ready':'Preview ready · '+Number(preview.subject_coverage).toFixed(1)+'% subject','good');return dimensions};
+    const renderLocalPreview=async()=>{if(!preview)return;const dimensions=drawForegroundPreview(foregroundCanvas.getContext('2d'),foregroundImage,Number(preserve.value),preview.width,preview.height);if(dimensions?.hasSoftEdges){preserveHint.textContent='Soft edge pixels detected. Higher values keep more particles, shadows, and translucent details.';preserveHint.className=''}else{preserveHint.textContent='This removal has a hard mask with no semi-transparent edge pixels. Preserve cannot restore pixels already removed completely.';preserveHint.className='warning'}if(selectedBackgroundData){if(!selectedBackgroundImage||selectedBackgroundImage.src!==selectedBackgroundData.content_url)selectedBackgroundImage=await loadImage(selectedBackgroundData.content_url);drawCompositionPreview(compositionResult.getContext('2d'),foregroundCanvas,selectedBackgroundImage,Number(blur.value));compositionFigure.hidden=false;compositionReady=true}else{compositionFigure.hidden=true;compositionReady=false}applyZoom();updateApply();setBackgroundStatus(selectedBackgroundData?'Composition preview ready':'Preview ready · '+Number(preview.subject_coverage).toFixed(1)+'% subject','good');return dimensions};
     const scheduleLocalPreview=()=>{if(!preview||localFrame)return;setBackgroundStatus('Updating preview...');localFrame=requestAnimationFrame(()=>{localFrame=0;renderLocalPreview().catch(error=>setBackgroundStatus(error.message,'error'))})};
     const prepareForeground=async()=>{if(!preview)return;foregroundImage=await loadImage(preview.content_url.split('?')[0]);afterPreview.hidden=false;categoryFilter.disabled=false;categoryInput.disabled=false;chooseBackground.disabled=false;blur.disabled=false;foregroundCanvas.nextElementSibling?.setAttribute('hidden','');await renderLocalPreview()};
     toggleBackground.onclick=()=>{const open=panel.hidden;panel.hidden=!open;toggleBackground.setAttribute('aria-expanded',String(open));saveViewState('editor',{backgroundOpen:open});if(open)panel.scrollIntoView({behavior:'smooth',block:'start'})};

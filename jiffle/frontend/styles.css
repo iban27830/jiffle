@@ -216,6 +216,7 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
 .background-mask-controls label { display: flex; justify-content: space-between; color: var(--muted); font-size: .82em; font-weight: 650; }
 .background-mask-controls input[type="range"] { width: 100%; accent-color: var(--accent); }
 .background-mask-controls small { grid-column: 1/-1; color: var(--muted); font-size: .78em; }
+.background-mask-controls small.warning { color: var(--warn); }
 .background-selected-state { display: flex; align-items: center; gap: 10px; margin: 12px 0; min-height: 40px; }
 .background-selected-state > span { min-width: 0; overflow: hidden; color: var(--muted); font-size: .84em; text-overflow: ellipsis; white-space: nowrap; }
 .background-selected-state .btn { margin-left: auto; flex: 0 0 auto; }

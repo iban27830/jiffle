@@ -3,8 +3,23 @@
 export const MAX_PREVIEW_SIDE = 2048;
 
 export function preserveGamma(preserve = 0) {
-  const value = Math.max(-100, Math.min(100, Number(preserve) || 0));
+  const value = Math.max(0, Math.min(100, Number(preserve) || 0));
   return 1 - (value * 0.006);
+}
+
+export function alphaChannelStats(data) {
+  let visiblePixels = 0;
+  let softEdgePixels = 0;
+  for (let index = 3; index < data.length; index += 4) {
+    const alpha = data[index];
+    if (alpha > 0) visiblePixels += 1;
+    if (alpha > 0 && alpha < 255) softEdgePixels += 1;
+  }
+  return {
+    visiblePixels,
+    softEdgePixels,
+    hasSoftEdges: softEdgePixels > 0,
+  };
 }
 
 export function transformAlphaChannel(data, preserve = 0) {
@@ -68,9 +83,10 @@ export function drawForegroundPreview(context, image, preserve = 0, width = imag
   context.clearRect(0, 0, dimensions.width, dimensions.height);
   context.drawImage(image, 0, 0, dimensions.width, dimensions.height);
   const pixels = context.getImageData(0, 0, dimensions.width, dimensions.height);
+  const alphaStats = alphaChannelStats(pixels.data);
   transformAlphaChannel(pixels.data, preserve);
   context.putImageData(pixels, 0, 0);
-  return dimensions;
+  return {...dimensions, ...alphaStats};
 }
 
 export function drawCompositionPreview(context, foregroundCanvas, backgroundImage, blur = 0) {

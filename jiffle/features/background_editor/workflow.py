@@ -14,7 +14,7 @@ DETECTOR_VERSION = 1
 DEFAULT_TOLERANCE = 24
 DEFAULT_MIN_BACKGROUND_PERCENT = 25.0
 MODEL_NAME = "briaai/RMBG-2.0"
-MIN_PRESERVE = -100
+MIN_PRESERVE = 0
 MAX_PRESERVE = 100
 DEFAULT_PRESERVE = 0
 
@@ -33,12 +33,12 @@ def preserve_value(value=DEFAULT_PRESERVE):
     except (TypeError, ValueError) as error:
         raise BackgroundFailure(
             "background.invalid_preserve",
-            "Detail preservation must be between -100 and 100.",
+            "Detail preservation must be between 0 and 100.",
         ) from error
     if not MIN_PRESERVE <= value <= MAX_PRESERVE:
         raise BackgroundFailure(
             "background.invalid_preserve",
-            "Detail preservation must be between -100 and 100.",
+            "Detail preservation must be between 0 and 100.",
         )
     return value
 
