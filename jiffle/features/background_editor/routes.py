@@ -238,8 +238,10 @@ def cancel_scan(job_id):
 def create_preview(media_id):
     configured = current_app.config.get("JIFFLE_BACKGROUND_REMOVER")
     settings = current_app.config["JIFFLE_SETTINGS"]
+    payload = request.get_json(silent=True)
+    payload = payload if isinstance(payload, dict) else {}
     try:
-        preserve = preserve_value((request.get_json(silent=True) or {}).get("preserve", 0))
+        preserve = preserve_value(payload.get("preserve", 0))
     except BackgroundFailure as error:
         return _background_error(error)
     remover = configured or (
@@ -248,8 +250,12 @@ def create_preview(media_id):
         )
     )
     try:
+        force = payload.get("force", request.args.get("force", False))
+        if isinstance(force, str):
+            force = force.strip().lower() in {"1", "true", "yes", "on"}
         row = create_background_preview(
             get_database(), settings, media_id, remover,
+            force=bool(force),
         )
     except BackgroundFailure as error:
         return _background_error(error)
@@ -266,7 +272,7 @@ def get_preview(media_id):
     if media is None:
         return _error("background.media_not_found", "Media item was not found.", 404)
     row = connection.execute(
-        "SELECT * FROM background_previews WHERE media_item_id=? AND source_revision_id=? ORDER BY created_at DESC LIMIT 1",
+        "SELECT * FROM background_previews WHERE media_item_id=? AND source_revision_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1",
         (media_id, media["active_revision_id"]),
     ).fetchone()
     if row is None:

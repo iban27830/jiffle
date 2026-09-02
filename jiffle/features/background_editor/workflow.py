@@ -241,7 +241,9 @@ def _color_bucket(pixel):
     return tuple(channel // 32 for channel in pixel[:3])
 
 
-def create_background_preview(connection, settings, media_id, remover):
+def create_background_preview(connection, settings, media_id, remover, force=False):
+    if isinstance(force, str):
+        force = force.strip().lower() in {"1", "true", "yes", "on"}
     row = connection.execute(
         "SELECT m.active_revision_id,r.file_path FROM media_items m "
         "JOIN media_revisions r ON r.id=m.active_revision_id "
@@ -250,15 +252,16 @@ def create_background_preview(connection, settings, media_id, remover):
     ).fetchone()
     if row is None:
         raise BackgroundFailure("background.media_not_found", "Media item was not found.")
-    existing = connection.execute(
-        "SELECT * FROM background_previews WHERE media_item_id=? AND source_revision_id=? "
-        "ORDER BY created_at DESC LIMIT 1",
-        (media_id, row["active_revision_id"]),
-    ).fetchone()
-    if existing is not None:
-        preview_path = media_path(preview_root(settings), existing["file_path"])
-        if preview_path is not None and preview_path.is_file():
-            return existing
+    if not force:
+        existing = connection.execute(
+            "SELECT * FROM background_previews WHERE media_item_id=? AND source_revision_id=? "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (media_id, row["active_revision_id"]),
+        ).fetchone()
+        if existing is not None:
+            preview_path = media_path(preview_root(settings), existing["file_path"])
+            if preview_path is not None and preview_path.is_file():
+                return existing
     source = media_path(settings.media_path, row["file_path"])
     if source is None or not source.is_file():
         raise BackgroundFailure("background.file_missing", "Media file is unavailable.")
@@ -269,7 +272,15 @@ def create_background_preview(connection, settings, media_id, remover):
                     "background.animated_unsupported", "Animated images are not supported."
                 )
             original = ImageOps.exif_transpose(opened).convert("RGBA")
-            isolated = remover(original, settings.database_path.parent / "models")
+            try:
+                isolated = remover(original, settings.database_path.parent / "models")
+            except BackgroundFailure:
+                raise
+            except Exception as error:
+                raise BackgroundFailure(
+                    "background.inference_failed",
+                    "The background model could not process the image.",
+                ) from error
             if not isinstance(isolated, Image.Image):
                 raise BackgroundFailure(
                     "background.inference_failed", "The background model returned no image."

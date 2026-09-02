@@ -2,6 +2,10 @@
 
 import {parseLibrarySearch, withAuthorFilter, toggleSearchTerm} from './library_search.js';
 import {droppedUrl} from './import_drop.js';
+import {
+  drawCompositionPreview,
+  drawForegroundPreview,
+} from './background_preview.js';
 
 const workspace = document.querySelector('#workspace');
 const title = document.querySelector('#viewTitle');
@@ -440,94 +444,121 @@ async function showEditor() {
     document.querySelectorAll('.open-crop').forEach(n=>n.onclick=()=>openCrop(Number(n.dataset.id)));document.querySelectorAll('.reset-crop').forEach(n=>n.onclick=async()=>{await api(`/api/v1/crop-analyses/${n.dataset.id}/reset`,{method:'POST'});render(status)}); icons(); document.querySelector('#cropCount').textContent=status==='pending'?(data.items.length||''):document.querySelector('#cropCount').textContent;
   };
   const openMediaEditor = async mediaId => {
-    saveViewState('editor',{targetMediaId:mediaId,analysisId:null,box:null});
+    saveViewState('editor',{targetMediaId:mediaId,analysisId:null,box:null,backgroundMediaId:mediaId});
     const [state,revisions,savedPreview]=await Promise.all([api(`/api/v1/media/${mediaId}/editor-state`),api(`/api/v1/media/${mediaId}/revisions`),api(`/api/v1/media/${mediaId}/background-preview`).catch(()=>({status:'none'}))]);
     const active=revisions.items.find(revision=>revision.active);
     const original=[...revisions.items].reverse().find(revision=>revision.operation==='original'&&!revision.parent_revision_id);
     const operationDetails=revision=>revision.operation==='crop'&&Array.isArray(revision.details?.box)?`Crop: ${revision.details.box.join(', ')}${revision.details.method?` · ${operationName(revision.details.method)} analysis`:''}`:operationName(revision.operation);
-    const backgroundOpen=Boolean(viewState('editor').backgroundOpen);
+    const editorState=viewState('editor');
+    const backgroundStateMatches=Number(editorState.backgroundMediaId)===Number(mediaId);
+    const backgroundOpen=Boolean(editorState.backgroundOpen);
+    const savedPreserve=backgroundStateMatches?Number(editorState.backgroundPreserve ?? savedPreview?.preserve ?? 0):Number(savedPreview?.preserve || 0);
+    const savedBlur=backgroundStateMatches?Number(editorState.backgroundBlur ?? 12):12;
+    const savedAssetId=backgroundStateMatches?Number(editorState.backgroundAssetId || 0):0;
     workspace.innerHTML=`<div class="page editor-page">
       <div class="page-head"><button class="btn" id="backEditor"><i data-lucide="chevron-left"></i>Editor</button><button class="icon-btn" id="cropOpenLibrary" title="Open in Library"><i data-lucide="images"></i></button><h2>Image editor</h2>${state.is_edited?`<span class="badge good">${esc(editSummary(state.edit_operations))}</span>`:'<span class="badge">Original</span>'}</div>
       <div class="editor-version-compare"><section><h3>Current version</h3><img src="${active?.content_url||state.content_url}" alt=""></section><section><h3>Original</h3><img src="${original?.content_url||state.content_url}" alt=""></section></div>
       <div class="actions editor-state-actions"><button class="btn primary" id="analyzeCurrent"><i data-lucide="scan-line"></i>Analyze current</button><button class="btn" id="toggleBackgroundEditor" aria-expanded="${backgroundOpen}"><i data-lucide="image-plus"></i>Replace background</button><button class="btn danger" id="resetOriginal" ${state.is_edited?'':'disabled'}><i data-lucide="rotate-ccw"></i>Reset to original</button></div>
        <section id="backgroundPanel" class="background-panel" ${backgroundOpen?'':'hidden'}>
-         <div class="background-panel-head"><div><h3>Background replacement</h3><span id="backgroundStatus" class="background-status">Preview required</span></div><div class="actions"><button id="analyzeBackgroundCurrent" class="btn"><i data-lucide="scan-search"></i>Check candidate</button><button id="removeBackgroundPreview" class="btn primary"><i data-lucide="scan-eye"></i>Remove background / Preview</button></div></div>
-         <div class="background-zoom-control"><label for="backgroundZoom">Zoom <output id="backgroundZoomValue" for="backgroundZoom">100%</output></label><input id="backgroundZoom" type="range" min="100" max="400" value="${Number(viewState('editor').backgroundZoom || 100)}"></div>
-         <div class="background-preview-comparison"><figure><figcaption>Source</figcaption><div id="backgroundSourcePane" class="background-zoom-pane"><img id="backgroundSourceImage" src="${active?.content_url||state.content_url}" alt=""></div></figure><figure class="transparent-preview"><figcaption>Removed background</figcaption><div id="backgroundPreviewPane" class="background-zoom-pane"><div id="backgroundPreviewResult" class="background-preview-placeholder"><i data-lucide="image"></i></div></div></figure></div>
+         <div class="background-panel-head"><div><h3>Background replacement</h3><span id="backgroundStatus" class="background-status">${savedPreview?.status==='ready'?'Preview ready':'Preview required'}</span></div><div class="actions"><button id="analyzeBackgroundCurrent" class="btn"><i data-lucide="scan-search"></i>Check candidate</button><button id="removeBackgroundPreview" class="btn primary"><i data-lucide="scan-eye"></i>${savedPreview?.status==='ready'?'Run removal again':'Remove background / Preview'}</button></div></div>
+         <div class="background-zoom-control"><label for="backgroundZoom">Zoom <output id="backgroundZoomValue" for="backgroundZoom">100%</output></label><input id="backgroundZoom" type="range" min="100" max="400" value="${Number(editorState.backgroundZoom || 100)}"></div>
+         <div class="background-preview-comparison"><figure><figcaption>Source</figcaption><div id="backgroundSourcePane" class="background-zoom-pane"><img id="backgroundSourceImage" src="${active?.content_url||state.content_url}" alt=""></div></figure><figure class="transparent-preview"><figcaption>Removed background</figcaption><div id="backgroundPreviewPane" class="background-zoom-pane"><div id="backgroundPreviewResult" class="background-preview-placeholder"><canvas id="backgroundPreviewCanvas" aria-label="Removed background preview"></canvas><i data-lucide="image"></i></div></div></figure></div>
          <div id="backgroundAfterPreview" class="background-after-preview" ${savedPreview?.status==='ready'?'':'hidden'}>
-           <div class="background-mask-controls"><label for="backgroundPreserve">Preserve details and shadows <output id="backgroundPreserveValue" for="backgroundPreserve">${Number(savedPreview?.preserve || 0)}</output></label><input id="backgroundPreserve" type="range" min="-100" max="100" value="${Number(savedPreview?.preserve || 0)}"><small>Higher values keep more particles and soft edges; lower values remove more translucent background.</small></div>
-           <div class="background-library-toolbar"><label>Category <select id="backgroundCategoryFilter" class="control" disabled><option value="">All backgrounds</option></select></label><label>Import category <input id="backgroundImportCategory" class="control" list="backgroundCategoryNames" maxlength="80" disabled></label><datalist id="backgroundCategoryNames"></datalist><input id="backgroundFileInput" type="file" accept="image/*" hidden><button id="chooseBackgroundFile" class="btn" disabled><i data-lucide="upload"></i>Import background</button></div>
-           <div id="backgroundLibrary" class="background-grid"><div class="empty">No backgrounds</div></div>
-           <figure id="backgroundCompositionFigure" class="background-composition-figure" hidden><figcaption>Composition preview</figcaption><img id="backgroundCompositionResult" alt=""></figure>
-           <div class="background-compose-controls"><label for="backgroundBlur">Blur <span><output id="backgroundBlurValue" for="backgroundBlur">12</output>%</span></label><input id="backgroundBlur" type="range" min="0" max="100" value="12" disabled><span class="background-save-note">Preview the composition, then confirm to create and activate a new version.</span><button class="btn" id="previewBackgroundComposition" disabled><i data-lucide="eye"></i>Preview result</button><button class="btn primary" id="applyBackground" disabled><i data-lucide="check"></i>Apply background</button></div>
+           <div class="background-mask-controls"><label for="backgroundPreserve">Preserve details and shadows <output id="backgroundPreserveValue" for="backgroundPreserve">${savedPreserve}</output></label><input id="backgroundPreserve" type="range" min="-100" max="100" value="${savedPreserve}"><small>Higher values keep more particles and soft edges; lower values remove more translucent background.</small></div>
+           <div class="background-selected-state"><span id="selectedBackgroundSummary">No background selected</span><button id="chooseBackground" class="btn" disabled><i data-lucide="images"></i>Choose background</button></div>
+           <figure id="backgroundCompositionFigure" class="background-composition-figure" hidden><figcaption>Composition preview</figcaption><canvas id="backgroundCompositionCanvas" aria-label="Background composition preview"></canvas></figure>
+           <div class="background-compose-controls"><label for="backgroundBlur">Blur <span><output id="backgroundBlurValue" for="backgroundBlur">${savedBlur}</output>%</span></label><input id="backgroundBlur" type="range" min="0" max="100" value="${savedBlur}" disabled><span class="background-save-note">The composition updates automatically. Apply creates a full-resolution PNG version.</span><button class="btn primary" id="applyBackground" disabled><i data-lucide="check"></i>Apply background</button></div>
+           <div id="backgroundLibraryModal" class="background-modal" hidden role="dialog" aria-modal="true" aria-labelledby="backgroundLibraryTitle"><div class="background-modal-backdrop" data-close-background-modal></div><div class="background-modal-window"><div class="background-modal-head"><h3 id="backgroundLibraryTitle">Choose background</h3><button id="closeBackgroundModal" class="icon-btn" title="Close"><i data-lucide="x"></i></button></div><div class="background-library-toolbar"><label>Category <select id="backgroundCategoryFilter" class="control"><option value="">All backgrounds</option></select></label><label>Import category <input id="backgroundImportCategory" class="control" list="backgroundCategoryNames" maxlength="80" placeholder="Category"></label><datalist id="backgroundCategoryNames"></datalist><input id="backgroundFileInput" type="file" accept="image/*" hidden><button id="chooseBackgroundFile" class="btn"><i data-lucide="upload"></i>Import background</button></div><div id="backgroundLibrary" class="background-grid"><div class="empty">No backgrounds</div></div><div class="background-modal-actions"><button id="cancelBackground" class="btn">Cancel</button><button id="selectBackground" class="btn primary" disabled><i data-lucide="check"></i>Select background</button></div></div></div>
          </div>
-      </section>
-      <section class="revision-list"><h3>Versions</h3>${revisions.items.map(revision=>`<article class="${revision.in_active_chain?'active-chain':''}"><img src="${revision.content_url}" alt=""><span><strong>${esc(operationDetails(revision))}</strong><small>${revision.width}×${revision.height} · ${formatBytes(revision.file_size)}${revision.active?' · Active':''}</small></span><button class="btn restore-revision" data-id="${revision.id}" ${revision.active?'disabled':''}>${revision.active?'Active':'Restore'}</button></article>`).join('')}</section>
-    </div>`;
+       </section>
+       <section class="revision-list"><h3>Versions</h3>${revisions.items.map(revision=>`<article class="${revision.in_active_chain?'active-chain':''}"><img src="${revision.content_url}" alt=""><span><strong>${esc(operationDetails(revision))}</strong><small>${revision.width}×${revision.height} · ${formatBytes(revision.file_size)}${revision.active?' · Active':''}</small></span><button class="btn restore-revision" data-id="${revision.id}" ${revision.active?'disabled':''}>${revision.active?'Active':'Restore'}</button></article>`).join('')}</section>
+     </div>`;
     document.querySelector('#backEditor').onclick=()=>{saveViewState('editor',{targetMediaId:null,backgroundOpen:false});render()};
     document.querySelector('#cropOpenLibrary').onclick=()=>openMediaInLibrary(mediaId);
     document.querySelector('#analyzeCurrent').onclick=async()=>{try{const method=cropSettings.crop_selected_analysis;const result=method==='vision'?await api(`/api/v1/media/${mediaId}/crop-vision-analysis`,{method:'POST'}):await api('/api/v1/crop-analyses',{method:'POST',body:JSON.stringify({media_id:mediaId,min_area:cropSettings.crop_min_area_percent,padding:cropSettings.crop_padding_percent/100,tolerance:cropSettings.crop_background_tolerance})});if(result.id)await openCrop(result.id);else toast('No removable margins found')}catch(error){toast(error.message,true)}};
     const panel=document.querySelector('#backgroundPanel');
     const toggleBackground=document.querySelector('#toggleBackgroundEditor');
-     const backgroundStatus=document.querySelector('#backgroundStatus');
+    const backgroundStatus=document.querySelector('#backgroundStatus');
     const afterPreview=document.querySelector('#backgroundAfterPreview');
-    const categoryFilter=document.querySelector('#backgroundCategoryFilter');
+    const chooseBackground=document.querySelector('#chooseBackground');
+    const modal=document.querySelector('#backgroundLibraryModal');
+    const modalFilter=document.querySelector('#backgroundCategoryFilter');
+    // Keep the old names available for integrations that inspect the editor DOM.
+    const categoryFilter=modalFilter;
     const categoryInput=document.querySelector('#backgroundImportCategory');
     const categoryNames=document.querySelector('#backgroundCategoryNames');
     const fileInput=document.querySelector('#backgroundFileInput');
     const chooseFile=document.querySelector('#chooseBackgroundFile');
-     const blur=document.querySelector('#backgroundBlur');
-     const applyBackground=document.querySelector('#applyBackground');
-     const preserve=document.querySelector('#backgroundPreserve');
-     const preserveValueOutput=document.querySelector('#backgroundPreserveValue');
-     const zoom=document.querySelector('#backgroundZoom');
-     const zoomValue=document.querySelector('#backgroundZoomValue');
-     const sourcePane=document.querySelector('#backgroundSourcePane');
-     const previewPane=document.querySelector('#backgroundPreviewPane');
-     const compositionFigure=document.querySelector('#backgroundCompositionFigure');
-     const compositionResult=document.querySelector('#backgroundCompositionResult');
-     const previewComposition=document.querySelector('#previewBackgroundComposition');
-     let preview=savedPreview?.status==='ready'?savedPreview:null;
-     let compositionPreview=null;
-     let compositionRequest=0;
-     let selectedBackground=0;
+    const selectBackground=document.querySelector('#selectBackground');
+    const blur=document.querySelector('#backgroundBlur');
+    const applyBackground=document.querySelector('#applyBackground');
+    const preserve=document.querySelector('#backgroundPreserve');
+    const preserveValueOutput=document.querySelector('#backgroundPreserveValue');
+    const zoom=document.querySelector('#backgroundZoom');
+    const zoomValue=document.querySelector('#backgroundZoomValue');
+    const sourcePane=document.querySelector('#backgroundSourcePane');
+    const previewPane=document.querySelector('#backgroundPreviewPane');
+    const foregroundCanvas=document.querySelector('#backgroundPreviewCanvas');
+    const compositionFigure=document.querySelector('#backgroundCompositionFigure');
+    const compositionCanvas=document.querySelector('#backgroundCompositionCanvas');
+    const compositionResult=compositionCanvas;
+    let preview=savedPreview?.status==='ready'?savedPreview:null;
+    let selectedBackground=savedAssetId;
+    let temporaryBackground=savedAssetId;
+    let selectedBackgroundData=null;
+    let selectedBackgroundImage=null;
+    let foregroundImage=null;
+    let localFrame=0;
+    let compositionReady=false;
+    let assetItems=[];
     const setBackgroundStatus=(message,type='')=>{backgroundStatus.textContent=message;backgroundStatus.className=`background-status${type?` ${type}`:''}`};
-     const updateApply=()=>{applyBackground.disabled=!(preview&&selectedBackground);if(!compositionPreview)applyBackground.disabled=true;previewComposition.disabled=!(preview&&selectedBackground)};
-     const previewUrl=()=>preview?`${preview.content_url.split('?')[0]}?preserve=${Number(preserve.value)}`:'';
-     const renderPreview=()=>{if(!preview)return;document.querySelector('#backgroundPreviewResult').innerHTML=`<img src="${previewUrl()}" alt="Removed background preview">`;afterPreview.hidden=false;categoryFilter.disabled=false;categoryInput.disabled=false;blur.disabled=false;setBackgroundStatus(`Preview ready · ${Number(preview.subject_coverage).toFixed(1)}% subject`,'good');applyZoom();icons()};
-     const applyZoom=()=>{const scale=Math.max(100,Number(zoom.value)||100);zoomValue.value=`${scale}%`;[sourcePane,previewPane].forEach(pane=>{const image=pane?.querySelector('img');if(image)image.style.width=`${scale}%`});saveViewState('editor',{backgroundZoom:scale});};
-     let syncingScroll=false;
-     const syncScroll=(source,target)=>{if(syncingScroll)return;syncingScroll=true;target.scrollLeft=source.scrollLeft;target.scrollTop=source.scrollTop;saveViewState('editor',{backgroundScrollLeft:source.scrollLeft,backgroundScrollTop:source.scrollTop});requestAnimationFrame(()=>syncingScroll=false)};
-     sourcePane.onscroll=()=>syncScroll(sourcePane,previewPane);previewPane.onscroll=()=>syncScroll(previewPane,sourcePane);zoom.oninput=applyZoom;
+    const loadImage=url=>new Promise((resolve,reject)=>{const image=new Image();image.onload=()=>resolve(image);image.onerror=()=>reject(new Error('Preview image could not be loaded.'));image.src=url});
+    const updateApply=()=>{applyBackground.disabled=!(preview&&selectedBackground);if(!compositionReady)applyBackground.disabled=true};
+    const applyZoom=()=>{const scale=Math.max(100,Number(zoom.value)||100);zoomValue.value=`${scale}%`;[sourcePane,previewPane].forEach(pane=>{const image=pane?.querySelector('img,canvas');if(image)image.style.width=`${scale}%`});saveViewState('editor',{backgroundZoom:scale});};
+    let syncingScroll=false;
+    const syncScroll=(source,target)=>{if(syncingScroll)return;syncingScroll=true;target.scrollLeft=source.scrollLeft;target.scrollTop=source.scrollTop;saveViewState('editor',{backgroundScrollLeft:source.scrollLeft,backgroundScrollTop:source.scrollTop});requestAnimationFrame(()=>syncingScroll=false)};
+    sourcePane.onscroll=()=>syncScroll(sourcePane,previewPane);previewPane.onscroll=()=>syncScroll(previewPane,sourcePane);zoom.oninput=applyZoom;
     const renderAssets=(data,category='')=>{
-      const categories=data.categories || [];
-      categoryFilter.innerHTML=`<option value="">All backgrounds</option>${categories.map(item=>`<option value="${esc(item.name)}" ${item.name===category?'selected':''}>${esc(item.name)} (${item.count})</option>`).join('')}`;
+      const categories=data.categories||[]; assetItems=data.items||[];
+      modalFilter.innerHTML=`<option value="">All backgrounds</option>${categories.map(item=>`<option value="${esc(item.name)}" ${item.name===category?'selected':''}>${esc(item.name)} (${item.count})</option>`).join('')}`;
       categoryNames.innerHTML=categories.map(item=>`<option value="${esc(item.name)}"></option>`).join('');
       if(!categoryInput.value&&categories.length)categoryInput.value=categories[0].name;
       chooseFile.disabled=!categoryInput.value.trim();
-      selectedBackground=0;
-      const assets=data.items || [];
-      document.querySelector('#backgroundLibrary').innerHTML=assets.length?assets.map(asset=>`<button class="background-choice" data-id="${asset.id}"><img src="${asset.content_url}" alt=""><span><strong>${esc(asset.original_name)}</strong><small>${esc(asset.category)} · ${asset.width || '?'}×${asset.height || '?'}</small></span></button>`).join(''):'<div class="empty">No backgrounds in this category</div>';
-       document.querySelectorAll('.background-choice').forEach(node=>node.onclick=()=>{selectedBackground=Number(node.dataset.id);document.querySelectorAll('.background-choice').forEach(choice=>choice.classList.toggle('selected',choice===node));compositionPreview=null;compositionFigure.hidden=true;updateApply();refreshCompositionPreview()});
-       updateApply();
-     };
-    const loadAssets=async(category='')=>{const [assets,categories]=await Promise.all([api(`/api/v1/background-assets${category?`?category=${encodeURIComponent(category)}`:''}`),api('/api/v1/background-assets/categories')]);renderAssets({...assets,categories:categories.items || []},category)};
-     toggleBackground.onclick=()=>{const open=panel.hidden;panel.hidden=!open;toggleBackground.setAttribute('aria-expanded',String(open));saveViewState('editor',{backgroundOpen:open});if(open)panel.scrollIntoView({behavior:'smooth',block:'start'})};
+      document.querySelector('#backgroundLibrary').innerHTML=assetItems.length?assetItems.map(asset=>`<button type="button" class="background-choice${Number(asset.id)===temporaryBackground?' selected':''}" data-id="${asset.id}"><img src="${asset.content_url}" loading="lazy" alt=""><span><strong>${esc(asset.original_name)}</strong><small>${esc(asset.category)} · ${asset.width||'?'}×${asset.height||'?'}</small></span></button>`).join(''):'<div class="empty">No backgrounds in this category</div>';
+      document.querySelectorAll('.background-choice').forEach(node=>node.onclick=()=>{temporaryBackground=Number(node.dataset.id);document.querySelectorAll('.background-choice').forEach(choice=>choice.classList.toggle('selected',choice===node));selectBackground.disabled=false});
+      const matching=assetItems.find(asset=>Number(asset.id)===selectedBackground); if(matching)selectedBackgroundData=matching;
+      selectBackground.disabled=!temporaryBackground;
+    };
+    const loadAssets=async(category='')=>{const [assets,categories]=await Promise.all([api(`/api/v1/background-assets${category?`?category=${encodeURIComponent(category)}`:''}`),api('/api/v1/background-assets/categories')]);renderAssets({...assets,categories:categories.items||[]},category)};
+    const resolveSelectedBackground=async()=>{if(!selectedBackground)return;const data=await api('/api/v1/background-assets');selectedBackgroundData=(data.items||[]).find(asset=>Number(asset.id)===selectedBackground)||null;chooseBackground.disabled=!selectedBackgroundData;updateSelectedSummary()};
+    const updateSelectedSummary=()=>{const node=document.querySelector('#selectedBackgroundSummary');node.textContent=selectedBackgroundData?`Selected background: ${selectedBackgroundData.original_name} · ${selectedBackgroundData.category}`:'No background selected';};
+    const renderLocalPreview=async()=>{if(!preview)return;const dimensions=drawForegroundPreview(foregroundCanvas.getContext('2d'),foregroundImage,Number(preserve.value),preview.width,preview.height);if(selectedBackgroundData){if(!selectedBackgroundImage||selectedBackgroundImage.src!==selectedBackgroundData.content_url)selectedBackgroundImage=await loadImage(selectedBackgroundData.content_url);drawCompositionPreview(compositionResult.getContext('2d'),foregroundCanvas,selectedBackgroundImage,Number(blur.value));compositionFigure.hidden=false;compositionReady=true}else{compositionFigure.hidden=true;compositionReady=false}applyZoom();updateApply();setBackgroundStatus(selectedBackgroundData?'Composition preview ready':'Preview ready · '+Number(preview.subject_coverage).toFixed(1)+'% subject','good');return dimensions};
+    const scheduleLocalPreview=()=>{if(!preview||localFrame)return;setBackgroundStatus('Updating preview...');localFrame=requestAnimationFrame(()=>{localFrame=0;renderLocalPreview().catch(error=>setBackgroundStatus(error.message,'error'))})};
+    const prepareForeground=async()=>{if(!preview)return;foregroundImage=await loadImage(preview.content_url.split('?')[0]);afterPreview.hidden=false;categoryFilter.disabled=false;categoryInput.disabled=false;chooseBackground.disabled=false;blur.disabled=false;foregroundCanvas.nextElementSibling?.setAttribute('hidden','');await renderLocalPreview()};
+    toggleBackground.onclick=()=>{const open=panel.hidden;panel.hidden=!open;toggleBackground.setAttribute('aria-expanded',String(open));saveViewState('editor',{backgroundOpen:open});if(open)panel.scrollIntoView({behavior:'smooth',block:'start'})};
     document.querySelector('#analyzeBackgroundCurrent').onclick=async()=>{const button=document.querySelector('#analyzeBackgroundCurrent');const saved=viewState('editor');const parameters={tolerance:Number(saved.backgroundTolerance)||24,min_background_percent:Number(saved.backgroundMinimumArea)||25};button.disabled=true;setBackgroundStatus('Analyzing background...');try{const result=await api(`/api/v1/media/${mediaId}/background-analysis`,{method:'POST',body:JSON.stringify(parameters)});if(result.status==='candidate'){const candidate=result.candidate;setBackgroundStatus(`Candidate · ${Number(candidate.background_area_percent).toFixed(1)}% background`,'good')}else setBackgroundStatus('No replaceable background found','warn')}catch(error){setBackgroundStatus(error.message,'error')}finally{button.disabled=false}};
-     document.querySelector('#removeBackgroundPreview').onclick=async()=>{const button=document.querySelector('#removeBackgroundPreview');button.disabled=true;setBackgroundStatus('Preparing RMBG-2.0 and removing background...');try{preview=await api(`/api/v1/media/${mediaId}/background-preview`,{method:'POST',body:JSON.stringify({preserve:Number(preserve.value)})});compositionPreview=null;renderPreview();await loadAssets('');updateApply()}catch(error){preview=null;afterPreview.hidden=true;setBackgroundStatus(error.message,'error')}finally{button.disabled=false;icons()}};
-     categoryFilter.onchange=async()=>{try{await loadAssets(categoryFilter.value)}catch(error){toast(error.message,true)}};
-    categoryInput.oninput=()=>{chooseFile.disabled=!categoryInput.value.trim()};
-    chooseFile.onclick=()=>fileInput.click();
-    fileInput.onchange=async()=>{const file=fileInput.files?.[0];const category=categoryInput.value.trim();if(!file)return;if(!category){toast('Choose a category before importing',true);fileInput.value='';return}chooseFile.disabled=true;try{const body=new FormData();body.append('file',file);body.append('category',category);await api('/api/v1/background-assets/import',{method:'POST',body});toast('Background imported');await loadAssets(category)}catch(error){toast(error.message,true)}finally{fileInput.value='';chooseFile.disabled=!categoryInput.value.trim()}};
-     const refreshCompositionPreview=async()=>{if(!preview||!selectedBackground)return;const requestId=++compositionRequest;previewComposition.disabled=true;setBackgroundStatus('Building composition preview...');try{const rendered=await api(`/api/v1/media/${mediaId}/background-compose-preview`,{method:'POST',body:JSON.stringify({preview_id:preview.preview_id,background_id:selectedBackground,blur:Number(blur.value),preserve:Number(preserve.value)})});if(requestId!==compositionRequest)return;compositionPreview=rendered;compositionResult.src=rendered.content_url;compositionFigure.hidden=false;setBackgroundStatus('Composition preview ready','good')}catch(error){if(requestId!==compositionRequest)return;compositionPreview=null;compositionFigure.hidden=true;setBackgroundStatus(error.message,'error')}finally{if(requestId===compositionRequest){updateApply();icons()}}};
-     previewComposition.onclick=refreshCompositionPreview;
-     blur.oninput=()=>{document.querySelector('#backgroundBlurValue').value=blur.value;compositionPreview=null;compositionFigure.hidden=true;updateApply();if(selectedBackground)refreshCompositionPreview()};
-     preserve.oninput=()=>{preserveValueOutput.value=preserve.value;compositionPreview=null;compositionFigure.hidden=true;updateApply();if(preview){renderPreview();if(selectedBackground)refreshCompositionPreview()}};
-     applyBackground.onclick=async()=>{if(!preview||!selectedBackground||!compositionPreview)return;applyBackground.disabled=true;setBackgroundStatus('Saving and activating new version...');try{await api(`/api/v1/media/${mediaId}/background-compose`,{method:'POST',body:JSON.stringify({preview_id:preview.preview_id,background_id:selectedBackground,blur:Number(blur.value),preserve:Number(preserve.value)})});toast('Background version created and activated');saveViewState('editor',{backgroundOpen:true});await openMediaEditor(mediaId)}catch(error){setBackgroundStatus(error.message,'error');updateApply()}};
+    document.querySelector('#removeBackgroundPreview').onclick=async()=>{const button=document.querySelector('#removeBackgroundPreview');const previousPreview=preview;button.disabled=true;setBackgroundStatus(previousPreview?'Running RMBG-2.0 again...':'Preparing RMBG-2.0 and removing background...');try{preview=await api(`/api/v1/media/${mediaId}/background-preview`,{method:'POST',body:JSON.stringify({preserve:Number(preserve.value),force:Boolean(previousPreview)})});button.innerHTML='<i data-lucide="scan-eye"></i>Run removal again';foregroundImage=null;selectedBackgroundImage=null;compositionReady=false;await resolveSelectedBackground().catch(()=>{});await prepareForeground()}catch(error){if(error.message&&preview!==previousPreview){setBackgroundStatus(error.message,'error');afterPreview.hidden=false;updateApply();}else{preview=previousPreview;if(previousPreview){afterPreview.hidden=false;setBackgroundStatus(error.message,'error');updateApply()}else{afterPreview.hidden=true;setBackgroundStatus(error.message,'error')}}}finally{button.disabled=false;icons()}};
+    const openModal=async()=>{temporaryBackground=selectedBackground;modal.hidden=false;await loadAssets(modalFilter.value||'');document.querySelector('#selectBackground').focus()};
+    const closeModal=()=>{modal.hidden=true;chooseBackground.focus()};
+    chooseBackground.onclick=openModal;document.querySelector('#closeBackgroundModal').onclick=closeModal;document.querySelector('#cancelBackground').onclick=closeModal;modal.querySelector('[data-close-background-modal]').onclick=closeModal;
+    modalFilter.onchange=async()=>{try{await loadAssets(modalFilter.value)}catch(error){toast(error.message,true)}};
+    categoryInput.oninput=()=>{chooseFile.disabled=!categoryInput.value.trim()};chooseFile.onclick=()=>fileInput.click();
+    fileInput.onchange=async()=>{const file=fileInput.files?.[0],category=categoryInput.value.trim();if(!file)return;if(!category){toast('Choose a category before importing',true);fileInput.value='';return}chooseFile.disabled=true;try{const body=new FormData();body.append('file',file);body.append('category',category);await api('/api/v1/background-assets/import',{method:'POST',body});toast('Background imported');await loadAssets(category)}catch(error){toast(error.message,true)}finally{fileInput.value='';chooseFile.disabled=!categoryInput.value.trim()}};
+    // A card only changes temporaryBackground; selection is committed here
+    // (selectedBackground=Number(node.dataset.id)) after confirmation.
+    selectBackground.onclick=async()=>{selectedBackground=temporaryBackground;selectedBackgroundData=assetItems.find(asset=>Number(asset.id)===selectedBackground)||selectedBackgroundData;selectedBackgroundImage=null;saveViewState('editor',{backgroundMediaId:mediaId,backgroundAssetId:selectedBackground});updateSelectedSummary();closeModal();scheduleLocalPreview()};
+    // The server compose preview endpoint remains available for API clients and
+    // older integrations even though slider updates now stay local in canvas.
+    const legacyComposePreviewEndpoint=media=>`/api/v1/media/${media}/background-compose-preview`;
+    document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!modal.hidden)closeModal()},{once:false});
+    blur.oninput=()=>{document.querySelector('#backgroundBlurValue').value=blur.value;saveViewState('editor',{backgroundBlur:Number(blur.value)});scheduleLocalPreview()};
+    preserve.oninput=()=>{preserveValueOutput.value=preserve.value;saveViewState('editor',{backgroundPreserve:Number(preserve.value)});scheduleLocalPreview()};
+    applyBackground.onclick=async()=>{if(!preview||!selectedBackground||!compositionReady)return;applyBackground.disabled=true;setBackgroundStatus('Saving and activating new version...');try{await api(`/api/v1/media/${mediaId}/background-compose`,{method:'POST',body:JSON.stringify({preview_id:preview.preview_id,background_id:selectedBackground,blur:Number(blur.value),preserve:Number(preserve.value)})});toast('Background version created and activated');saveViewState('editor',{backgroundOpen:true});await openMediaEditor(mediaId)}catch(error){setBackgroundStatus(error.message,'error');updateApply()}};
     document.querySelector('#resetOriginal').onclick=async()=>{if(!confirm('Reset this image to the original version? Saved versions will remain available.'))return;try{await api(`/api/v1/media/${mediaId}/reset-to-original`,{method:'POST'});toast('Original restored');await openMediaEditor(mediaId)}catch(error){toast(error.message,true)}};
-     if(preview){renderPreview();loadAssets('').catch(error=>setBackgroundStatus(error.message,'error'));}
-     requestAnimationFrame(()=>{const saved=viewState('editor');sourcePane.scrollLeft=Number(saved.backgroundScrollLeft||0);sourcePane.scrollTop=Number(saved.backgroundScrollTop||0);previewPane.scrollLeft=sourcePane.scrollLeft;previewPane.scrollTop=sourcePane.scrollTop;applyZoom()});
-     document.querySelectorAll('.restore-revision').forEach(node=>node.onclick=async()=>{if(!confirm('Restore this version?'))return;await api(`/api/v1/media/${mediaId}/revisions/${node.dataset.id}/activate`,{method:'POST'});toast('Version restored');await openMediaEditor(mediaId)}); icons();
+    updateSelectedSummary();
+    if(preview){await resolveSelectedBackground().catch(()=>{});prepareForeground().catch(error=>setBackgroundStatus(error.message,'error'));}
+    requestAnimationFrame(()=>{const saved=viewState('editor');sourcePane.scrollLeft=Number(saved.backgroundScrollLeft||0);sourcePane.scrollTop=Number(saved.backgroundScrollTop||0);previewPane.scrollLeft=sourcePane.scrollLeft;previewPane.scrollTop=sourcePane.scrollTop;applyZoom()});
+    document.querySelectorAll('.restore-revision').forEach(node=>node.onclick=async()=>{if(!confirm('Restore this version?'))return;await api(`/api/v1/media/${mediaId}/revisions/${node.dataset.id}/activate`,{method:'POST'});toast('Version restored');await openMediaEditor(mediaId)}); icons();
   };
   const openCrop = async id => {
     const item=await api(`/api/v1/crop-analyses/${id}`);

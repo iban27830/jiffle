@@ -208,6 +208,7 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
 .background-zoom-pane { width: 100%; height: min(48vh,440px); min-height: 260px; overflow: auto; border-radius: 6px; background: #1b1e20; }
 .background-zoom-pane img, .background-preview-placeholder { display: block; width: 100%; min-width: 100%; height: auto; min-height: 100%; object-fit: contain; background: #1b1e20; }
 .background-preview-placeholder { display: grid; place-items: center; color: #7c878c; }
+.background-preview-placeholder canvas { display: block; width: 100%; min-height: 100%; object-fit: contain; }
 .transparent-preview img, .transparent-preview .background-preview-placeholder { background-color: #e6eaec; background-image: linear-gradient(45deg,#f8f9f9 25%,transparent 25%),linear-gradient(-45deg,#f8f9f9 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#f8f9f9 75%),linear-gradient(-45deg,transparent 75%,#f8f9f9 75%); background-position: 0 0,0 8px,8px -8px,-8px 0; background-size: 16px 16px; }
 .background-preview-placeholder [data-lucide] { width: 32px; height: 32px; }
 .background-after-preview { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
@@ -215,6 +216,9 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
 .background-mask-controls label { display: flex; justify-content: space-between; color: var(--muted); font-size: .82em; font-weight: 650; }
 .background-mask-controls input[type="range"] { width: 100%; accent-color: var(--accent); }
 .background-mask-controls small { grid-column: 1/-1; color: var(--muted); font-size: .78em; }
+.background-selected-state { display: flex; align-items: center; gap: 10px; margin: 12px 0; min-height: 40px; }
+.background-selected-state > span { min-width: 0; overflow: hidden; color: var(--muted); font-size: .84em; text-overflow: ellipsis; white-space: nowrap; }
+.background-selected-state .btn { margin-left: auto; flex: 0 0 auto; }
 .background-library-toolbar { display: grid; grid-template-columns: minmax(150px,220px) minmax(160px,260px) auto; gap: 8px; align-items: end; }
 .background-library-toolbar label { color: var(--muted); font-size: .82em; }
 .background-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,150px),1fr)); gap:10px; margin:12px 0; }
@@ -236,7 +240,17 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
 .background-compose-controls #applyBackground { grid-column: 4; grid-row: 1/3; }
 .background-composition-figure { margin: 16px 0; }
 .background-composition-figure figcaption { margin-bottom: 7px; color: var(--muted); font-size: .82em; font-weight: 650; }
-.background-composition-figure img { display: block; width: 100%; max-height: min(48vh,440px); min-height: 220px; object-fit: contain; border-radius: 6px; background: #1b1e20; }
+.background-composition-figure canvas { display: block; width: 100%; max-height: min(48vh,440px); min-height: 220px; object-fit: contain; border-radius: 6px; background: #1b1e20; }
+.background-modal[hidden] { display: none; }
+.background-modal { position: fixed; z-index: 18; inset: 0; display: grid; place-items: center; padding: 18px; }
+.background-modal-backdrop { position: absolute; inset: 0; background: rgba(19,28,32,.46); }
+.background-modal-window { position: relative; z-index: 1; display: flex; flex-direction: column; width: min(900px,100%); max-height: min(760px,calc(100vh - 36px)); overflow: hidden; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); box-shadow: 0 14px 48px rgba(20,35,42,.28); }
+.background-modal-head { display: flex; align-items: center; gap: 10px; padding: 13px 15px; border-bottom: 1px solid var(--line); }
+.background-modal-head h3 { margin: 0; font-size: 17px; }
+.background-modal-head .icon-btn { margin-left: auto; }
+.background-modal-window .background-library-toolbar { flex: 0 0 auto; padding: 12px 15px; border-bottom: 1px solid var(--line); }
+.background-modal-window .background-grid { min-height: 120px; margin: 0; padding: 12px 15px; overflow: auto; align-content: start; }
+.background-modal-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 11px 15px; border-top: 1px solid var(--line); }
 .builder-card { min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
 .builder-card.limit-warning { border: 2px solid #e2a11b; }
 .builder-image { position: relative; background: #20262b; }
@@ -329,6 +343,8 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
   .background-scan-toolbar { grid-template-columns: repeat(2,minmax(0,1fr)); }
   .background-library-toolbar { grid-template-columns: repeat(2,minmax(0,1fr)); }
   .background-library-toolbar .btn { grid-column: 1/-1; justify-self: start; }
+  .background-modal { padding: 10px; }
+  .background-modal-window { max-height: calc(100vh - 20px); }
 }
 @media (max-width: 560px) {
   .topbar { padding: 0 10px; }
@@ -370,6 +386,10 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
   .background-preview-comparison img, .background-preview-placeholder { height: min(52vh,390px); min-height: 220px; }
   .background-scan-toolbar, .background-library-toolbar { grid-template-columns: 1fr; }
   .background-library-toolbar .btn { grid-column: auto; width: 100%; }
+  .background-modal-actions { display: grid; grid-template-columns: 1fr 1fr; }
+  .background-modal-actions .btn { width: 100%; }
+  .background-selected-state { align-items: stretch; flex-direction: column; }
+  .background-selected-state .btn { width: 100%; margin-left: 0; }
   .background-compose-controls { grid-template-columns: 1fr; }
   .background-save-note, .background-compose-controls .btn, .background-compose-controls #previewBackgroundComposition, .background-compose-controls #applyBackground { grid-column: 1; grid-row: auto; }
   .background-compose-controls .btn { width: 100%; }
