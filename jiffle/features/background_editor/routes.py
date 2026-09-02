@@ -1,4 +1,6 @@
+import base64
 import json
+from io import BytesIO
 import os
 from pathlib import Path
 import sqlite3
@@ -13,8 +15,9 @@ from jiffle.infrastructure.database.connection import get_database
 from .runtime import remove_background
 from .workflow import (
     BackgroundFailure, analyze_background_candidate, background_root,
-    compose_background, create_background_preview, detector_parameters,
-    detector_signature, preview_root,
+    compose_background, compose_background_preview, create_background_preview,
+    detector_parameters, detector_signature, preserve_value, preview_root,
+    _apply_preserve,
 )
 
 
@@ -235,6 +238,10 @@ def cancel_scan(job_id):
 def create_preview(media_id):
     configured = current_app.config.get("JIFFLE_BACKGROUND_REMOVER")
     settings = current_app.config["JIFFLE_SETTINGS"]
+    try:
+        preserve = preserve_value((request.get_json(silent=True) or {}).get("preserve", 0))
+    except BackgroundFailure as error:
+        return _background_error(error)
     remover = configured or (
         lambda image, model_root: remove_background(
             image, model_root, settings.huggingface_token
@@ -246,19 +253,77 @@ def create_preview(media_id):
         )
     except BackgroundFailure as error:
         return _background_error(error)
-    return jsonify(_serialize_preview(row)), 201
+    return jsonify(_serialize_preview(row, preserve)), 201
+
+
+@background_blueprint.get("/api/v1/media/<int:media_id>/background-preview")
+def get_preview(media_id):
+    connection = get_database()
+    media = connection.execute(
+        "SELECT active_revision_id FROM media_items WHERE id=? AND media_type='image' AND deleted_at IS NULL",
+        (media_id,),
+    ).fetchone()
+    if media is None:
+        return _error("background.media_not_found", "Media item was not found.", 404)
+    row = connection.execute(
+        "SELECT * FROM background_previews WHERE media_item_id=? AND source_revision_id=? ORDER BY created_at DESC LIMIT 1",
+        (media_id, media["active_revision_id"]),
+    ).fetchone()
+    if row is None:
+        return jsonify({"status": "none", "preview": None})
+    path = media_path(preview_root(current_app.config["JIFFLE_SETTINGS"]), row["file_path"])
+    if path is None or not path.is_file():
+        return jsonify({"status": "none", "preview": None})
+    try:
+        preserve = preserve_value(request.args.get("preserve", 0))
+    except BackgroundFailure as error:
+        return _background_error(error)
+    return jsonify(_serialize_preview(row, preserve))
 
 
 @background_blueprint.get("/api/v1/background-previews/<preview_id>/content")
 def preview_content(preview_id):
     row = get_database().execute(
         "SELECT file_path FROM background_previews "
-        "WHERE id=? AND expires_at>CURRENT_TIMESTAMP", (preview_id,)
+        "WHERE id=?", (preview_id,)
     ).fetchone()
     path = media_path(preview_root(current_app.config["JIFFLE_SETTINGS"]), row["file_path"]) if row else None
     if path is None or not path.is_file():
         return _error("background.preview_missing", "Background preview was not found.", 404)
-    return send_file(path, mimetype="image/png", conditional=True)
+    try:
+        preserve = preserve_value(request.args.get("preserve", 0))
+    except BackgroundFailure as error:
+        return _background_error(error)
+    if preserve == 0:
+        return send_file(path, mimetype="image/png", conditional=True)
+    try:
+        with Image.open(path) as opened:
+            rendered = _apply_preserve(opened, preserve)
+        output = BytesIO()
+        rendered.save(output, format="PNG")
+        output.seek(0)
+        return send_file(output, mimetype="image/png", conditional=False)
+    except (OSError, ValueError) as error:
+        return _background_error(BackgroundFailure("background.preview_missing", "Background preview was not found."))
+
+
+@background_blueprint.post("/api/v1/media/<int:media_id>/background-compose-preview")
+def compose_preview(media_id):
+    payload = request.get_json(silent=True)
+    payload = payload if isinstance(payload, dict) else {}
+    try:
+        preserve = preserve_value(payload.get("preserve", 0))
+        image = compose_background_preview(
+            get_database(), current_app.config["JIFFLE_SETTINGS"], media_id,
+            payload.get("preview_id"), payload.get("background_id"),
+            payload.get("blur", 0), preserve,
+        )
+    except BackgroundFailure as error:
+        return _background_error(error)
+    output = BytesIO()
+    image.save(output, format="PNG")
+    encoded = base64.b64encode(output.getvalue()).decode("ascii")
+    return jsonify({"status": "ready", "preview_id": uuid4().hex, "content_url": f"data:image/png;base64,{encoded}"})
 
 
 @background_blueprint.post("/api/v1/media/<int:media_id>/background-compose")
@@ -269,11 +334,12 @@ def compose(media_id):
         revision_id = compose_background(
             get_database(), current_app.config["JIFFLE_SETTINGS"], media_id,
             payload.get("preview_id"), payload.get("background_id"), payload.get("blur", 0),
+            payload.get("preserve", 0),
         )
     except BackgroundFailure as error:
         return _background_error(error)
     return jsonify({
-        "status": "completed", "revision_id": revision_id, "active": False,
+        "status": "completed", "revision_id": revision_id, "active": True,
         "content_url": f"/api/v1/media/{media_id}/revisions/{revision_id}/content",
     }), 201
 
@@ -436,12 +502,13 @@ def _serialize_candidate(row):
     }
 
 
-def _serialize_preview(row):
+def _serialize_preview(row, preserve=0):
     return {
         "status": "ready", "preview_id": row["id"],
         "source_revision_id": row["source_revision_id"], "width": row["width"],
         "height": row["height"], "subject_coverage": row["subject_coverage"],
-        "content_url": f"/api/v1/background-previews/{row['id']}/content",
+        "preserve": preserve,
+        "content_url": f"/api/v1/background-previews/{row['id']}/content?preserve={preserve}",
     }
 
 
@@ -468,6 +535,8 @@ def _background_error(error):
         "background.invalid_dimensions", "background.subject_not_isolated",
     }:
         status = 422
+    elif error.code in {"background.invalid_preserve", "background.invalid_request", "background.invalid_blur", "background.invalid_parameters"}:
+        status = 400
     else:
         status = 400
     return jsonify({

@@ -14,6 +14,9 @@ DETECTOR_VERSION = 1
 DEFAULT_TOLERANCE = 24
 DEFAULT_MIN_BACKGROUND_PERCENT = 25.0
 MODEL_NAME = "briaai/RMBG-2.0"
+MIN_PRESERVE = -100
+MAX_PRESERVE = 100
+DEFAULT_PRESERVE = 0
 
 
 class BackgroundFailure(Exception):
@@ -22,6 +25,36 @@ class BackgroundFailure(Exception):
         self.code = code
         self.message = message
         self.details = details or {}
+
+
+def preserve_value(value=DEFAULT_PRESERVE):
+    try:
+        value = int(value)
+    except (TypeError, ValueError) as error:
+        raise BackgroundFailure(
+            "background.invalid_preserve",
+            "Detail preservation must be between -100 and 100.",
+        ) from error
+    if not MIN_PRESERVE <= value <= MAX_PRESERVE:
+        raise BackgroundFailure(
+            "background.invalid_preserve",
+            "Detail preservation must be between -100 and 100.",
+        )
+    return value
+
+
+def _apply_preserve(image, preserve):
+    preserve = preserve_value(preserve)
+    if preserve == DEFAULT_PRESERVE:
+        return image.convert("RGBA")
+    gamma = 1.0 - (preserve * 0.006)
+    alpha = image.convert("RGBA").getchannel("A")
+    alpha = alpha.point(
+        lambda level: max(0, min(255, round(((level / 255.0) ** gamma) * 255.0)))
+    )
+    result = image.convert("RGBA")
+    result.putalpha(alpha)
+    return result
 
 
 def detector_parameters(tolerance=DEFAULT_TOLERANCE, min_background_percent=DEFAULT_MIN_BACKGROUND_PERCENT):
@@ -209,7 +242,6 @@ def _color_bucket(pixel):
 
 
 def create_background_preview(connection, settings, media_id, remover):
-    _cleanup_expired_previews(connection, settings)
     row = connection.execute(
         "SELECT m.active_revision_id,r.file_path FROM media_items m "
         "JOIN media_revisions r ON r.id=m.active_revision_id "
@@ -218,6 +250,15 @@ def create_background_preview(connection, settings, media_id, remover):
     ).fetchone()
     if row is None:
         raise BackgroundFailure("background.media_not_found", "Media item was not found.")
+    existing = connection.execute(
+        "SELECT * FROM background_previews WHERE media_item_id=? AND source_revision_id=? "
+        "ORDER BY created_at DESC LIMIT 1",
+        (media_id, row["active_revision_id"]),
+    ).fetchone()
+    if existing is not None:
+        preview_path = media_path(preview_root(settings), existing["file_path"])
+        if preview_path is not None and preview_path.is_file():
+            return existing
     source = media_path(settings.media_path, row["file_path"])
     if source is None or not source.is_file():
         raise BackgroundFailure("background.file_missing", "Media file is unavailable.")
@@ -287,10 +328,33 @@ def create_background_preview(connection, settings, media_id, remover):
     ).fetchone()
 
 
-def compose_background(connection, settings, media_id, preview_id, asset_id, blur):
+def compose_background(connection, settings, media_id, preview_id, asset_id, blur, preserve=DEFAULT_PRESERVE):
+    result = _compose_background_image(
+        connection, settings, media_id, preview_id, asset_id, blur, preserve
+    )
+    return _store_composed_revision(
+        connection, settings, media_id, result["preview"], result["asset"],
+        result["image"], result["blur"], result["preserve"]
+    )
+
+
+def compose_background_preview(connection, settings, media_id, preview_id, asset_id, blur, preserve):
+    result = _compose_background_image(
+        connection, settings, media_id, preview_id, asset_id, blur, preserve
+    )
+    return result["image"]
+
+
+def _compose_background_image(connection, settings, media_id, preview_id, asset_id, blur, preserve):
+    preserve = preserve_value(preserve)
+    try:
+        asset_id = int(asset_id)
+    except (TypeError, ValueError) as error:
+        raise BackgroundFailure(
+            "background.invalid_request", "Background and blur values are required."
+        ) from error
     try:
         blur = float(blur)
-        asset_id = int(asset_id)
     except (TypeError, ValueError) as error:
         raise BackgroundFailure(
             "background.invalid_request", "Background and blur values are required."
@@ -315,22 +379,16 @@ def compose_background(connection, settings, media_id, preview_id, asset_id, blu
             "background.preview_required",
             "Create a successful background-removal preview before applying a background.",
         )
-    if (
-        int(preview["source_revision_id"]) != int(media["active_revision_id"])
-        or connection.execute(
-            "SELECT expires_at<=CURRENT_TIMESTAMP FROM background_previews WHERE id=?",
-            (preview["id"],),
-        ).fetchone()[0]
-    ):
-        raise BackgroundFailure(
-            "background.preview_stale",
-            "The preview is stale because the active image version changed or the preview expired.",
-        )
     asset = connection.execute(
         "SELECT * FROM background_assets WHERE id=?", (asset_id,)
     ).fetchone()
     if asset is None:
         raise BackgroundFailure("background.not_found", "Background was not found.")
+    if int(preview["source_revision_id"]) != int(media["active_revision_id"]):
+        raise BackgroundFailure(
+            "background.preview_stale",
+            "The preview is stale because the active image version changed.",
+        )
     foreground_path = media_path(preview_root(settings), preview["file_path"])
     background_path = media_path(background_root(settings), asset["file_path"])
     if foreground_path is None or not foreground_path.is_file():
@@ -339,10 +397,9 @@ def compose_background(connection, settings, media_id, preview_id, asset_id, blu
         )
     if background_path is None or not background_path.is_file():
         raise BackgroundFailure("background.not_found", "Background was not found.")
-    target = None
     try:
         with Image.open(foreground_path) as foreground_opened, Image.open(background_path) as background_opened:
-            foreground = foreground_opened.convert("RGBA")
+            foreground = _apply_preserve(foreground_opened, preserve)
             background = ImageOps.fit(
                 ImageOps.exif_transpose(background_opened).convert("RGB"),
                 foreground.size,
@@ -351,19 +408,38 @@ def compose_background(connection, settings, media_id, preview_id, asset_id, blu
             if blur:
                 background = background.filter(ImageFilter.GaussianBlur(blur / 5.0))
             result = Image.alpha_composite(background, foreground)
-            directory = settings.media_path / "revisions"
-            directory.mkdir(parents=True, exist_ok=True)
-            target = directory / f"media-{media_id}-background-{uuid4().hex}.png"
-            temporary = target.with_suffix(".tmp")
-            result.save(temporary, format="PNG")
-            os.replace(temporary, target)
+            return {
+                "image": result,
+                "preview": preview,
+                "asset": asset,
+                "blur": blur,
+                "preserve": preserve,
+            }
+    except BackgroundFailure:
+        raise
+    except (OSError, ValueError) as error:
+        raise BackgroundFailure(
+            "background.compose_failed", "The background result could not be created."
+        ) from error
+
+
+def _store_composed_revision(connection, settings, media_id, preview, asset, result, blur, preserve):
+    target = None
+    try:
+        directory = settings.media_path / "revisions"
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / f"media-{media_id}-background-{uuid4().hex}.png"
+        temporary = target.with_suffix(".tmp")
+        result.save(temporary, format="PNG")
+        os.replace(temporary, target)
         digest = _hash_file(target)
         relative = target.relative_to(settings.media_path).as_posix()
         details = json.dumps(
             {
-                "background_id": asset_id,
+                "background_id": asset["id"],
                 "background_category": asset["category"],
                 "blur": blur,
+                "preserve": preserve,
                 "model": MODEL_NAME,
                 "preview_id": preview["id"],
                 "source_revision_id": preview["source_revision_id"],
@@ -386,6 +462,11 @@ def compose_background(connection, settings, media_id, preview_id, asset_id, blu
             ),
         )
         revision_id = int(cursor.lastrowid)
+        connection.execute(
+            "UPDATE media_items SET active_revision_id=?,file_path=?,width=?,height=?,file_size=?,content_hash=? WHERE id=?",
+            (revision_id, relative, result.width, result.height, target.stat().st_size, digest, media_id),
+        )
+        connection.execute("DELETE FROM media_fingerprints WHERE media_item_id=?", (media_id,))
         connection.execute(
             "INSERT INTO operation_history (event_type,entity_type,entity_id,details_json) "
             "VALUES ('background.created','media',?,?)",
@@ -422,19 +503,9 @@ def preview_root(settings):
 
 
 def _cleanup_expired_previews(connection, settings):
-    rows = connection.execute(
-        "SELECT file_path FROM background_previews WHERE expires_at<=CURRENT_TIMESTAMP"
-    ).fetchall()
-    root = preview_root(settings)
-    for row in rows:
-        path = media_path(root, row["file_path"])
-        if path is not None:
-            path.unlink(missing_ok=True)
-    if rows:
-        connection.execute(
-            "DELETE FROM background_previews WHERE expires_at<=CURRENT_TIMESTAMP"
-        )
-        connection.commit()
+    # Previews are tied to a source revision and intentionally retained so a
+    # user can change the background without running segmentation again.
+    return None
 
 
 def _hash_file(path):
