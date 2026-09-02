@@ -359,16 +359,19 @@ def compose(media_id):
     payload = request.get_json(silent=True)
     payload = payload if isinstance(payload, dict) else {}
     try:
+        preserve = preserve_value(payload.get("preserve", 0))
+        remove_halo = remove_halo_value(payload.get("remove_halo", 0))
         revision_id = compose_background(
             get_database(), current_app.config["JIFFLE_SETTINGS"], media_id,
             payload.get("preview_id"), payload.get("background_id"), payload.get("blur", 0),
-            payload.get("preserve", 0),
-            payload.get("remove_halo", 0),
+            preserve,
+            remove_halo,
         )
     except BackgroundFailure as error:
         return _background_error(error)
     return jsonify({
         "status": "completed", "revision_id": revision_id, "active": True,
+        "preserve": preserve, "remove_halo": remove_halo,
         "content_url": f"/api/v1/media/{media_id}/revisions/{revision_id}/content",
     }), 201
 
