@@ -15,6 +15,18 @@ _loaded_runtime = None
 HUGGINGFACE_WHOAMI_URL = "https://huggingface.co/api/whoami-v2"
 MODEL_CONFIG_URL = f"https://huggingface.co/{MODEL_NAME}/resolve/main/config.json"
 
+# RMBG-2.0's trusted remote model code imports kornia and timm in addition to
+# the base PyTorch and Transformers packages. Keep the import names separate
+# from pip requirement strings because they are not always identical.
+RUNTIME_DEPENDENCIES = (
+    ("torch", "torch"),
+    ("torchvision", "torchvision"),
+    ("transformers", "transformers>=4.39"),
+    ("safetensors", "safetensors"),
+    ("kornia", "kornia"),
+    ("timm", "timm"),
+)
+
 
 def remove_background(image, model_root, huggingface_token=None):
     model, torch, transforms, device = _load_runtime(model_root, huggingface_token)
@@ -169,9 +181,9 @@ def _model_cache_available(model_root):
 
 
 def _ensure_dependencies():
-    modules = ("torch", "torchvision", "transformers", "safetensors")
-    missing = [name for name in modules if importlib.util.find_spec(name) is None]
+    missing = _missing_dependencies()
     if not missing:
+        _verify_dependency_imports()
         return
     try:
         subprocess.run(
@@ -180,10 +192,7 @@ def _ensure_dependencies():
                 "-m",
                 "pip",
                 "install",
-                "torch",
-                "torchvision",
-                "transformers>=4.39",
-                "safetensors",
+                *missing,
             ],
             check=True,
             capture_output=True,
@@ -191,8 +200,43 @@ def _ensure_dependencies():
             timeout=3600,
         )
         importlib.invalidate_caches()
+        still_missing = _missing_dependencies()
+        if still_missing:
+            raise BackgroundFailure(
+                "background.runtime_install_failed",
+                "The RMBG-2.0 runtime is missing required packages: "
+                + ", ".join(still_missing)
+                + ".",
+                {"missing_packages": still_missing},
+            )
+        _verify_dependency_imports()
+    except BackgroundFailure:
+        raise
     except Exception as error:
         raise BackgroundFailure(
             "background.runtime_install_failed",
-            "The RMBG-2.0 runtime could not be installed automatically. Check network access and Python permissions.",
+            "The RMBG-2.0 runtime could not install its required packages "
+            + ", ".join(missing)
+            + ". Check network access and Python permissions.",
+            {"packages": missing},
         ) from error
+
+
+def _missing_dependencies():
+    return [
+        package
+        for module, package in RUNTIME_DEPENDENCIES
+        if importlib.util.find_spec(module) is None
+    ]
+
+
+def _verify_dependency_imports():
+    for module, _package in RUNTIME_DEPENDENCIES:
+        try:
+            importlib.import_module(module)
+        except Exception as error:
+            raise BackgroundFailure(
+                "background.runtime_install_failed",
+                f"The RMBG-2.0 runtime could not import required package '{module}'.",
+                {"module": module},
+            ) from error

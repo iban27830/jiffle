@@ -98,7 +98,7 @@ To replace a background:
 
 1. Open **Editor** and select **Find background candidates** to scan the whole library, or select an image in **Library** and choose **Replace background**. For one image, **Analyze selected** reports the estimated background area and color.
 2. Before the first preview, open **Settings → Background removal**. Create a Hugging Face account, open the [RMBG-2.0 model page](https://huggingface.co/briaai/RMBG-2.0), accept the model access terms, create a token with `Read` permission on the [Hugging Face token page](https://huggingface.co/settings/tokens), paste it into **Hugging Face token**, and save settings. Select **Test access** to verify both the token and access to the gated model before starting image processing. The token itself is never shown back by the settings API.
-3. In the image editor, open **Replace background** and select **Remove background / Preview**. The first request may take several minutes while Jiffle installs the local RMBG-2.0 runtime and downloads its model weights. Network access is required only for this setup; later requests use the cached model.
+3. In the image editor, open **Replace background** and select **Remove background / Preview**. The first request may take several minutes while Jiffle installs the local RMBG-2.0 runtime (including its PyTorch, `kornia`, and `timm` dependencies) and downloads the model weights. Network access is required only for this setup; later requests use the cached model.
 4. After a successful preview, choose a background category and select an image from the local background library. To add a new background, enter its category, choose a local image file, and select **Import background**.
 5. Adjust **Blur** and select **Apply background**. The blur control and apply action stay disabled until the foreground preview is ready and a background is selected.
 
@@ -109,7 +109,7 @@ If **Test access** reports an invalid token, create a new read token and replace
 ## Troubleshooting
 
 - If `python` is not recognized, install Python and enable **Add Python to PATH** during installation.
-- If startup reports a missing module, run the installation command again in the same Python environment used to start Jiffle.
+- If startup or background removal reports that a runtime package is missing, keep Jiffle connected to the network and retry the action in the same Python environment used to start it; the RMBG runtime installs its required packages automatically. If installation is blocked by permissions, install the package named in the error and restart Jiffle.
 - If the page does not open automatically, visit `http://127.0.0.1:5001/` manually.
 - If an online import fails, check the source credentials under **Settings** and confirm that the source URL is accessible in a browser.
 - If Vision crop analysis fails, verify that the configured model accepts images and returns JSON coordinates. Local crop scanning and manual crop controls remain available without a model.
