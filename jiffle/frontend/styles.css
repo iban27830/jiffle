@@ -205,6 +205,8 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
 .background-zoom-control { display: flex; align-items: center; gap: 10px; margin: 0 0 8px; color: var(--muted); font-size: .82em; }
 .background-zoom-control label { display: flex; gap: 7px; min-width: 82px; justify-content: space-between; }
 .background-zoom-control input { width: min(280px,45vw); }
+.background-preview-modes { display: flex; align-items: center; gap: 6px; margin: 0 0 10px; color: var(--muted); font-size: .82em; }
+.background-preview-modes .btn { min-height: 32px; padding: 5px 11px; }
 .background-zoom-pane { width: 100%; height: min(48vh,440px); min-height: 260px; overflow: auto; border-radius: 6px; background: #1b1e20; }
 .background-zoom-pane img, .background-preview-placeholder { display: block; width: 100%; min-width: 100%; height: auto; min-height: 100%; object-fit: contain; background: #1b1e20; }
 .background-preview-placeholder { display: grid; place-items: center; color: #7c878c; }

@@ -16,8 +16,8 @@ from .runtime import remove_background
 from .workflow import (
     BackgroundFailure, analyze_background_candidate, background_root,
     compose_background, compose_background_preview, create_background_preview,
-    detector_parameters, detector_signature, preserve_value, preview_root,
-    _apply_preserve,
+    detector_parameters, detector_signature, preserve_value, remove_halo_value,
+    preview_root, _apply_mask_adjustments, _hash_file,
 )
 
 
@@ -244,22 +244,37 @@ def create_preview(media_id):
         preserve = preserve_value(payload.get("preserve", 0))
     except BackgroundFailure as error:
         return _background_error(error)
+    force = payload.get("force", request.args.get("force", False))
+    if isinstance(force, str):
+        force = force.strip().lower() in {"1", "true", "yes", "on"}
+    previous_digest = None
+    if force:
+        previous = get_database().execute(
+            "SELECT file_path FROM background_previews "
+            "WHERE media_item_id=? AND source_revision_id=(SELECT active_revision_id FROM media_items WHERE id=?) "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (media_id, media_id),
+        ).fetchone()
+        if previous is not None:
+            previous_path = media_path(preview_root(settings), previous["file_path"])
+            if previous_path is not None and previous_path.is_file():
+                previous_digest = _hash_file(previous_path)
     remover = configured or (
         lambda image, model_root: remove_background(
             image, model_root, settings.huggingface_token
         )
     )
     try:
-        force = payload.get("force", request.args.get("force", False))
-        if isinstance(force, str):
-            force = force.strip().lower() in {"1", "true", "yes", "on"}
         row = create_background_preview(
             get_database(), settings, media_id, remover,
             force=bool(force),
         )
     except BackgroundFailure as error:
         return _background_error(error)
-    return jsonify(_serialize_preview(row, preserve)), 201
+    current_path = media_path(preview_root(settings), row["file_path"])
+    current_digest = _hash_file(current_path) if current_path is not None and current_path.is_file() else None
+    same_as_previous = bool(force and previous_digest and current_digest == previous_digest)
+    return jsonify(_serialize_preview(row, preserve, 0, same_as_previous)), 201
 
 
 @background_blueprint.get("/api/v1/media/<int:media_id>/background-preview")
@@ -282,9 +297,10 @@ def get_preview(media_id):
         return jsonify({"status": "none", "preview": None})
     try:
         preserve = preserve_value(request.args.get("preserve", 0))
+        remove_halo = remove_halo_value(request.args.get("remove_halo", 0))
     except BackgroundFailure as error:
         return _background_error(error)
-    return jsonify(_serialize_preview(row, preserve))
+    return jsonify(_serialize_preview(row, preserve, remove_halo, False))
 
 
 @background_blueprint.get("/api/v1/background-previews/<preview_id>/content")
@@ -298,13 +314,14 @@ def preview_content(preview_id):
         return _error("background.preview_missing", "Background preview was not found.", 404)
     try:
         preserve = preserve_value(request.args.get("preserve", 0))
+        remove_halo = remove_halo_value(request.args.get("remove_halo", 0))
     except BackgroundFailure as error:
         return _background_error(error)
-    if preserve == 0:
+    if preserve == 0 and remove_halo == 0:
         return send_file(path, mimetype="image/png", conditional=True)
     try:
         with Image.open(path) as opened:
-            rendered = _apply_preserve(opened, preserve)
+            rendered = _apply_mask_adjustments(opened, preserve, remove_halo)
         output = BytesIO()
         rendered.save(output, format="PNG")
         output.seek(0)
@@ -319,17 +336,22 @@ def compose_preview(media_id):
     payload = payload if isinstance(payload, dict) else {}
     try:
         preserve = preserve_value(payload.get("preserve", 0))
+        remove_halo = remove_halo_value(payload.get("remove_halo", 0))
         image = compose_background_preview(
             get_database(), current_app.config["JIFFLE_SETTINGS"], media_id,
             payload.get("preview_id"), payload.get("background_id"),
-            payload.get("blur", 0), preserve,
+            payload.get("blur", 0), preserve, remove_halo,
         )
     except BackgroundFailure as error:
         return _background_error(error)
     output = BytesIO()
     image.save(output, format="PNG")
     encoded = base64.b64encode(output.getvalue()).decode("ascii")
-    return jsonify({"status": "ready", "preview_id": uuid4().hex, "content_url": f"data:image/png;base64,{encoded}"})
+    return jsonify({
+        "status": "ready", "preview_id": uuid4().hex,
+        "preserve": preserve, "remove_halo": remove_halo,
+        "content_url": f"data:image/png;base64,{encoded}",
+    })
 
 
 @background_blueprint.post("/api/v1/media/<int:media_id>/background-compose")
@@ -341,6 +363,7 @@ def compose(media_id):
             get_database(), current_app.config["JIFFLE_SETTINGS"], media_id,
             payload.get("preview_id"), payload.get("background_id"), payload.get("blur", 0),
             payload.get("preserve", 0),
+            payload.get("remove_halo", 0),
         )
     except BackgroundFailure as error:
         return _background_error(error)
@@ -508,13 +531,18 @@ def _serialize_candidate(row):
     }
 
 
-def _serialize_preview(row, preserve=0):
+def _serialize_preview(row, preserve=0, remove_halo=0, same_as_previous=False):
     return {
         "status": "ready", "preview_id": row["id"],
         "source_revision_id": row["source_revision_id"], "width": row["width"],
         "height": row["height"], "subject_coverage": row["subject_coverage"],
         "preserve": preserve,
-        "content_url": f"/api/v1/background-previews/{row['id']}/content?preserve={preserve}",
+        "remove_halo": remove_halo,
+        "same_as_previous": bool(same_as_previous),
+        "content_url": (
+            f"/api/v1/background-previews/{row['id']}/content?"
+            f"preserve={preserve}&remove_halo={remove_halo}"
+        ),
     }
 
 
@@ -541,7 +569,10 @@ def _background_error(error):
         "background.invalid_dimensions", "background.subject_not_isolated",
     }:
         status = 422
-    elif error.code in {"background.invalid_preserve", "background.invalid_request", "background.invalid_blur", "background.invalid_parameters"}:
+    elif error.code in {
+        "background.invalid_preserve", "background.invalid_remove_halo",
+        "background.invalid_request", "background.invalid_blur", "background.invalid_parameters",
+    }:
         status = 400
     else:
         status = 400

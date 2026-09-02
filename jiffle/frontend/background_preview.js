@@ -4,7 +4,12 @@ export const MAX_PREVIEW_SIDE = 2048;
 
 export function preserveGamma(preserve = 0) {
   const value = Math.max(0, Math.min(100, Number(preserve) || 0));
-  return 1 - (value * 0.006);
+  return Number((1 - (value * 0.008)).toFixed(6));
+}
+
+export function removeHaloThreshold(removeHalo = 0) {
+  const value = Math.max(0, Math.min(100, Number(removeHalo) || 0));
+  return 0.35 * value / 100;
 }
 
 export function alphaChannelStats(data) {
@@ -22,11 +27,36 @@ export function alphaChannelStats(data) {
   };
 }
 
-export function transformAlphaChannel(data, preserve = 0) {
+export function transformAlphaChannel(data, preserve = 0, removeHalo = 0) {
   const gamma = preserveGamma(preserve);
+  const spill = Math.max(0, Math.min(100, Number(removeHalo) || 0));
+  const threshold = removeHaloThreshold(spill);
   for (let index = 3; index < data.length; index += 4) {
-    const level = data[index] / 255;
-    data[index] = Math.max(0, Math.min(255, Math.round((level ** gamma) * 255)));
+    const alpha = data[index];
+    if (alpha === 0 || alpha === 255) continue;
+    let level = alpha / 255;
+    if (Number(preserve) > 0) level = level ** gamma;
+    if (spill > 0) {
+      if (level <= threshold) {
+        data[index] = 0;
+        continue;
+      }
+      const span = Math.max(1e-12, 1 - threshold);
+      level = (level - threshold) / span;
+      level = level * level * (3 - 2 * level);
+    }
+    data[index] = Math.max(0, Math.min(255, Math.floor(level * 255 + 0.5)));
+  }
+  return data;
+}
+
+export function alphaMaskGrayscale(data) {
+  for (let index = 0; index < data.length; index += 4) {
+    const alpha = data[index + 3];
+    data[index] = alpha;
+    data[index + 1] = alpha;
+    data[index + 2] = alpha;
+    data[index + 3] = 255;
   }
   return data;
 }
@@ -74,7 +104,15 @@ export function prepareBlurParameters(blur = 0, scale = 1) {
   return { value, radius, cssFilter: radius > 0 ? `blur(${radius}px)` : 'none' };
 }
 
-export function drawForegroundPreview(context, image, preserve = 0, width = image?.naturalWidth, height = image?.naturalHeight) {
+export function drawForegroundPreview(
+  context,
+  image,
+  preserve = 0,
+  width = image?.naturalWidth,
+  height = image?.naturalHeight,
+  removeHalo = 0,
+  mode = 'cutout',
+) {
   if (!context || !image) return null;
   const dimensions = previewDimensions(width || image.naturalWidth, height || image.naturalHeight);
   context.canvas.width = dimensions.width;
@@ -84,7 +122,8 @@ export function drawForegroundPreview(context, image, preserve = 0, width = imag
   context.drawImage(image, 0, 0, dimensions.width, dimensions.height);
   const pixels = context.getImageData(0, 0, dimensions.width, dimensions.height);
   const alphaStats = alphaChannelStats(pixels.data);
-  transformAlphaChannel(pixels.data, preserve);
+  transformAlphaChannel(pixels.data, preserve, removeHalo);
+  if (mode === 'mask') alphaMaskGrayscale(pixels.data);
   context.putImageData(pixels, 0, 0);
   return {...dimensions, ...alphaStats};
 }

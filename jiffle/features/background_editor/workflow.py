@@ -1,6 +1,7 @@
 from collections import Counter, deque
 from hashlib import sha256
 import json
+import math
 import os
 from pathlib import Path
 from uuid import uuid4
@@ -17,6 +18,9 @@ MODEL_NAME = "briaai/RMBG-2.0"
 MIN_PRESERVE = 0
 MAX_PRESERVE = 100
 DEFAULT_PRESERVE = 0
+MIN_REMOVE_HALO = 0
+MAX_REMOVE_HALO = 100
+DEFAULT_REMOVE_HALO = 0
 
 
 class BackgroundFailure(Exception):
@@ -43,18 +47,61 @@ def preserve_value(value=DEFAULT_PRESERVE):
     return value
 
 
-def _apply_preserve(image, preserve):
+def remove_halo_value(value=DEFAULT_REMOVE_HALO):
+    try:
+        value = int(value)
+    except (TypeError, ValueError) as error:
+        raise BackgroundFailure(
+            "background.invalid_remove_halo",
+            "Background spill removal must be between 0 and 100.",
+        ) from error
+    if not MIN_REMOVE_HALO <= value <= MAX_REMOVE_HALO:
+        raise BackgroundFailure(
+            "background.invalid_remove_halo",
+            "Background spill removal must be between 0 and 100.",
+        )
+    return value
+
+
+def _round_half_up(value):
+    # JavaScript Math.round uses floor(value + 0.5), unlike Python's bankers rounding.
+    return int(math.floor(value + 0.5))
+
+
+def _apply_mask_adjustments(image, preserve=DEFAULT_PRESERVE, remove_halo=DEFAULT_REMOVE_HALO):
     preserve = preserve_value(preserve)
-    if preserve == DEFAULT_PRESERVE:
-        return image.convert("RGBA")
-    gamma = 1.0 - (preserve * 0.006)
-    alpha = image.convert("RGBA").getchannel("A")
-    alpha = alpha.point(
-        lambda level: max(0, min(255, round(((level / 255.0) ** gamma) * 255.0)))
-    )
+    remove_halo = remove_halo_value(remove_halo)
     result = image.convert("RGBA")
+    if preserve == DEFAULT_PRESERVE and remove_halo == DEFAULT_REMOVE_HALO:
+        return result
+
+    # Fixed precision keeps the Python and browser implementations byte-for-byte aligned.
+    gamma = round(1.0 - (0.8 * preserve / 100.0), 6)
+    threshold = 0.35 * remove_halo / 100.0
+    alpha = result.getchannel("A")
+
+    def adjust(level):
+        if level == 0 or level == 255:
+            return level
+        normalized = level / 255.0
+        if preserve:
+            normalized = normalized ** gamma
+        if remove_halo:
+            if normalized <= threshold:
+                return 0
+            span = max(1e-12, 1.0 - threshold)
+            normalized = (normalized - threshold) / span
+            normalized = normalized * normalized * (3.0 - 2.0 * normalized)
+        return max(0, min(255, _round_half_up(normalized * 255.0)))
+
+    alpha = alpha.point(adjust)
     result.putalpha(alpha)
     return result
+
+
+def _apply_preserve(image, preserve):
+    """Backward-compatible wrapper for callers that only expose Preserve."""
+    return _apply_mask_adjustments(image, preserve, DEFAULT_REMOVE_HALO)
 
 
 def detector_parameters(tolerance=DEFAULT_TOLERANCE, min_background_percent=DEFAULT_MIN_BACKGROUND_PERCENT):
@@ -339,25 +386,53 @@ def create_background_preview(connection, settings, media_id, remover, force=Fal
     ).fetchone()
 
 
-def compose_background(connection, settings, media_id, preview_id, asset_id, blur, preserve=DEFAULT_PRESERVE):
+def compose_background(
+    connection,
+    settings,
+    media_id,
+    preview_id,
+    asset_id,
+    blur,
+    preserve=DEFAULT_PRESERVE,
+    remove_halo=DEFAULT_REMOVE_HALO,
+):
     result = _compose_background_image(
-        connection, settings, media_id, preview_id, asset_id, blur, preserve
+        connection, settings, media_id, preview_id, asset_id, blur, preserve, remove_halo
     )
     return _store_composed_revision(
         connection, settings, media_id, result["preview"], result["asset"],
-        result["image"], result["blur"], result["preserve"]
+        result["image"], result["blur"], result["preserve"], result["remove_halo"]
     )
 
 
-def compose_background_preview(connection, settings, media_id, preview_id, asset_id, blur, preserve):
+def compose_background_preview(
+    connection,
+    settings,
+    media_id,
+    preview_id,
+    asset_id,
+    blur,
+    preserve,
+    remove_halo=DEFAULT_REMOVE_HALO,
+):
     result = _compose_background_image(
-        connection, settings, media_id, preview_id, asset_id, blur, preserve
+        connection, settings, media_id, preview_id, asset_id, blur, preserve, remove_halo
     )
     return result["image"]
 
 
-def _compose_background_image(connection, settings, media_id, preview_id, asset_id, blur, preserve):
+def _compose_background_image(
+    connection,
+    settings,
+    media_id,
+    preview_id,
+    asset_id,
+    blur,
+    preserve,
+    remove_halo=DEFAULT_REMOVE_HALO,
+):
     preserve = preserve_value(preserve)
+    remove_halo = remove_halo_value(remove_halo)
     try:
         asset_id = int(asset_id)
     except (TypeError, ValueError) as error:
@@ -410,7 +485,7 @@ def _compose_background_image(connection, settings, media_id, preview_id, asset_
         raise BackgroundFailure("background.not_found", "Background was not found.")
     try:
         with Image.open(foreground_path) as foreground_opened, Image.open(background_path) as background_opened:
-            foreground = _apply_preserve(foreground_opened, preserve)
+            foreground = _apply_mask_adjustments(foreground_opened, preserve, remove_halo)
             background = ImageOps.fit(
                 ImageOps.exif_transpose(background_opened).convert("RGB"),
                 foreground.size,
@@ -425,6 +500,7 @@ def _compose_background_image(connection, settings, media_id, preview_id, asset_
                 "asset": asset,
                 "blur": blur,
                 "preserve": preserve,
+                "remove_halo": remove_halo,
             }
     except BackgroundFailure:
         raise
@@ -434,7 +510,17 @@ def _compose_background_image(connection, settings, media_id, preview_id, asset_
         ) from error
 
 
-def _store_composed_revision(connection, settings, media_id, preview, asset, result, blur, preserve):
+def _store_composed_revision(
+    connection,
+    settings,
+    media_id,
+    preview,
+    asset,
+    result,
+    blur,
+    preserve,
+    remove_halo=DEFAULT_REMOVE_HALO,
+):
     target = None
     try:
         directory = settings.media_path / "revisions"
@@ -451,6 +537,7 @@ def _store_composed_revision(connection, settings, media_id, preview, asset, res
                 "background_category": asset["category"],
                 "blur": blur,
                 "preserve": preserve,
+                "remove_halo": remove_halo,
                 "model": MODEL_NAME,
                 "preview_id": preview["id"],
                 "source_revision_id": preview["source_revision_id"],
