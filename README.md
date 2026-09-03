@@ -65,6 +65,16 @@ http://127.0.0.1:5001/
 
 Keep the terminal window open while using the application. Press `Ctrl+C` in the terminal to stop Jiffle.
 
+### Update from GitHub
+
+1. Stop Jiffle by pressing `Ctrl+C` in its terminal window and wait for the process to exit.
+2. Double-click `update.bat` in the Jiffle folder.
+3. The updater creates a SQLite backup under `jiffle-data\migration-backups`, downloads the latest `master` branch from the configured GitHub remote, checks the updated Python files, and starts Jiffle again.
+
+The updater does not replace `jiffle-data`, media folders, thumbnails, or the local `settings.json`. When a newer version needs database changes, Jiffle applies the pending migrations automatically during startup. Keep the backup until you have confirmed that the updated version works.
+
+The update stops before changing files when Git or Python is unavailable, Jiffle is still listening on port 5001, or the working copy contains tracked changes. Commit or stash local source changes before retrying. If a migration or startup fails after an update, stop Jiffle, keep the backup folder, and restore the affected `jiffle-v2.db` backup before starting the previous version.
+
 ## Using Jiffle
 
 ### Import media
