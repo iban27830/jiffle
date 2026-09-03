@@ -99,6 +99,7 @@ For an e621 or e926 post set, Jiffle first checks the complete set (using the sa
 ### Browse and organize
 
 - Open **Library** to browse imported media and filter it by tags. When an online source provides an author, the author name appears on the media card and in the item details.
+- On wide screens, the library list scrolls independently while the selected item's details and actions remain visible in the right panel. The right panel has its own scroll when its contents are taller than the window.
 - Search for an exact library item with `id:123`. The media ID is shown in the item details and can be selected there to apply the same search.
 - In the item details, use the full-size button to open the current file by itself in a new browser tab. **Open in Editor** opens the current version beside the original and shows the complete version history. Select **Analyze current** when you want a new crop proposal.
 - Select an author in the item details to add an `author:name` filter without clearing the current search. The active author and selected media card remain highlighted while results update. Items with multiple authors show each author separately.
