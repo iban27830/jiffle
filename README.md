@@ -78,10 +78,13 @@ Supported online sources include:
 
 - Danbooru
 - e621 and e926 (post links such as `https://e621.net/posts/12345`, including query parameters)
+- e621 and e926 post sets such as `https://e621.net/post_sets/12345` or `https://e926.net/post_sets/12345.json`
 - Gelbooru
 - FurAffinity
 
 Some sources require account credentials configured under **Settings**. A direct image URL is also accepted; Jiffle downloads it, calculates its hash, and checks it for duplicates before placing it in the library or Review.
+
+For an e621 or e926 post set, Jiffle first checks the complete set (using the saved e621 username and API key when configured), then downloads the posts one at a time in the set's order. The set itself is not added as a local collection. A private set or a set that cannot be accessed fails before any files are downloaded. A set that contains an unavailable post can finish partially; the Import history entry lists that post and the reason.
 
 ### Browse and organize
 
@@ -108,6 +111,10 @@ Some sources require account credentials configured under **Settings**. A direct
 Open **Import** and drop an image, video, or browser link into the drop area, or paste a supported source URL. The attempt appears in Import history immediately with an **Importing** status while downloading and parsing continue. Its status changes when processing finishes. Repeated imports of the same file or link do not add another item to **Review** when an identical file is already waiting there. Items needing a decision appear in **Review**, where the total and counts by reason are shown. Accept an item to add it to the library, provide a source when requested, or reject it.
 
 By default, previously deleted media is held in **Review** before it can be added again. To block it without asking, open **Settings**, enable **Never re-import deleted media**, and save the settings.
+
+Set imports show their name, percentage, and processed count in the status bar. Select the stop button to finish the current download and stop before the next post. The final history entry is marked as completed, partial, or stopped and includes accepted, duplicate, Review, blocked, failed, and remaining counts. Expand **Issues** in a partial or failed entry to open each affected post and read its exact reason.
+
+Set access uses the `e621_login` and `e621_api_key` values saved under **Settings → Sources → e621 / e926**. Jiffle sends them with Basic Authentication while checking the set metadata and all post pages; they are not included in the Import history.
 
 ### Configure sources
 
