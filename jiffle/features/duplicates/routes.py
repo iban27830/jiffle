@@ -92,6 +92,7 @@ def _serialize(row):
     return {
         "id": row["id"], "method": row["match_method"],
         "confidence": row["confidence"], "status": row["status"],
+        "resolution": row["resolution"],
         "left": _media_summary(row, "left"),
         "right": _media_summary(row, "right"),
     }
