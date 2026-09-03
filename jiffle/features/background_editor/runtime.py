@@ -65,6 +65,11 @@ def remove_background(
             return result
         except BackgroundFailure as error:
             last_error = error
+        except Exception as error:
+            last_error = BackgroundFailure(
+                "background.inference_failed",
+                f"{candidate} could not remove the image background.",
+            )
     if last_error is not None:
         raise last_error
     raise BackgroundFailure(
