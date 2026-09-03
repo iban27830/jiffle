@@ -12,6 +12,10 @@ from .workflow import (
     BACKGROUND_MODEL_AUTO,
     BACKGROUND_MODEL_BIREFNET,
     BACKGROUND_MODEL_BIREFNET_HR,
+    BACKGROUND_DEVICE_AUTO,
+    BACKGROUND_DEVICE_CUDA,
+    BACKGROUND_DEVICE_CPU,
+    background_device_value,
     background_model_value,
     HR_MODEL_NAME,
     LEGACY_MODEL_NAME,
@@ -54,14 +58,24 @@ def remove_background(
     model_root,
     huggingface_token=None,
     model_name=MODEL_NAME,
+    background_device=BACKGROUND_DEVICE_AUTO,
 ):
     configured_mode = background_model_value(model_name)
-    candidates = _candidate_models(configured_mode, model_root, huggingface_token)
+    requested_device = background_device_value(background_device)
+    # Resolve this once per request. In particular, a forced CUDA request must
+    # fail before model fallback can accidentally move work to the CPU.
+    selected_device = resolve_background_device(requested_device)
+    candidates = _candidate_models(
+        configured_mode, model_root, huggingface_token, requested_device, selected_device
+    )
     last_error = None
     for candidate in candidates:
         try:
-            result = _infer_with_model(image, model_root, huggingface_token, candidate)
+            result = _infer_with_model(
+                image, model_root, huggingface_token, candidate, requested_device
+            )
             result.info["jiffle_model"] = candidate
+            result.info["jiffle_device"] = selected_device
             return result
         except BackgroundFailure as error:
             last_error = error
@@ -69,6 +83,7 @@ def remove_background(
             last_error = BackgroundFailure(
                 "background.inference_failed",
                 f"{candidate} could not remove the image background.",
+                {"model": candidate, "device": selected_device, "reason": type(error).__name__},
             )
     if last_error is not None:
         raise last_error
@@ -88,7 +103,49 @@ def _cuda_available():
         return False
 
 
-def preferred_model_name(model_name=BACKGROUND_MODEL_AUTO):
+def resolve_background_device(device_mode=BACKGROUND_DEVICE_AUTO, torch_module=None):
+    """Return the actual device, failing clearly for an unavailable forced GPU."""
+    mode = background_device_value(device_mode)
+    if torch_module is None:
+        # Keep this helper patchable for diagnostics and tests, and avoid
+        # importing the full runtime merely to answer a settings question.
+        available = _cuda_available()
+    else:
+        try:
+            available = bool(torch_module.cuda.is_available())
+        except Exception as error:
+            if mode == BACKGROUND_DEVICE_CUDA:
+                raise BackgroundFailure(
+                    "background.cuda_unavailable",
+                    "CUDA could not be initialized by the installed PyTorch runtime.",
+                    {"device": BACKGROUND_DEVICE_CUDA, "reason": type(error).__name__},
+                ) from error
+            available = False
+    if mode == BACKGROUND_DEVICE_CUDA and not available:
+        raise BackgroundFailure(
+            "background.cuda_unavailable",
+            "CUDA was requested, but no usable CUDA device is available. Install a CUDA-enabled PyTorch build or select CPU/Automatic.",
+            {"device": BACKGROUND_DEVICE_CUDA, "reason": "cuda_unavailable"},
+        )
+    if mode == BACKGROUND_DEVICE_CPU:
+        return BACKGROUND_DEVICE_CPU
+    return BACKGROUND_DEVICE_CUDA if available else BACKGROUND_DEVICE_CPU
+
+
+def preferred_device_name(device_mode=BACKGROUND_DEVICE_AUTO):
+    """Return the device represented by a setting for diagnostics and UI."""
+    mode = background_device_value(device_mode)
+    if mode == BACKGROUND_DEVICE_CUDA:
+        return BACKGROUND_DEVICE_CUDA
+    if mode == BACKGROUND_DEVICE_CPU:
+        return BACKGROUND_DEVICE_CPU
+    return resolve_background_device(mode)
+
+
+def preferred_model_name(
+    model_name=BACKGROUND_MODEL_AUTO,
+    background_device=BACKGROUND_DEVICE_AUTO,
+):
     """Resolve the model used for a newly generated preview.
 
     Automatic mode uses the HR checkpoint on CUDA and the standard checkpoint
@@ -96,13 +153,29 @@ def preferred_model_name(model_name=BACKGROUND_MODEL_AUTO):
     """
     mode = background_model_value(model_name)
     if mode == BACKGROUND_MODEL_AUTO:
+        device_mode = background_device_value(background_device)
+        if device_mode == BACKGROUND_DEVICE_CUDA:
+            return HR_MODEL_NAME
+        if device_mode == BACKGROUND_DEVICE_CPU:
+            return MODEL_NAME
         return HR_MODEL_NAME if _cuda_available() else MODEL_NAME
     return resolve_background_model(mode)
 
 
-def _candidate_models(configured_mode, model_root, huggingface_token):
+def _candidate_models(
+    configured_mode,
+    model_root,
+    huggingface_token,
+    background_device=BACKGROUND_DEVICE_AUTO,
+    selected_device=None,
+):
     if configured_mode == BACKGROUND_MODEL_AUTO:
-        primary = preferred_model_name(configured_mode)
+        if selected_device == BACKGROUND_DEVICE_CUDA:
+            primary = HR_MODEL_NAME
+        elif selected_device == BACKGROUND_DEVICE_CPU:
+            primary = MODEL_NAME
+        else:
+            primary = preferred_model_name(configured_mode, background_device)
         candidates = [primary]
         if primary != MODEL_NAME:
             candidates.append(MODEL_NAME)
@@ -116,9 +189,15 @@ def _candidate_models(configured_mode, model_root, huggingface_token):
     return [LEGACY_MODEL_NAME]
 
 
-def _infer_with_model(image, model_root, huggingface_token, model_name):
+def _infer_with_model(
+    image,
+    model_root,
+    huggingface_token,
+    model_name,
+    background_device=BACKGROUND_DEVICE_AUTO,
+):
     model, torch, transforms, device = _load_runtime(
-        model_root, huggingface_token, model_name
+        model_root, huggingface_token, model_name, background_device
     )
     try:
         preprocessing = transforms.Compose(
@@ -133,8 +212,12 @@ def _infer_with_model(image, model_root, huggingface_token, model_name):
             ]
         )
         tensor = preprocessing(image.convert("RGB")).unsqueeze(0).to(device)
-        if device == "cuda" and model_name == HR_MODEL_NAME:
-            tensor = tensor.half()
+        try:
+            model_dtype = next(model.parameters()).dtype
+        except (AttributeError, StopIteration, TypeError):
+            model_dtype = getattr(model, "dtype", None)
+        if model_dtype is not None and getattr(tensor, "dtype", None) != model_dtype:
+            tensor = tensor.to(dtype=model_dtype)
         with torch.no_grad():
             prediction = model(tensor)
         if hasattr(prediction, "logits"):
@@ -151,6 +234,7 @@ def _infer_with_model(image, model_root, huggingface_token, model_name):
         )
         result = image.convert("RGBA")
         result.putalpha(mask)
+        result.info["jiffle_device"] = device
         return result
     except BackgroundFailure:
         raise
@@ -158,6 +242,7 @@ def _infer_with_model(image, model_root, huggingface_token, model_name):
         raise BackgroundFailure(
             "background.inference_failed",
             f"{model_name} could not remove the image background.",
+            {"model": model_name, "device": device, "reason": type(error).__name__},
         ) from error
 
 
@@ -240,18 +325,25 @@ def clear_runtime_cache():
         _loaded_runtimes.clear()
 
 
-def _load_runtime(model_root, huggingface_token=None, model_name=LEGACY_MODEL_NAME):
+def _load_runtime(
+    model_root,
+    huggingface_token=None,
+    model_name=LEGACY_MODEL_NAME,
+    background_device=BACKGROUND_DEVICE_AUTO,
+):
     global _loaded_runtime
     model_name = resolve_background_model(model_name)
-    if model_name == LEGACY_MODEL_NAME and _loaded_runtime is not None:
-        return _loaded_runtime
-    if model_name in _loaded_runtimes:
-        return _loaded_runtimes[model_name]
+    requested_device = background_device_value(background_device)
+    if requested_device == BACKGROUND_DEVICE_CUDA:
+        # Fail before downloading a model if the user explicitly selected GPU.
+        resolve_background_device(requested_device)
     with _runtime_lock:
-        if model_name == LEGACY_MODEL_NAME and _loaded_runtime is not None:
-            return _loaded_runtime
-        if model_name in _loaded_runtimes:
-            return _loaded_runtimes[model_name]
+        cached_device = None
+        if requested_device == BACKGROUND_DEVICE_AUTO:
+            cached_device = preferred_device_name(requested_device)
+        cache_key = (model_name, cached_device or requested_device)
+        if cache_key in _loaded_runtimes:
+            return _loaded_runtimes[cache_key]
         cache_available = _model_cache_available(model_root, model_name)
         token_validated = False
         if not cache_available and model_name == LEGACY_MODEL_NAME:
@@ -272,7 +364,10 @@ def _load_runtime(model_root, huggingface_token=None, model_name=LEGACY_MODEL_NA
             ) from error
         try:
             model_root.mkdir(parents=True, exist_ok=True)
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+            device = resolve_background_device(requested_device, torch)
+            cache_key = (model_name, device)
+            if cache_key in _loaded_runtimes:
+                return _loaded_runtimes[cache_key]
             token = huggingface_token or False
             try:
                 model = AutoModelForImageSegmentation.from_pretrained(
@@ -292,12 +387,16 @@ def _load_runtime(model_root, huggingface_token=None, model_name=LEGACY_MODEL_NA
                     token=huggingface_token,
                 )
             model.to(device)
-            if device == "cuda" and model_name == HR_MODEL_NAME:
+            if device == "cpu":
+                # Some BiRefNet checkpoints are published in half precision,
+                # which CPU kernels cannot execute with float32 inputs.
+                model.float()
+            elif device == "cuda" and model_name == HR_MODEL_NAME:
                 model.half()
             model.eval()
             runtime = (model, torch, transforms, device)
-            _loaded_runtimes[model_name] = runtime
-            if model_name == LEGACY_MODEL_NAME:
+            _loaded_runtimes[cache_key] = runtime
+            if model_name == LEGACY_MODEL_NAME and device == "cpu":
                 _loaded_runtime = runtime
             return runtime
         except BackgroundFailure:
@@ -306,6 +405,7 @@ def _load_runtime(model_root, huggingface_token=None, model_name=LEGACY_MODEL_NA
             raise BackgroundFailure(
                 "background.model_download_failed",
                 f"{model_name} could not be downloaded or loaded. Check network access and available disk space.",
+                {"model": model_name, "device": locals().get("device", requested_device), "reason": type(error).__name__},
             ) from error
 
 

@@ -16,6 +16,23 @@ Open PowerShell in the Jiffle folder and install the required packages:
 python -m pip install flask requests pillow
 ```
 
+For NVIDIA GPU background removal, install the CUDA 12.8 PyTorch builds in the same Python environment:
+
+```powershell
+python -m pip install --upgrade --force-reinstall `
+  torch==2.11.0+cu128 `
+  torchvision==0.26.0+cu128 `
+  --extra-index-url https://download.pytorch.org/whl/cu128
+```
+
+Check the installation before selecting **GPU (CUDA)** in Settings:
+
+```powershell
+python -c "import torch; print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
+```
+
+The last line should print the NVIDIA device name. If it prints `CPU` or importing `torch` fails, choose **Automatic (recommended)** or **Processor (CPU)** until a CUDA-enabled build and compatible NVIDIA driver are installed.
+
 Install FFmpeg for export conversion, for example with Windows Package Manager:
 
 ```powershell
@@ -97,16 +114,16 @@ Background replacement is available for static images in **Library** and **Edito
 To replace a background:
 
 1. Open **Editor** and select **Find background candidates** to scan the whole library, or select an image in **Library** and choose **Replace background**. For one image, **Analyze selected** reports the estimated background area and color.
-2. In **Settings → Background removal**, leave **Removal model** set to **Automatic (recommended)**. On a GPU, Automatic uses public **BiRefNet-HR** at 2048×2048 for the best edges; on a CPU it uses the faster public **BiRefNet** at 1024×1024. You can choose **BiRefNet-HR** explicitly, use **BiRefNet** for speed, or select **RMBG-2.0 (compatibility)** for an existing RMBG installation. BiRefNet and BiRefNet-HR are public and do not require a token. RMBG-2.0 requires a Hugging Face `Read` token when its weights are not already cached; paste it into **Hugging Face token** and save settings. **Test access** checks the selected model, including public models without a token. The token itself is never shown back by the settings API.
-3. In the image editor, open **Replace background** and select **Remove background / Preview**. The first request may take several minutes while Jiffle installs the local segmentation runtime (PyTorch, torchvision, transformers, safetensors, einops, kornia, and timm) and downloads the selected model weights. The BiRefNet-HR download is approximately 444 MB. Network access is required for setup; later requests use the cached model. A completed foreground preview is kept for the active image version and model, so reopening the editor does not run the model again.
+2. In **Settings → Background removal**, choose **Processing device**: **Automatic (recommended)** uses CUDA when a compatible NVIDIA GPU is available and otherwise uses the processor; **GPU (CUDA)** requires CUDA and reports a clear error if it is unavailable; **Processor (CPU)** always stays on the CPU. The response for a completed preview shows the actual device used. Choose **Removal model** separately: Automatic uses public **BiRefNet-HR** at 2048×2048 on CUDA and the faster public **BiRefNet** at 1024×1024 on CPU. You can choose **BiRefNet-HR** explicitly, use **BiRefNet** for speed, or select **RMBG-2.0 (compatibility)** for an existing RMBG installation. BiRefNet and BiRefNet-HR are public and do not require a token. RMBG-2.0 requires a Hugging Face `Read` token when its weights are not already cached; paste it into **Hugging Face token** and save settings. **Test access** checks the selected model, including public models without a token. The token itself is never shown back by the settings API.
+3. In the image editor, open **Replace background** and select **Remove background / Preview**. The first request may take several minutes while Jiffle installs the local segmentation runtime (PyTorch, torchvision, transformers, safetensors, einops, kornia, and timm) and downloads the selected model weights. The BiRefNet-HR download is approximately 444 MB. Network access is required for setup; later requests use the cached model. A completed foreground preview is kept for the active image version, model, and device, so reopening the editor does not run the model again.
 4. Automatic mode first tries BiRefNet-HR when CUDA is available, then falls back to standard BiRefNet if loading or inference fails. If an RMBG-2.0 snapshot is cached or a valid token is configured, RMBG is the final fallback. The editor reports the model that actually produced the preview. A CPU Automatic run starts with standard BiRefNet so processing remains practical.
 5. Select **Choose background** to open the background library. Filter by category, or enter an import category and choose a local image file; imported backgrounds appear in the open modal and keep the selected category. Clicking a card only makes a temporary choice. Select **Select background** to confirm it, or use **Cancel**, **Escape**, or the backdrop to close the library without changing the current background.
 6. Adjust **Blur** if needed, check the composition preview, and press **Apply background**. Jiffle creates and activates a full-resolution PNG version; the previous version remains available under **Versions** and can be restored later. Use **Cutout**, **Mask**, and **Zoom** to inspect the generated mask before applying it.
 7. After the first run the action is named **Regenerate automatic mask**. It runs the selected model again. If the model produces the same mask, the editor reports that result; the existing preview can still be applied.
 
-Background files and foreground previews are stored in the application's data directory and are not uploaded anywhere. A foreground preview belongs to the source image version that produced it; after switching to another version, create a new preview for that version.
+Background files and foreground previews are stored in the application's data directory and are not uploaded anywhere. A foreground preview belongs to the source image version, model, and device that produced it; after switching to another version or device, create a new preview for that combination.
 
-If **Test access** reports an invalid token, create a new read token and replace the saved value. If it reports that access to RMBG-2.0 is denied, accept the model terms while logged in to Hugging Face. If it reports that Hugging Face is unavailable, check the network or proxy settings. Model setup requires enough disk space for PyTorch and the model cache. A GPU is optional; BiRefNet-HR is intended for GPU use and CPU processing is slower. If the preview reports that no usable subject was isolated, try another image or correct the source version before composing. If the editor reports that a preview is stale, restore the source version that produced it or run **Remove background / Preview** again.
+If **Test access** reports an invalid token, create a new read token and replace the saved value. If it reports that access to RMBG-2.0 is denied, accept the model terms while logged in to Hugging Face. If it reports that Hugging Face is unavailable, check the network or proxy settings. Model setup requires enough disk space for PyTorch and the model cache. A GPU is optional; BiRefNet-HR is intended for GPU use and CPU processing is slower. If you select **GPU (CUDA)** while CUDA is unavailable, Jiffle returns `background.cuda_unavailable`; install a CUDA-enabled PyTorch build or select **Automatic (recommended)** or **Processor (CPU)**. If the preview reports that no usable subject was isolated, try another image or correct the source version before composing. If the editor reports that a preview is stale, restore the source version that produced it or run **Remove background / Preview** again.
 
 ## Troubleshooting
 

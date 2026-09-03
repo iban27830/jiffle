@@ -5,7 +5,9 @@ import os
 from pathlib import Path
 
 from jiffle.features.background_editor.workflow import (
+    DEFAULT_BACKGROUND_DEVICE,
     DEFAULT_BACKGROUND_MODEL,
+    background_device_value,
     background_model_value,
 )
 
@@ -37,6 +39,7 @@ class Settings:
     crop_background_tolerance: int = 14
     crop_selected_analysis: str = "local"
     background_model: str = DEFAULT_BACKGROUND_MODEL
+    background_device: str = DEFAULT_BACKGROUND_DEVICE
     huggingface_token: str | None = None
     danbooru_login: str | None = None
     danbooru_api_key: str | None = None
@@ -102,7 +105,7 @@ class Settings:
                 "block_previously_deleted",
                 "crop_vision_url", "crop_vision_key", "crop_vision_model", "crop_vision_format",
                 "crop_min_area_percent", "crop_padding_percent", "crop_background_tolerance", "crop_selected_analysis",
-                "background_model",
+                "background_model", "background_device",
                 "huggingface_token",
                 "danbooru_login", "danbooru_api_key", "e621_login", "e621_api_key",
                 "gelbooru_user_id", "gelbooru_api_key", "furaffinity_cookie_a",
@@ -114,6 +117,10 @@ class Settings:
                 # versions while keeping the persisted setting canonical.
                 values["background_model"] = background_model_value(
                     values["background_model"]
+                )
+            if "background_device" in values:
+                values["background_device"] = background_device_value(
+                    values["background_device"]
                 )
             if "export_format_rules" in values:
                 rules = values["export_format_rules"]
@@ -153,6 +160,7 @@ def persist_settings(settings: Settings) -> None:
         "crop_background_tolerance": settings.crop_background_tolerance,
         "crop_selected_analysis": settings.crop_selected_analysis,
         "background_model": settings.background_model,
+        "background_device": settings.background_device,
         "huggingface_token": settings.huggingface_token,
         "danbooru_login": settings.danbooru_login,
         "danbooru_api_key": settings.danbooru_api_key,

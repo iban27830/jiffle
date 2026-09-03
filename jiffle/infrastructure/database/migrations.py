@@ -546,6 +546,12 @@ def migration_21(connection: sqlite3.Connection) -> None:
     )
 
 
+def migration_22(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "ALTER TABLE background_previews ADD COLUMN device TEXT NOT NULL DEFAULT 'cpu'"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -568,6 +574,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (19, migration_19),
     (20, migration_20),
     (21, migration_21),
+    (22, migration_22),
 )
 
 

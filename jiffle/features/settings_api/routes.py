@@ -8,11 +8,13 @@ import requests
 from jiffle.configuration.settings import Settings, persist_settings
 from jiffle.features.background_editor.runtime import (
     clear_runtime_cache,
+    preferred_device_name,
     preferred_model_name,
     validate_huggingface_token,
 )
 from jiffle.features.background_editor.workflow import (
     BackgroundFailure,
+    background_device_value,
     background_model_value,
 )
 from jiffle.features.imports.source_adapters.registry import build_source_providers
@@ -38,7 +40,7 @@ def update_settings():
         "max_video_export_size_bytes", "export_format_rules", "block_previously_deleted",
         "crop_vision_url", "crop_vision_key", "crop_vision_model", "crop_vision_format",
         "crop_min_area_percent", "crop_padding_percent", "crop_background_tolerance", "crop_selected_analysis",
-        "background_model",
+        "background_model", "background_device",
         "huggingface_token",
         "danbooru_login", "danbooru_api_key", "e621_login", "e621_api_key",
         "gelbooru_user_id", "gelbooru_api_key", "furaffinity_cookie_a",
@@ -55,7 +57,10 @@ def update_settings():
     except OSError:
         return _error("settings.write_failed", "Settings could not be saved.", 500)
     current_app.config["JIFFLE_SETTINGS"] = updated
-    if updated.background_model != current.background_model:
+    if (
+        updated.background_model != current.background_model
+        or updated.background_device != current.background_device
+    ):
         clear_runtime_cache()
     if not current_app.config["JIFFLE_CUSTOM_SOURCE_PROVIDERS"]:
         current_app.config["JIFFLE_SOURCE_PROVIDERS"] = build_source_providers(updated)
@@ -80,7 +85,10 @@ def test_huggingface_access():
                 settings, {"huggingface_token": payload["token"]}
             ).huggingface_token
         account = validate_huggingface_token(
-            token, preferred_model_name(settings.background_model)
+            token,
+            preferred_model_name(
+                settings.background_model, settings.background_device
+            ),
         )
     except (TypeError, ValueError) as error:
         return _error("settings.invalid_value", str(error), 400)
@@ -94,7 +102,10 @@ def test_huggingface_access():
         return _error(error.code, error.message, statuses.get(error.code, 503))
     return jsonify({
         "status": "ok",
-        "model": preferred_model_name(settings.background_model),
+        "model": preferred_model_name(
+            settings.background_model, settings.background_device
+        ),
+        "device": preferred_device_name(settings.background_device),
         "account": account,
     })
 
@@ -270,6 +281,8 @@ def _validated_update(settings, payload):
         raise ValueError("crop_selected_analysis must be local or vision.")
     if "background_model" in values:
         values["background_model"] = background_model_value(values["background_model"])
+    if "background_device" in values:
+        values["background_device"] = background_device_value(values["background_device"])
     if "crop_min_area_percent" in values:
         value=values["crop_min_area_percent"]
         if not isinstance(value,(int,float)) or isinstance(value,bool) or not 1<=value<=50:raise ValueError("crop_min_area_percent must be from 1 to 50.")
@@ -320,7 +333,11 @@ def _public_settings(settings):
         "crop_background_tolerance": settings.crop_background_tolerance,
         "crop_selected_analysis": settings.crop_selected_analysis,
         "background_model": settings.background_model,
-        "background_model_name": preferred_model_name(settings.background_model),
+        "background_model_name": preferred_model_name(
+            settings.background_model, settings.background_device
+        ),
+        "background_device": settings.background_device,
+        "background_device_name": preferred_device_name(settings.background_device),
         "huggingface_token_configured": bool(settings.huggingface_token),
         "danbooru_login": settings.danbooru_login,
         "danbooru_api_key_configured": bool(settings.danbooru_api_key),

@@ -12,7 +12,12 @@ from PIL import Image, ImageOps
 
 from jiffle.features.crop_editor.workflow import media_path
 from jiffle.infrastructure.database.connection import get_database
-from .runtime import preferred_model_name, remove_background
+from .runtime import (
+    preferred_device_name,
+    preferred_model_name,
+    remove_background,
+    resolve_background_device,
+)
 from .workflow import (
     BackgroundFailure, analyze_background_candidate, background_root,
     compose_background, compose_background_preview, create_background_preview,
@@ -259,16 +264,24 @@ def create_preview(media_id):
             previous_path = media_path(preview_root(settings), previous["file_path"])
             if previous_path is not None and previous_path.is_file():
                 previous_digest = _hash_file(previous_path)
+    try:
+        actual_device = resolve_background_device(settings.background_device)
+    except BackgroundFailure as error:
+        return _background_error(error)
     remover = configured or (
         lambda image, model_root: remove_background(
             image, model_root, settings.huggingface_token,
             settings.background_model,
+            settings.background_device,
         )
     )
     try:
         row = create_background_preview(
             get_database(), settings, media_id, remover,
-            model_name=preferred_model_name(settings.background_model),
+            model_name=preferred_model_name(
+                settings.background_model, settings.background_device
+            ),
+            device_name=actual_device,
             force=bool(force),
         )
     except BackgroundFailure as error:
@@ -288,13 +301,15 @@ def get_preview(media_id):
     ).fetchone()
     if media is None:
         return _error("background.media_not_found", "Media item was not found.", 404)
+    settings = current_app.config["JIFFLE_SETTINGS"]
     expected_model = preferred_model_name(
-        current_app.config["JIFFLE_SETTINGS"].background_model
+        settings.background_model, settings.background_device
     )
+    expected_device = preferred_device_name(settings.background_device)
     row = connection.execute(
-        "SELECT * FROM background_previews WHERE media_item_id=? AND source_revision_id=? AND model=? "
+        "SELECT * FROM background_previews WHERE media_item_id=? AND source_revision_id=? AND model=? AND device=? "
         "ORDER BY created_at DESC, rowid DESC LIMIT 1",
-        (media_id, media["active_revision_id"], expected_model),
+        (media_id, media["active_revision_id"], expected_model, expected_device),
     ).fetchone()
     if row is None:
         return jsonify({"status": "none", "preview": None})
@@ -546,6 +561,7 @@ def _serialize_preview(row, preserve=0, remove_halo=0, same_as_previous=False):
         "source_revision_id": row["source_revision_id"], "width": row["width"],
         "height": row["height"], "subject_coverage": row["subject_coverage"],
         "model": row["model"],
+        "device": row["device"],
         "preserve": preserve,
         "remove_halo": remove_halo,
         "same_as_previous": bool(same_as_previous),
@@ -567,6 +583,7 @@ def _background_error(error):
     elif error.code in {
         "background.runtime_install_failed", "background.model_download_failed",
         "background.inference_failed", "background.huggingface_unavailable",
+        "background.cuda_unavailable",
     }:
         status = 503
     elif error.code == "background.huggingface_token_invalid":

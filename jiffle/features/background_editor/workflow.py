@@ -31,6 +31,15 @@ BACKGROUND_MODEL_CHOICES = (
     BACKGROUND_MODEL_BIREFNET,
     BACKGROUND_MODEL_RMBG,
 )
+BACKGROUND_DEVICE_AUTO = "auto"
+BACKGROUND_DEVICE_CUDA = "cuda"
+BACKGROUND_DEVICE_CPU = "cpu"
+DEFAULT_BACKGROUND_DEVICE = BACKGROUND_DEVICE_AUTO
+BACKGROUND_DEVICE_CHOICES = (
+    BACKGROUND_DEVICE_AUTO,
+    BACKGROUND_DEVICE_CUDA,
+    BACKGROUND_DEVICE_CPU,
+)
 MIN_PRESERVE = 0
 MAX_PRESERVE = 100
 DEFAULT_PRESERVE = 0
@@ -66,6 +75,24 @@ def background_model_value(value=DEFAULT_BACKGROUND_MODEL):
         raise ValueError(
             "background_model must be auto, birefnet_hr, birefnet, or rmbg."
         )
+    return value
+
+
+def background_device_value(value=DEFAULT_BACKGROUND_DEVICE):
+    """Normalize the device mode stored in Settings."""
+    value = str(value or DEFAULT_BACKGROUND_DEVICE).strip().lower()
+    aliases = {
+        "automatic": BACKGROUND_DEVICE_AUTO,
+        "default": BACKGROUND_DEVICE_AUTO,
+        "gpu": BACKGROUND_DEVICE_CUDA,
+        "nvidia": BACKGROUND_DEVICE_CUDA,
+        "videocard": BACKGROUND_DEVICE_CUDA,
+        "video_card": BACKGROUND_DEVICE_CUDA,
+        "processor": BACKGROUND_DEVICE_CPU,
+    }
+    value = aliases.get(value, value)
+    if value not in BACKGROUND_DEVICE_CHOICES:
+        raise ValueError("background_device must be auto, cuda, or cpu.")
     return value
 
 
@@ -344,6 +371,7 @@ def create_background_preview(
     remover,
     force=False,
     model_name=MODEL_NAME,
+    device_name="cpu",
 ):
     model_name = resolve_background_model(model_name)
     if isinstance(force, str):
@@ -366,6 +394,7 @@ def create_background_preview(
             preview_path = media_path(preview_root(settings), existing["file_path"])
             if (
                 existing["model"] == model_name
+                and existing["device"] == device_name
                 and preview_path is not None
                 and preview_path.is_file()
             ):
@@ -388,10 +417,17 @@ def create_background_preview(
                 raise BackgroundFailure(
                     "background.inference_failed",
                     "The background model could not process the image.",
+                    {
+                        "model": model_name,
+                        "device": device_name,
+                        "reason": type(error).__name__,
+                    },
                 ) from error
             if not isinstance(isolated, Image.Image):
                 raise BackgroundFailure(
-                    "background.inference_failed", "The background model returned no image."
+                    "background.inference_failed",
+                    "The background model returned no image.",
+                    {"model": model_name, "device": device_name, "reason": "no_image"},
                 )
             actual_model_name = isolated.info.get("jiffle_model", model_name)
             isolated = isolated.convert("RGBA")
@@ -423,8 +459,8 @@ def create_background_preview(
         os.replace(temporary, target)
         connection.execute(
             "INSERT INTO background_previews "
-            "(id,media_item_id,source_revision_id,file_path,width,height,subject_coverage,model) "
-            "VALUES (?,?,?,?,?,?,?,?)",
+            "(id,media_item_id,source_revision_id,file_path,width,height,subject_coverage,model,device) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
             (
                 preview_id,
                 media_id,
@@ -434,6 +470,7 @@ def create_background_preview(
                 isolated.height,
                 round(100.0 * coverage, 2),
                 actual_model_name,
+                isolated.info.get("jiffle_device", device_name),
             ),
         )
         connection.commit()
