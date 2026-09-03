@@ -8,12 +8,12 @@ import requests
 from jiffle.configuration.settings import Settings, persist_settings
 from jiffle.features.background_editor.runtime import (
     clear_runtime_cache,
+    preferred_model_name,
     validate_huggingface_token,
 )
 from jiffle.features.background_editor.workflow import (
     BackgroundFailure,
     background_model_value,
-    resolve_background_model,
 )
 from jiffle.features.imports.source_adapters.registry import build_source_providers
 from jiffle.infrastructure.database.connection import get_database
@@ -80,7 +80,7 @@ def test_huggingface_access():
                 settings, {"huggingface_token": payload["token"]}
             ).huggingface_token
         account = validate_huggingface_token(
-            token, resolve_background_model(settings.background_model)
+            token, preferred_model_name(settings.background_model)
         )
     except (TypeError, ValueError) as error:
         return _error("settings.invalid_value", str(error), 400)
@@ -94,7 +94,7 @@ def test_huggingface_access():
         return _error(error.code, error.message, statuses.get(error.code, 503))
     return jsonify({
         "status": "ok",
-        "model": resolve_background_model(settings.background_model),
+        "model": preferred_model_name(settings.background_model),
         "account": account,
     })
 
@@ -320,7 +320,7 @@ def _public_settings(settings):
         "crop_background_tolerance": settings.crop_background_tolerance,
         "crop_selected_analysis": settings.crop_selected_analysis,
         "background_model": settings.background_model,
-        "background_model_name": resolve_background_model(settings.background_model),
+        "background_model_name": preferred_model_name(settings.background_model),
         "huggingface_token_configured": bool(settings.huggingface_token),
         "danbooru_login": settings.danbooru_login,
         "danbooru_api_key_configured": bool(settings.danbooru_api_key),

@@ -14,17 +14,20 @@ from jiffle.features.crop_editor.workflow import media_path
 DETECTOR_VERSION = 1
 DEFAULT_TOLERANCE = 24
 DEFAULT_MIN_BACKGROUND_PERCENT = 25.0
-# BiRefNet is a higher-resolution dichotomous segmentation model and is the
-# default for the automatic background-removal path. RMBG remains available
-# as a compatibility fallback for installations that already have it cached.
+# BiRefNet is the standard dichotomous segmentation model. Its HR variant is
+# selected automatically on CUDA devices, while the standard model keeps CPU
+# processing practical. RMBG remains available for compatibility.
 MODEL_NAME = "ZhengPeng7/BiRefNet"
+HR_MODEL_NAME = "ZhengPeng7/BiRefNet_HR"
 LEGACY_MODEL_NAME = "briaai/RMBG-2.0"
 BACKGROUND_MODEL_AUTO = "auto"
+BACKGROUND_MODEL_BIREFNET_HR = "birefnet_hr"
 BACKGROUND_MODEL_BIREFNET = "birefnet"
 BACKGROUND_MODEL_RMBG = "rmbg"
 DEFAULT_BACKGROUND_MODEL = BACKGROUND_MODEL_AUTO
 BACKGROUND_MODEL_CHOICES = (
     BACKGROUND_MODEL_AUTO,
+    BACKGROUND_MODEL_BIREFNET_HR,
     BACKGROUND_MODEL_BIREFNET,
     BACKGROUND_MODEL_RMBG,
 )
@@ -47,20 +50,31 @@ class BackgroundFailure(Exception):
 def background_model_value(value=DEFAULT_BACKGROUND_MODEL):
     """Normalize the user-facing model mode stored in Settings."""
     value = str(value or DEFAULT_BACKGROUND_MODEL).strip().lower()
+    aliases = {
+        MODEL_NAME.lower(): BACKGROUND_MODEL_BIREFNET,
+        HR_MODEL_NAME.lower(): BACKGROUND_MODEL_BIREFNET_HR,
+        LEGACY_MODEL_NAME.lower(): BACKGROUND_MODEL_RMBG,
+        "birefnet-hr": BACKGROUND_MODEL_BIREFNET_HR,
+        "birefnet hr": BACKGROUND_MODEL_BIREFNET_HR,
+        "birefnet": BACKGROUND_MODEL_BIREFNET,
+        "rmbg-2.0": BACKGROUND_MODEL_RMBG,
+        "automatic": BACKGROUND_MODEL_AUTO,
+        "default": BACKGROUND_MODEL_AUTO,
+    }
+    value = aliases.get(value, value)
     if value not in BACKGROUND_MODEL_CHOICES:
         raise ValueError(
-            "background_model must be auto, birefnet, or rmbg."
+            "background_model must be auto, birefnet_hr, birefnet, or rmbg."
         )
     return value
 
 
 def resolve_background_model(value=DEFAULT_BACKGROUND_MODEL):
     """Return the Hugging Face model id for a configured mode."""
-    if isinstance(value, str) and value in {MODEL_NAME, LEGACY_MODEL_NAME}:
-        return value
     mode = background_model_value(value)
     return {
         BACKGROUND_MODEL_AUTO: MODEL_NAME,
+        BACKGROUND_MODEL_BIREFNET_HR: HR_MODEL_NAME,
         BACKGROUND_MODEL_BIREFNET: MODEL_NAME,
         BACKGROUND_MODEL_RMBG: LEGACY_MODEL_NAME,
     }[mode]
@@ -331,6 +345,7 @@ def create_background_preview(
     force=False,
     model_name=MODEL_NAME,
 ):
+    model_name = resolve_background_model(model_name)
     if isinstance(force, str):
         force = force.strip().lower() in {"1", "true", "yes", "on"}
     row = connection.execute(

@@ -12,12 +12,12 @@ from PIL import Image, ImageOps
 
 from jiffle.features.crop_editor.workflow import media_path
 from jiffle.infrastructure.database.connection import get_database
-from .runtime import remove_background
+from .runtime import preferred_model_name, remove_background
 from .workflow import (
     BackgroundFailure, analyze_background_candidate, background_root,
     compose_background, compose_background_preview, create_background_preview,
     detector_parameters, detector_signature, preserve_value, remove_halo_value,
-    preview_root, resolve_background_model, _apply_mask_adjustments, _hash_file,
+    preview_root, _apply_mask_adjustments, _hash_file,
 )
 
 
@@ -268,7 +268,7 @@ def create_preview(media_id):
     try:
         row = create_background_preview(
             get_database(), settings, media_id, remover,
-            model_name=resolve_background_model(settings.background_model),
+            model_name=preferred_model_name(settings.background_model),
             force=bool(force),
         )
     except BackgroundFailure as error:
@@ -288,9 +288,13 @@ def get_preview(media_id):
     ).fetchone()
     if media is None:
         return _error("background.media_not_found", "Media item was not found.", 404)
+    expected_model = preferred_model_name(
+        current_app.config["JIFFLE_SETTINGS"].background_model
+    )
     row = connection.execute(
-        "SELECT * FROM background_previews WHERE media_item_id=? AND source_revision_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1",
-        (media_id, media["active_revision_id"]),
+        "SELECT * FROM background_previews WHERE media_item_id=? AND source_revision_id=? AND model=? "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        (media_id, media["active_revision_id"], expected_model),
     ).fetchone()
     if row is None:
         return jsonify({"status": "none", "preview": None})

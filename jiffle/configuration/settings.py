@@ -4,7 +4,10 @@ import json
 import os
 from pathlib import Path
 
-from jiffle.features.background_editor.workflow import DEFAULT_BACKGROUND_MODEL
+from jiffle.features.background_editor.workflow import (
+    DEFAULT_BACKGROUND_MODEL,
+    background_model_value,
+)
 
 
 DEFAULT_EXPORT_FORMAT_RULES = (("gif", "mp4"), ("webm", "mp4"))
@@ -106,6 +109,12 @@ class Settings:
                 "furaffinity_cookie_b",
             }
             values = {key: value for key, value in payload.items() if key in allowed}
+            if "background_model" in values:
+                # Accept model ids and older aliases written by previous
+                # versions while keeping the persisted setting canonical.
+                values["background_model"] = background_model_value(
+                    values["background_model"]
+                )
             if "export_format_rules" in values:
                 rules = values["export_format_rules"]
                 if isinstance(rules, dict):

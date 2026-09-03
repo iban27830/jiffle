@@ -10,7 +10,10 @@ import requests
 from .workflow import (
     BackgroundFailure,
     BACKGROUND_MODEL_AUTO,
+    BACKGROUND_MODEL_BIREFNET,
+    BACKGROUND_MODEL_BIREFNET_HR,
     background_model_value,
+    HR_MODEL_NAME,
     LEGACY_MODEL_NAME,
     MODEL_NAME,
     resolve_background_model,
@@ -30,17 +33,20 @@ def _model_config_url(model_name):
 # Kept for integrations that imported the old constant directly.
 MODEL_CONFIG_URL = _model_config_url(LEGACY_MODEL_NAME)
 
-# RMBG-2.0's trusted remote model code imports kornia and timm in addition to
-# the base PyTorch and Transformers packages. Keep the import names separate
-# from pip requirement strings because they are not always identical.
+# BiRefNet's remote model code imports einops. RMBG-2.0 also imports kornia and
+# timm. Keep import names separate from pip requirement strings because they
+# are not always identical.
 RUNTIME_DEPENDENCIES = (
     ("torch", "torch"),
     ("torchvision", "torchvision"),
     ("transformers", "transformers>=4.39"),
     ("safetensors", "safetensors"),
+    ("einops", "einops"),
     ("kornia", "kornia"),
     ("timm", "timm"),
 )
+
+PUBLIC_MODEL_NAMES = {MODEL_NAME, HR_MODEL_NAME}
 
 
 def remove_background(
@@ -50,11 +56,7 @@ def remove_background(
     model_name=MODEL_NAME,
 ):
     configured_mode = background_model_value(model_name)
-    candidates = [resolve_background_model(configured_mode)]
-    if configured_mode == BACKGROUND_MODEL_AUTO and (
-        huggingface_token or _model_cache_available(model_root, LEGACY_MODEL_NAME)
-    ):
-        candidates.append(LEGACY_MODEL_NAME)
+    candidates = _candidate_models(configured_mode, model_root, huggingface_token)
     last_error = None
     for candidate in candidates:
         try:
@@ -71,6 +73,44 @@ def remove_background(
     )
 
 
+def _cuda_available():
+    """Return CUDA availability without installing or loading the runtime."""
+    try:
+        import torch
+
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
+def preferred_model_name(model_name=BACKGROUND_MODEL_AUTO):
+    """Resolve the model used for a newly generated preview.
+
+    Automatic mode uses the HR checkpoint on CUDA and the standard checkpoint
+    on CPU. Explicit modes always resolve to the requested checkpoint.
+    """
+    mode = background_model_value(model_name)
+    if mode == BACKGROUND_MODEL_AUTO:
+        return HR_MODEL_NAME if _cuda_available() else MODEL_NAME
+    return resolve_background_model(mode)
+
+
+def _candidate_models(configured_mode, model_root, huggingface_token):
+    if configured_mode == BACKGROUND_MODEL_AUTO:
+        primary = preferred_model_name(configured_mode)
+        candidates = [primary]
+        if primary != MODEL_NAME:
+            candidates.append(MODEL_NAME)
+        if huggingface_token or _model_cache_available(model_root, LEGACY_MODEL_NAME):
+            candidates.append(LEGACY_MODEL_NAME)
+        return candidates
+    if configured_mode == BACKGROUND_MODEL_BIREFNET_HR:
+        return [HR_MODEL_NAME]
+    if configured_mode == BACKGROUND_MODEL_BIREFNET:
+        return [MODEL_NAME]
+    return [LEGACY_MODEL_NAME]
+
+
 def _infer_with_model(image, model_root, huggingface_token, model_name):
     model, torch, transforms, device = _load_runtime(
         model_root, huggingface_token, model_name
@@ -78,7 +118,9 @@ def _infer_with_model(image, model_root, huggingface_token, model_name):
     try:
         preprocessing = transforms.Compose(
             [
-                transforms.Resize((1024, 1024)),
+                transforms.Resize(
+                    (2048, 2048) if model_name == HR_MODEL_NAME else (1024, 1024)
+                ),
                 transforms.ToTensor(),
                 transforms.Normalize(
                     [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
@@ -86,6 +128,8 @@ def _infer_with_model(image, model_root, huggingface_token, model_name):
             ]
         )
         tensor = preprocessing(image.convert("RGB")).unsqueeze(0).to(device)
+        if device == "cuda" and model_name == HR_MODEL_NAME:
+            tensor = tensor.half()
         with torch.no_grad():
             prediction = model(tensor)
         if hasattr(prediction, "logits"):
@@ -94,7 +138,9 @@ def _infer_with_model(image, model_root, huggingface_token, model_name):
             prediction = prediction[-1]
         if isinstance(prediction, dict) and "logits" in prediction:
             prediction = prediction["logits"]
-        prediction = prediction.sigmoid().cpu()[0].squeeze()
+        # HR inference runs in half precision on CUDA; convert the mask back
+        # to float32 before torchvision turns it into a PIL image.
+        prediction = prediction.sigmoid().float().cpu()[0].squeeze()
         mask = transforms.ToPILImage()(prediction).resize(
             image.size, Image.Resampling.LANCZOS
         )
@@ -111,7 +157,27 @@ def _infer_with_model(image, model_root, huggingface_token, model_name):
 
 
 def validate_huggingface_token(token, model_name=LEGACY_MODEL_NAME):
+    model_name = resolve_background_model(model_name)
     token = token.strip() if isinstance(token, str) else ""
+    if not token and model_name in PUBLIC_MODEL_NAMES:
+        try:
+            access = requests.get(_model_config_url(model_name), timeout=30)
+        except requests.RequestException as error:
+            raise BackgroundFailure(
+                "background.huggingface_unavailable",
+                f"Hugging Face could not verify access to {model_name}. Check the network connection and try again.",
+            ) from error
+        if access.status_code in {401, 403}:
+            raise BackgroundFailure(
+                "background.huggingface_access_denied",
+                f"Hugging Face denied access to public model {model_name}.",
+            )
+        if access.status_code != 200:
+            raise BackgroundFailure(
+                "background.huggingface_unavailable",
+                f"Hugging Face could not verify access to {model_name}. Try again later.",
+            )
+        return "public"
     if not token:
         raise BackgroundFailure(
             "background.huggingface_token_required",
@@ -188,13 +254,16 @@ def _load_runtime(model_root, huggingface_token=None, model_name=LEGACY_MODEL_NA
             token_validated = True
         _ensure_dependencies()
         try:
+            _verify_dependency_imports()
             import torch
             from torchvision import transforms
             from transformers import AutoModelForImageSegmentation
+        except BackgroundFailure:
+            raise
         except Exception as error:
             raise BackgroundFailure(
                 "background.runtime_install_failed",
-                "The installed background-model runtime could not be loaded. Reinstall PyTorch, torchvision, and transformers in this Python environment.",
+                "The installed background-model runtime could not be loaded. Check the required packages in this Python environment.",
             ) from error
         try:
             model_root.mkdir(parents=True, exist_ok=True)
@@ -218,6 +287,8 @@ def _load_runtime(model_root, huggingface_token=None, model_name=LEGACY_MODEL_NA
                     token=huggingface_token,
                 )
             model.to(device)
+            if device == "cuda" and model_name == HR_MODEL_NAME:
+                model.half()
             model.eval()
             runtime = (model, torch, transforms, device)
             _loaded_runtimes[model_name] = runtime
@@ -238,7 +309,9 @@ def _model_cache_available(model_root, model_name=LEGACY_MODEL_NAME):
     if not model_directory.is_dir():
         return False
     return any(
-        snapshot.is_dir() and (snapshot / "config.json").is_file()
+        snapshot.is_dir()
+        and (snapshot / "config.json").is_file()
+        and (snapshot / "model.safetensors").is_file()
         for snapshot in model_directory.iterdir()
     )
 
