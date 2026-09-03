@@ -46,8 +46,8 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
 .duplicates-toolbar input { width: 100%; accent-color: var(--accent); }
 .duplicates-toolbar output { color: var(--muted); font-variant-numeric: tabular-nums; }
 .duplicates-toolbar .btn { justify-self: end; }
-.library-layout { height: 100%; display: grid; grid-template-columns: minmax(0,1fr) 7px minmax(260px,var(--inspector-width)); }
-.library-main { min-width: 0; display: grid; grid-template-rows: auto minmax(0,1fr) auto; }
+.library-layout { height: 100%; min-height: 0; display: grid; grid-template-columns: minmax(0,1fr) 7px minmax(260px,var(--inspector-width)); grid-template-rows: minmax(0,1fr); overflow: hidden; }
+.library-main { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0,1fr) auto; overflow: hidden; }
 .toolbar { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); background: var(--surface); }
 .toolbar .search { flex: 1; max-width: 560px; }
 .toolbar-select { width: 140px; }
@@ -80,7 +80,7 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
 .inspector-resize::after { content: ""; position: absolute; top: 50%; left: 2px; width: 2px; height: 38px; border-radius: 2px; background: #bdc7cc; transform: translateY(-50%); }
 .inspector-resize:hover::after, .resizing-inspector .inspector-resize::after { background: var(--accent); }
 .resizing-inspector { cursor: col-resize; user-select: none; }
-.inspector { position: relative; padding: 15px; overflow: auto; background: var(--surface); }
+.inspector { position: relative; min-height: 0; padding: 15px; overflow: auto; background: var(--surface); }
 .inspector-close { display: none; position: sticky; z-index: 3; top: 0; margin: 0 0 -34px auto; }
 .inspector-preview { width: 100%; max-height: 290px; object-fit: contain; aspect-ratio: 4/3; background: #1b1e20; border-radius: 6px; }
 .inspector h2 { margin: 14px 0 4px; font-size: 16px; }
@@ -326,7 +326,8 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
   .nav-item { justify-content: center; padding: 0; }
   .builder-fields { grid-template-columns: repeat(2,minmax(0,1fr)); }
   .builder-savebar { left: 80px; }
-  .library-layout { position: relative; grid-template-columns: 1fr; }
+  .library-layout { position: relative; grid-template-columns: 1fr; grid-template-rows: none; overflow: visible; }
+  .library-main { overflow: visible; }
   .inspector-resize { display: none; }
   .inspector { display: none; position: absolute; z-index: 8; inset: 0; padding: 16px; }
   .inspector.has-media { display: block; }

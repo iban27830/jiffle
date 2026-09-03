@@ -28,10 +28,19 @@ function saveViewState(view, changes) {
   try { sessionStorage.setItem(UI_STATE_KEY, JSON.stringify(uiState)); } catch {}
 }
 function saveScrollState() {
-  if (currentView) saveViewState(currentView, {scrollTop:workspace.scrollTop});
+  if (!currentView) return;
+  const changes = {scrollTop:workspace.scrollTop};
+  if (currentView === 'library') changes.galleryScrollTop = document.querySelector('#gallery')?.scrollTop || 0;
+  saveViewState(currentView, changes);
 }
 function restoreScrollState(view) {
-  requestAnimationFrame(() => { workspace.scrollTop = Number(viewState(view).scrollTop || 0); });
+  requestAnimationFrame(() => {
+    workspace.scrollTop = Number(viewState(view).scrollTop || 0);
+    if (view === 'library') {
+      const gallery = document.querySelector('#gallery');
+      if (gallery) gallery.scrollTop = Number(viewState(view).galleryScrollTop || 0);
+    }
+  });
 }
 
 const FONT_SIZE_KEY = 'jiffle-font-size';
