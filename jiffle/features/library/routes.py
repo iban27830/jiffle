@@ -185,6 +185,10 @@ def _serialize(item: MediaItem) -> dict[str, object]:
         "remote_id": item.remote_id,
         "parent_url": item.parent_url,
         "has_parent": bool(item.parent_id),
+        "family_id": item.family_id,
+        "relatives": list(item.relatives),
+        "family_members": sorted((item.id, *item.relatives)) if item.family_id else [],
+        "has_family": bool(item.family_id),
         "content_url": f"/api/v1/media/{item.id}/content?revision={item.active_revision_id or 0}",
         "thumbnail_url": f"/api/v1/media/{item.id}/thumbnail?revision={item.active_revision_id or 0}",
     }

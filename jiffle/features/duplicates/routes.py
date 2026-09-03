@@ -4,7 +4,7 @@ from flask import Blueprint, current_app, jsonify, request
 
 from jiffle.configuration.settings import Settings
 from jiffle.features.duplicates.resolution import (
-    DuplicateFailure, ignore_match, resolve_match,
+    DuplicateFailure, ignore_match, mark_match_as_family, resolve_match,
 )
 from jiffle.features.duplicates.scan import create_duplicate_scan_job, run_duplicate_scan_job
 from jiffle.infrastructure.database.connection import get_database
@@ -73,6 +73,19 @@ def resolve_duplicate(match_id: int):
     except DuplicateFailure as error:
         return _duplicate_error(error)
     return jsonify({"status": "resolved", "kept_media_id": media_id})
+
+
+@duplicates_blueprint.post("/api/v1/duplicate-matches/<int:match_id>/family")
+def family_duplicate(match_id: int):
+    try:
+        family_id = mark_match_as_family(get_database(), match_id)
+    except DuplicateFailure as error:
+        return _duplicate_error(error)
+    return jsonify({
+        "status": "resolved",
+        "resolution": "family",
+        "family_id": family_id,
+    })
 
 
 def _serialize(row):

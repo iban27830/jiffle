@@ -68,6 +68,8 @@ class SqliteLibraryRepository:
         remote_id = None
         parent_media_id = None
         parent_url = None
+        family_id = row["family_id"] if "family_id" in keys else None
+        relatives: tuple[int, ...] = ()
         if source_row is not None:
             remote_id = source_row["remote_id"] if "remote_id" in source_row.keys() else None
             if parent_id is None and "parent_id" in source_row.keys():
@@ -86,6 +88,15 @@ class SqliteLibraryRepository:
             if parent_id:
                 canonical = source_row["canonical_url"] if "canonical_url" in source_row.keys() else None
                 parent_url = _parent_url(canonical or row["source_url"] or "", parent_id) or None
+        if family_id is not None and _table_exists(self.connection, "media_families"):
+            relatives = tuple(
+                int(relative[0])
+                for relative in self.connection.execute(
+                    "SELECT id FROM media_items "
+                    "WHERE family_id=? AND id<>? AND deleted_at IS NULL ORDER BY id",
+                    (family_id, row["id"]),
+                ).fetchall()
+            )
         return MediaItem(
             id=row["id"],
             file_path=row["file_path"],
@@ -107,6 +118,8 @@ class SqliteLibraryRepository:
             parent_media_id=parent_media_id,
             remote_id=remote_id,
             parent_url=parent_url,
+            family_id=int(family_id) if family_id is not None else None,
+            relatives=relatives,
         )
 
 
@@ -173,6 +186,12 @@ def _build_filter(query: LibraryQuery, connection) -> tuple[str, tuple[object, .
 
 def _table_has_column(connection: sqlite3.Connection, table: str, column: str) -> bool:
     return any(row[1] == column for row in connection.execute(f"PRAGMA table_info({table})"))
+
+
+def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
+    return connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone() is not None
 
 
 def _decode_tags(raw) -> tuple[str, ...]:

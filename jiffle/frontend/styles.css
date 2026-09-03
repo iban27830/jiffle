@@ -74,6 +74,10 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
 .parent-marker { position: absolute; top: 7px; left: 7px; width: 28px; height: 28px; display: grid; place-items: center; border-radius: 5px; color: #124f78; background: rgba(225,239,249,.96); box-shadow: 0 1px 4px rgba(18,30,36,.24); cursor: pointer; }
 .parent-marker:hover { color: #0a3653; background: #d1e7f7; }
 .parent-marker [data-lucide] { width: 16px; height: 16px; }
+.family-marker { position: absolute; top: 7px; left: 7px; width: 28px; height: 28px; display: grid; place-items: center; border-radius: 5px; color: #79521c; background: rgba(255,241,212,.96); box-shadow: 0 1px 4px rgba(18,30,36,.24); }
+.family-marker:hover { color: #5e3e13; background: #ffebc2; }
+.family-marker [data-lucide] { width: 16px; height: 16px; }
+.parent-marker + .family-marker { top: 42px; }
 .media-card-body { display:block; padding: 10px; line-height: 1.35; }
 .hide-card-info .media-card-body { display: none; }
 .media-card strong, .ellipsis { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

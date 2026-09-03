@@ -609,6 +609,22 @@ def migration_25(connection: sqlite3.Connection) -> None:
     )
 
 
+def migration_26(connection: sqlite3.Connection) -> None:
+    """Store user-defined family groups for related duplicate media."""
+    connection.execute(
+        "CREATE TABLE media_families ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    )
+    connection.execute(
+        "ALTER TABLE media_items ADD COLUMN family_id INTEGER "
+        "REFERENCES media_families(id) ON DELETE SET NULL"
+    )
+    connection.execute(
+        "CREATE INDEX media_items_family_idx ON media_items(family_id)"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -635,6 +651,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (23, migration_23),
     (24, migration_24),
     (25, migration_25),
+    (26, migration_26),
 )
 
 

@@ -77,6 +77,51 @@ def resolve_match(
     return keep_id
 
 
+def mark_match_as_family(connection: sqlite3.Connection, match_id: int) -> int:
+    """Keep both matched files and place them in one user-defined family."""
+    match = _pending_match(connection, match_id)
+    media_ids = (int(match["left_media_id"]), int(match["right_media_id"]))
+    rows = connection.execute(
+        "SELECT id, family_id FROM media_items "
+        "WHERE id IN (?, ?) AND deleted_at IS NULL ORDER BY id",
+        media_ids,
+    ).fetchall()
+    if len(rows) != 2:
+        raise DuplicateFailure("duplicates.media_missing", "A matched media item is missing.")
+
+    family_ids = {int(row["family_id"]) for row in rows if row["family_id"] is not None}
+    if not family_ids:
+        cursor = connection.execute("INSERT INTO media_families DEFAULT VALUES")
+        family_id = int(cursor.lastrowid)
+    else:
+        family_id = min(family_ids)
+        if len(family_ids) > 1:
+            placeholders = ", ".join("?" for _ in family_ids)
+            connection.execute(
+                f"UPDATE media_items SET family_id=? WHERE family_id IN ({placeholders})",
+                (family_id, *family_ids),
+            )
+            connection.execute(
+                f"DELETE FROM media_families WHERE id IN ({placeholders}) AND id<>?",
+                (*family_ids, family_id),
+            )
+    connection.execute(
+        "UPDATE media_items SET family_id=? WHERE id IN (?, ?)",
+        (family_id, *media_ids),
+    )
+    connection.execute(
+        "UPDATE duplicate_matches SET status='resolved', resolution='family', "
+        "resolved_at=CURRENT_TIMESTAMP WHERE id=?",
+        (match_id,),
+    )
+    _history(connection, "duplicate.family", match_id, {
+        "family_id": family_id,
+        "media_ids": list(media_ids),
+    })
+    connection.commit()
+    return family_id
+
+
 def _merge_metadata(connection, keep, remove):
     connection.execute(
         "INSERT OR IGNORE INTO media_tags (media_item_id, tag) "

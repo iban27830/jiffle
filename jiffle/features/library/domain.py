@@ -28,6 +28,8 @@ class MediaItem:
     parent_media_id: int | None = None
     remote_id: str | None = None
     parent_url: str | None = None
+    family_id: int | None = None
+    relatives: tuple[int, ...] = ()
 
     @property
     def characters(self) -> tuple[str, ...]:
