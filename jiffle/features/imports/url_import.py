@@ -3,6 +3,8 @@ from pathlib import Path
 import sqlite3
 from uuid import uuid4
 
+import requests
+
 from jiffle.configuration.settings import Settings
 from jiffle.features.imports.local_import import ImportFailure, atomic_copy, inspect_media
 from jiffle.features.imports.history import create_import_history, update_import_history
@@ -145,6 +147,12 @@ def run_url_import_job(
             raise
     except (SourceProviderFailure, ImportFailure) as error:
         _failed(connection, job_id, error.code, error.message)
+    except requests.RequestException as error:
+        _failed(connection, job_id, "import.download_failed", "The post media could not be downloaded.")
+        raise error
+    except ValueError as error:
+        _failed(connection, job_id, "import.invalid_media", "The downloaded post media is invalid.")
+        raise error
     except Exception:
         _failed(
             connection, job_id, "import.url_import_failed",
@@ -226,7 +234,8 @@ def _failed(connection, job_id, code, message):
     connection.rollback()
     connection.execute(
         "UPDATE background_jobs SET status='failed', error_code=?, error_message=?, "
-        "finished_at=CURRENT_TIMESTAMP WHERE id=?", (code, message, job_id)
+        "result_json=?, finished_at=CURRENT_TIMESTAMP WHERE id=?",
+        (code, message, json.dumps({"outcome": "failed", "code": code, "message": message}), job_id)
     )
     connection.execute(
         "UPDATE url_import_candidates SET status='failed' WHERE job_id=?", (job_id,)

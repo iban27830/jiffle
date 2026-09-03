@@ -552,6 +552,31 @@ def migration_22(connection: sqlite3.Connection) -> None:
     )
 
 
+def migration_23(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "ALTER TABLE background_jobs ADD COLUMN parent_job_id INTEGER "
+        "REFERENCES background_jobs(id) ON DELETE CASCADE"
+    )
+    connection.execute(
+        "CREATE INDEX background_jobs_parent_idx ON background_jobs(parent_job_id)"
+    )
+    connection.execute(
+        "CREATE TABLE source_set_imports ("
+        "job_id INTEGER PRIMARY KEY REFERENCES background_jobs(id) ON DELETE CASCADE, "
+        "submitted_url TEXT NOT NULL, provider TEXT NOT NULL, set_id TEXT, "
+        "shortname TEXT, name TEXT, metadata_json TEXT NOT NULL DEFAULT '{}', "
+        "total INTEGER NOT NULL DEFAULT 0, processed INTEGER NOT NULL DEFAULT 0, "
+        "accepted INTEGER NOT NULL DEFAULT 0, duplicate INTEGER NOT NULL DEFAULT 0, "
+        "review INTEGER NOT NULL DEFAULT 0, blocked INTEGER NOT NULL DEFAULT 0, "
+        "failed INTEGER NOT NULL DEFAULT 0, cancel_requested INTEGER NOT NULL DEFAULT 0, "
+        "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+        "updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    )
+    connection.execute(
+        "CREATE INDEX source_set_imports_active_idx ON source_set_imports(cancel_requested, job_id)"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -575,6 +600,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (20, migration_20),
     (21, migration_21),
     (22, migration_22),
+    (23, migration_23),
 )
 
 

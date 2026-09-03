@@ -19,6 +19,7 @@ from jiffle.features.background_editor.workflow import (
 )
 from jiffle.features.imports.source_adapters.registry import build_source_providers
 from jiffle.infrastructure.database.connection import get_database
+from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
 
 settings_blueprint = Blueprint("settings_api", __name__)
 
@@ -160,6 +161,8 @@ def test_source_provider(provider_name: str):
         return _error("providers.not_found", "Source provider was not found.", 404)
     try:
         provider.check_connection()
+    except SourceProviderFailure as error:
+        return _error(error.code, error.message, 502)
     except (requests.RequestException, ValueError, AttributeError):
         return _error("providers.connection_failed", "The source provider could not be authenticated.", 502)
     return jsonify({"status": "ok", "provider": provider.provider_name})
@@ -195,6 +198,10 @@ def list_history():
     if entity_type:
         clauses.append("entity_type=?")
         parameters.append(entity_type)
+        if entity_type == "background_job":
+            clauses.append(
+                "entity_id IN (SELECT id FROM background_jobs WHERE parent_job_id IS NULL)"
+            )
     where = "WHERE " + " AND ".join(clauses) if clauses else ""
     connection = get_database()
     total = connection.execute(

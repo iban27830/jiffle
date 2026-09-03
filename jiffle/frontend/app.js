@@ -18,6 +18,7 @@ let librarySearch = '';
 let reloadLibrary = null;
 let monitoredCropJob = null;
 let monitoredBackgroundJob = null;
+let monitoredSetJob = null;
 let reloadBackgroundCandidates = null;
 
 const UI_STATE_KEY = 'jiffle-session-state-v1';
@@ -161,10 +162,45 @@ async function runJob(start, onCreated) {
   const created = await start();
   onCreated?.(created);
   const job = await waitForJob(created.status_url, value => {
-    jobStatus.textContent = `${value.type}: ${value.progress}%`;
+    if (value.type === 'source_set_import') renderSetStatus(value);
+    else jobStatus.textContent = `${value.type}: ${value.progress}%`;
   });
   jobStatus.textContent = '';
   return job;
+}
+
+function renderSetStatus(current) {
+  const processed = current.processed ?? current.result?.processed ?? 0;
+  const total = current.total ?? current.result?.total ?? '?';
+  const name = current.result?.set?.name || current.set?.name || 'e621 set';
+  const stopping = Boolean(current.cancel_requested);
+  jobStatus.innerHTML = `<span>${esc(name)}: ${current.progress}% · ${processed}/${total}${stopping ? ' · stopping after current post' : ''}</span><button id="stopSetImport" class="status-stop" title="Stop set import" ${stopping ? 'disabled' : ''}><i data-lucide="square"></i></button>`;
+  const stop = document.querySelector('#stopSetImport');
+  if (stop && !stopping) stop.onclick = async () => { stop.disabled = true; jobStatus.querySelector('span').textContent += ' · stopping after current post'; await api(`/api/v1/set-import-jobs/${current.id}/cancel`, {method:'POST'}); };
+  icons();
+}
+
+async function monitorSetImport(job) {
+  if (!job || monitoredSetJob === job.id) return;
+  monitoredSetJob = job.id;
+  try {
+    let current = job;
+    for (;;) {
+      renderSetStatus(current);
+      const state = await api(`/api/v1/jobs/${job.id}`);
+      if (state.status === 'completed' || state.status === 'failed') break;
+      current = state;
+      await new Promise(resolve => setTimeout(resolve, 700));
+    }
+  } catch {}
+  if (monitoredSetJob === job.id) { monitoredSetJob = null; jobStatus.textContent = ''; }
+}
+
+async function restoreSetImportMonitor() {
+  try {
+    const active = await api('/api/v1/set-import-jobs/active');
+    if (active.job) monitorSetImport(active.job);
+  } catch {}
 }
 
 async function monitorCropScan(job) {
@@ -347,17 +383,24 @@ async function inspectMedia(id) {
 async function showImport() {
   setHeader('Import', 'Drop an image or paste a link');
   const history = await api('/api/v1/history?limit=100&entity_type=background_job');
-  const historyLabels = {'import.pending':'Importing','import.accepted':'Imported','import.review':'Waiting for review','import.duplicate':'Already imported or awaiting review','import.failed':'Import failed'};
-  const historyRows = history.items.map(item=>`<article class="history-row"><i data-lucide="${item.event_type === 'import.pending' ? 'loader-circle' : 'activity'}" class="${item.event_type === 'import.pending' ? 'spin' : ''}"></i><div><strong>${esc(historyLabels[item.event_type] || item.event_type)}</strong><small>Import #${item.entity_id}</small></div><time>${esc(item.created_at)}</time></article>`).join('');
+  const historyLabels = {'import.pending':'Importing','import.accepted':'Imported','import.review':'Waiting for review','import.duplicate':'Already imported or awaiting review','import.failed':'Import failed','import.set_completed':'Set imported','import.set_partial':'Set partially imported','import.set_cancelled':'Set import stopped'};
+  const historyRows = history.items.map(item=>{
+    let details={}; try { details=JSON.parse(item.details_json || '{}'); } catch {}
+    const set=details.set || {};
+    const counters=['accepted','duplicate','review','blocked','failed'].filter(key=>details[key] != null).map(key=>`${key}: ${details[key]}`).join(' · ');
+    const issues=Array.isArray(details.issues) && details.issues.length ? `<details class="history-issues"><summary>Issues (${details.issues.length})</summary><ul>${details.issues.map(issue=>`<li><a href="${esc(issue.url || '#')}" target="_blank" rel="noopener">${esc(issue.post_id || issue.remote_id || 'post')}</a>: ${esc(issue.message || issue.code || 'Import failed')}</li>`).join('')}</ul></details>` : '';
+    const label=historyLabels[item.event_type] || item.event_type;
+    return `<article class="history-row"><i data-lucide="${item.event_type === 'import.pending' ? 'loader-circle' : 'activity'}" class="${item.event_type === 'import.pending' ? 'spin' : ''}"></i><div><strong>${esc(label)}</strong><small>${set.name ? `${esc(set.name)} · ` : ''}Import #${item.entity_id}${counters ? ` · ${esc(counters)}` : ''}</small>${issues}</div><time>${esc(item.created_at)}</time></article>`;
+  }).join('');
   workspace.innerHTML = `<div class="page"><section id="dropImport" class="drop-import" tabindex="0"><i data-lucide="upload-cloud"></i><strong>Drop an image, video, or link here</strong><span>or paste a supported source URL</span><input id="fileImport" type="file" accept="image/*,video/*" hidden><button id="chooseImport" type="button" class="btn primary"><i data-lucide="file-up"></i>Choose file</button><input id="pasteImport" class="control" type="url" placeholder="https://..." aria-label="Image URL"><button id="submitUrlImport" type="button" class="btn"><i data-lucide="link"></i>Import URL</button></section><section class="import-history"><div class="page-head"><h2>Import history</h2><span class="badge">${history.page.total}</span></div><div class="item-list">${historyRows || '<div class="empty">History is empty</div>'}</div></section></div>`;
   const drop = document.querySelector('#dropImport'); const fileInput = document.querySelector('#fileImport');
   const showQueued = created => { const list=document.querySelector('.import-history .item-list'); const empty=list.querySelector('.empty'); if(empty) empty.remove(); list.insertAdjacentHTML('afterbegin',`<article class="history-row"><i data-lucide="loader-circle" class="spin"></i><div><strong>Importing</strong><small>Import #${created.job_id}</small></div><time>now</time></article>`); document.querySelector('.import-history .badge').textContent=String(Number(document.querySelector('.import-history .badge').textContent)+1); icons(); };
   const submitFile = async file => { if (!file) return; try { const body = new FormData(); body.append('file', file); const job = await runJob(() => api('/api/v1/import-uploads',{method:'POST',body}),showQueued); toast(`Import: ${job.result.outcome}`); refreshCounts(); showImport(); } catch (error) { toast(error.message,true); showImport(); } };
   document.querySelector('#chooseImport').onclick = () => fileInput.click(); fileInput.onchange = () => submitFile(fileInput.files[0]);
-  const submitUrl = async url => { if (!url) return; try { const job=await runJob(()=>api('/api/v1/url-import-jobs',{method:'POST',body:JSON.stringify({url})}),showQueued); toast(`Import: ${job.result.outcome}`); refreshCounts(); showImport(); } catch(error){toast(error.message,true);showImport();} };
+  const submitUrl = async url => { if (!url) return; try { const job=await runJob(()=>api('/api/v1/url-import-jobs',{method:'POST',body:JSON.stringify({url})}),showQueued); toast(`Import: ${job.result?.outcome || 'failed'}`); refreshCounts(); showImport(); } catch(error){toast(error.message,true);showImport();} };
   drop.ondragover = event => { event.preventDefault(); drop.classList.add('dragging'); }; drop.ondragleave = () => drop.classList.remove('dragging'); drop.ondrop = event => { event.preventDefault(); drop.classList.remove('dragging'); const file=event.dataTransfer.files[0]; if (file) submitFile(file); else submitUrl(droppedUrl(event.dataTransfer)); };
   document.querySelector('#submitUrlImport').onclick = () => submitUrl(document.querySelector('#pasteImport').value.trim());
-  icons();
+  icons(); restoreSetImportMonitor();
 }
 
 async function showReview() {
@@ -843,4 +886,4 @@ async function navigate(view){if(!views[view])view='library';saveScrollState();c
 document.querySelectorAll('.nav-item').forEach(node=>node.onclick=()=>navigate(node.dataset.view));
 window.addEventListener('hashchange',()=>navigate(location.hash.slice(1)||'library'));
 window.addEventListener('beforeunload',saveScrollState);
-navigate(location.hash.slice(1)||'library');refreshCounts();restoreCropScanMonitor();restoreBackgroundScanMonitor();icons();
+navigate(location.hash.slice(1)||'library');refreshCounts();restoreCropScanMonitor();restoreBackgroundScanMonitor();restoreSetImportMonitor();icons();

@@ -29,7 +29,8 @@ button { color: inherit; }
 .workspace { min-width: 0; min-height: 0; overflow: auto; }
 .statusbar { display: flex; align-items: center; gap: 14px; padding: 0 12px; border-top: 1px solid var(--line); background: var(--surface); color: var(--muted); font-size: .82em; }
 .statusbar span:last-child { margin-left: auto; }
-#jobStatus { display:flex; align-items:center; gap:7px; }
+#jobStatus { display:flex; align-items:center; gap:7px; min-width:0; }
+#jobStatus span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .status-stop { width:24px; height:24px; display:grid; place-items:center; padding:0; border:1px solid #d9aeb1; border-radius:4px; color:var(--bad); background:#fff; cursor:pointer; }
 .status-stop [data-lucide] { width:13px; height:13px; }
 .btn, .icon-btn { height: 34px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); cursor: pointer; }
@@ -143,6 +144,10 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
 .drop-import > svg { width:42px; height:42px; color:var(--accent); }
 .drop-import .control { width:min(520px, 90%); }
 .import-history { margin-top: 28px; }
+.history-issues { margin-top: 7px; color: var(--bad); }
+.history-issues summary { cursor: pointer; color: var(--bad); }
+.history-issues ul { margin: 6px 0 0; padding-left: 18px; }
+.history-issues a { color: inherit; }
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .review-summary { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0 18px; }
