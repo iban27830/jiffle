@@ -16,10 +16,9 @@ class ActiveSetImportError(Exception):
 
 
 class _StaticProvider:
-    provider_name = "e621"
-
     def __init__(self, source: SourceMedia):
         self.source = source
+        self.provider_name = source.provider
 
     def fetch(self, _url: str) -> SourceMedia:
         return self.source
