@@ -403,12 +403,48 @@ async function showImport() {
     const label=historyLabels[item.event_type] || item.event_type;
     return `<article class="history-row"><i data-lucide="${item.event_type === 'import.pending' ? 'loader-circle' : 'activity'}" class="${item.event_type === 'import.pending' ? 'spin' : ''}"></i><div><strong>${esc(label)}</strong><small>${set.name ? `${esc(set.name)} · ` : ''}Import #${item.entity_id}${counters ? ` · ${esc(counters)}` : ''}</small>${issues}</div><time>${esc(item.created_at)}</time></article>`;
   }).join('');
-  workspace.innerHTML = `<div class="page"><section id="dropImport" class="drop-import" tabindex="0"><i data-lucide="upload-cloud"></i><strong>Drop an image, video, or link here</strong><span>or paste a supported source URL</span><input id="fileImport" type="file" accept="image/*,video/*" hidden><button id="chooseImport" type="button" class="btn primary"><i data-lucide="file-up"></i>Choose file</button><input id="pasteImport" class="control" type="url" placeholder="https://..." aria-label="Image URL"><button id="submitUrlImport" type="button" class="btn"><i data-lucide="link"></i>Import URL</button></section><section class="import-history"><div class="page-head"><h2>Import history</h2><span class="badge">${history.page.total}</span></div><div class="item-list">${historyRows || '<div class="empty">History is empty</div>'}</div></section></div>`;
+  workspace.innerHTML = `<div class="page"><section id="dropImport" class="drop-import" tabindex="0"><i data-lucide="upload-cloud"></i><strong>Drop an image, video, or link here</strong><span>or paste a supported source URL</span><input id="fileImport" type="file" accept="image/*,video/*" hidden><button id="chooseImport" type="button" class="btn primary"><i data-lucide="file-up"></i>Choose file</button><input id="pasteImport" class="control" type="url" placeholder="https://..." aria-label="Image URL"><button id="submitUrlImport" type="button" class="btn"><i data-lucide="link"></i>Import URL</button></section><section id="sourceSearch" class="panel source-search"><div class="page-head"><div><h2>Find source</h2><span class="muted">Search exact copies by image hash</span></div></div><div id="sourceSearchDrop" class="drop-import compact" tabindex="0"><i data-lucide="scan-search"></i><strong>Drop or paste an image to search</strong><span>Results are checked on supported sources</span><input id="sourceSearchFile" type="file" accept="image/*" hidden><button id="chooseSourceSearch" type="button" class="btn"><i data-lucide="file-search"></i>Choose image</button><input id="sourceSearchUrl" class="control" type="url" placeholder="Supported post URL" aria-label="Supported post URL"><button id="submitSourceSearchUrl" type="button" class="btn"><i data-lucide="search"></i>Search URL</button></div><div id="sourceSearchStatus" class="muted"></div><div id="sourceSearchResults" class="item-list"></div></section><section class="import-history"><div class="page-head"><h2>Import history</h2><span class="badge">${history.page.total}</span></div><div class="item-list">${historyRows || '<div class="empty">History is empty</div>'}</div></section></div>`;
   const drop = document.querySelector('#dropImport'); const fileInput = document.querySelector('#fileImport');
   const showQueued = created => { const list=document.querySelector('.import-history .item-list'); const empty=list.querySelector('.empty'); if(empty) empty.remove(); list.insertAdjacentHTML('afterbegin',`<article class="history-row"><i data-lucide="loader-circle" class="spin"></i><div><strong>Importing</strong><small>Import #${created.job_id}</small></div><time>now</time></article>`); document.querySelector('.import-history .badge').textContent=String(Number(document.querySelector('.import-history .badge').textContent)+1); icons(); };
   const submitFile = async file => { if (!file) return; try { const body = new FormData(); body.append('file', file); const job = await runJob(() => api('/api/v1/import-uploads',{method:'POST',body}),showQueued); toast(`Import: ${job.result.outcome}`); refreshCounts(); showImport(); } catch (error) { toast(error.message,true); showImport(); } };
   document.querySelector('#chooseImport').onclick = () => fileInput.click(); fileInput.onchange = () => submitFile(fileInput.files[0]);
   const submitUrl = async url => { if (!url) return; try { const job=await runJob(()=>api('/api/v1/url-import-jobs',{method:'POST',body:JSON.stringify({url})}),showQueued); toast(`Import: ${job.result?.outcome || 'failed'}`); refreshCounts(); showImport(); } catch(error){toast(error.message,true);showImport();} };
+  const renderSourceSearch = data => {
+    const status = document.querySelector('#sourceSearchStatus');
+    const results = document.querySelector('#sourceSearchResults');
+    if (!status || !results) return;
+    const errors = (data.errors || []).map(error => `${esc(error.provider)}: ${esc(error.message)}`);
+    status.textContent = data.md5 ? `MD5 ${data.md5} · ${data.matches?.length || 0} matches${errors.length ? ` · ${errors.length} source errors` : ''}` : 'No image hash was returned.';
+    results.innerHTML = data.matches?.length ? data.matches.map(match => `<article class="history-row source-match"><i data-lucide="link-2"></i><div><strong>${esc(match.provider)} · ${esc(match.remote_id || 'post')}</strong><small>${esc(match.author || 'Unknown author')} · ${esc(match.width || '?')}×${esc(match.height || '?')}${match.deleted ? ' · deleted' : ''}</small><div class="source-match-tags">${(match.tags || []).slice(0, 8).map(tag => `<span>${esc(tag)}</span>`).join('')}</div></div><div class="actions"><a class="btn" href="${esc(match.canonical_url)}" target="_blank" rel="noopener"><i data-lucide="external-link"></i>Open</a>${match.direct_media_url ? `<button class="btn primary import-match" data-url="${esc(match.canonical_url)}"><i data-lucide="download"></i>Import</button>` : ''}</div></article>`).join('') : '<div class="empty">No exact copies found</div>';
+    results.insertAdjacentHTML('beforeend', errors.length ? `<div class="muted source-search-errors">${errors.join(' · ')}</div>` : '');
+    results.querySelectorAll('.import-match').forEach(node => node.onclick = () => submitUrl(node.dataset.url));
+    icons();
+  };
+  const searchSource = async (file) => {
+    if (!file) return;
+    const status = document.querySelector('#sourceSearchStatus');
+    if (status) status.textContent = 'Searching supported sources...';
+    try {
+      const body = new FormData(); body.append('file', file);
+      renderSourceSearch(await api('/api/v1/source-search', {method:'POST', body}));
+    } catch (error) { if (status) status.textContent = error.message; toast(error.message, true); }
+  };
+  const searchSourceUrl = async url => {
+    if (!url) return;
+    const status = document.querySelector('#sourceSearchStatus');
+    if (status) status.textContent = 'Loading source metadata...';
+    try { renderSourceSearch(await api('/api/v1/source-search', {method:'POST', body:JSON.stringify({url})})); }
+    catch (error) { if (status) status.textContent = error.message; toast(error.message, true); }
+  };
+  const sourceSearchDrop = document.querySelector('#sourceSearchDrop');
+  const sourceSearchFile = document.querySelector('#sourceSearchFile');
+  document.querySelector('#chooseSourceSearch').onclick = () => sourceSearchFile.click();
+  sourceSearchFile.onchange = () => searchSource(sourceSearchFile.files[0]);
+  sourceSearchDrop.ondragover = event => { event.preventDefault(); sourceSearchDrop.classList.add('dragging'); };
+  sourceSearchDrop.ondragleave = () => sourceSearchDrop.classList.remove('dragging');
+  sourceSearchDrop.ondrop = event => { event.preventDefault(); sourceSearchDrop.classList.remove('dragging'); const file = event.dataTransfer.files[0]; if (file?.type?.startsWith('image/')) searchSource(file); else searchSourceUrl(droppedUrl(event.dataTransfer)); };
+  sourceSearchDrop.onpaste = event => { const file = [...(event.clipboardData?.files || [])].find(item => item.type?.startsWith('image/')); if (file) { event.preventDefault(); searchSource(file); } };
+  document.querySelector('#submitSourceSearchUrl').onclick = () => searchSourceUrl(document.querySelector('#sourceSearchUrl').value.trim());
   drop.ondragover = event => { event.preventDefault(); drop.classList.add('dragging'); }; drop.ondragleave = () => drop.classList.remove('dragging'); drop.ondrop = event => { event.preventDefault(); drop.classList.remove('dragging'); const file=event.dataTransfer.files[0]; if (file) submitFile(file); else submitUrl(droppedUrl(event.dataTransfer)); };
   document.querySelector('#submitUrlImport').onclick = () => submitUrl(document.querySelector('#pasteImport').value.trim());
   icons(); restoreSetImportMonitor();

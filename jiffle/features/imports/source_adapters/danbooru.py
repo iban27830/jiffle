@@ -73,7 +73,48 @@ class DanbooruSourceProvider:
             tags=tags,
             file_extension=extension,
             character_tags=character_tags, parent_id=parent_id,
+            content_md5=_valid_md5(payload.get("md5")),
         )
+
+    def search_by_md5(self, digest: str) -> list[dict[str, object]]:
+        digest = _valid_md5(digest)
+        if digest is None:
+            return []
+        parameters = {"tags": f"md5:{digest}", "limit": 100}
+        if self.login and self.api_key:
+            parameters.update({"login": self.login, "api_key": self.api_key})
+        try:
+            response = requests.get(
+                "https://danbooru.donmai.us/posts.json",
+                params=parameters,
+                headers={"User-Agent": "Jiffle/2.0", "Accept": "application/json"},
+                timeout=15,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except (requests.RequestException, ValueError) as error:
+            raise SourceProviderFailure(
+                "import.provider_unavailable", "Danbooru search could not be loaded."
+            ) from error
+        return [
+            {
+                "provider": self.provider_name,
+                "domain": "danbooru.donmai.us",
+                "remote_id": str(post["id"]),
+                "canonical_url": f"https://danbooru.donmai.us/posts/{post['id']}",
+                "direct_media_url": post.get("file_url") or post.get("large_file_url"),
+                "author": str(post.get("tag_string_artist", "")).split()[0]
+                if str(post.get("tag_string_artist", "")).split()
+                else None,
+                "tags": str(post.get("tag_string", "")).split(),
+                "content_md5": _valid_md5(post.get("md5")),
+                "width": post.get("image_width"),
+                "height": post.get("image_height"),
+                "deleted": bool(post.get("is_deleted")),
+            }
+            for post in payload
+            if isinstance(post, dict) and str(post.get("id", "")).isdigit()
+        ]
 
     def check_connection(self) -> None:
         parameters = {}
@@ -93,3 +134,8 @@ def _post_id(path: str) -> int | None:
     if len(parts) >= 2 and parts[0] == "posts" and parts[1].isdigit():
         return int(parts[1])
     return None
+
+
+def _valid_md5(value: str | None) -> str | None:
+    value = str(value or "").strip().lower()
+    return value if len(value) == 32 and all(c in "0123456789abcdef" for c in value) else None

@@ -43,6 +43,65 @@ class E621SourceProvider:
         except (KeyError, TypeError, ValueError) as error:
             raise SourceProviderFailure("import.source_media_missing", "The source has no downloadable media.") from error
 
+    def metadata_md5(self, url: str) -> str | None:
+        """Return the stored file MD5 even when e621 has deleted the media."""
+        parsed = urlparse(url)
+        post_id = _post_id(parsed.path)
+        if post_id is None:
+            raise SourceProviderFailure("import.invalid_source_url", "The URL is not an e621 post URL.")
+        domain = parsed.hostname or "e621.net"
+        payload = self._get_json(f"https://{domain}/posts/{post_id}.json", context="post")
+        post = payload["post"] if isinstance(payload, dict) and "post" in payload else payload
+        if isinstance(post, list):
+            post = post[0] if post else {}
+        if not isinstance(post, dict):
+            return None
+        value = str((post.get("file") or {}).get("md5") or "").lower()
+        return value if _valid_md5(value) else None
+
+    def search_by_md5(self, digest: str) -> list[dict[str, object]]:
+        digest = _valid_md5(digest)
+        if digest is None:
+            return []
+        payload = self._get_json(
+            "https://e621.net/posts.json",
+            params={"tags": f"md5:{digest} status:any", "limit": 100},
+            context="search",
+        )
+        posts = payload.get("posts", []) if isinstance(payload, dict) else payload
+        matches: list[dict[str, object]] = []
+        for post in posts if isinstance(posts, list) else []:
+            if not isinstance(post, dict) or not str(post.get("id", "")).isdigit():
+                continue
+            post_id = str(post["id"])
+            file_payload = post.get("file") or {}
+            sample_payload = post.get("sample") or {}
+            direct_url = file_payload.get("url") or sample_payload.get("url")
+            if isinstance(direct_url, str) and direct_url.startswith("//"):
+                direct_url = "https:" + direct_url
+            tags_payload = post.get("tags") or {}
+            tags = tuple(
+                tag
+                for group in tags_payload.values()
+                if isinstance(group, (list, tuple))
+                for tag in group
+            )
+            artists = tags_payload.get("artist", [])
+            matches.append({
+                "provider": self.provider_name,
+                "domain": "e621.net",
+                "remote_id": post_id,
+                "canonical_url": f"https://e621.net/posts/{post_id}",
+                "direct_media_url": direct_url,
+                "author": ", ".join(str(artist) for artist in artists) if artists else None,
+                "tags": list(tags),
+                "content_md5": _valid_md5((file_payload or {}).get("md5")),
+                "width": file_payload.get("width"),
+                "height": file_payload.get("height"),
+                "deleted": bool((post.get("flags") or {}).get("deleted")),
+            })
+        return matches
+
     def fetch_set(self, url: str) -> SourceSet:
         parsed = parse_set_url(url)
         if parsed is None:
@@ -124,6 +183,7 @@ class E621SourceProvider:
             domain=domain, tags=tags,
             file_extension=PurePosixPath(urlparse(direct_url).path).suffix.lower() or ".jpg",
             character_tags=character_tags, parent_id=parent_id,
+            content_md5=_valid_md5(file_payload.get("md5")),
         )
 
     def _get_json(self, url: str, params: dict | None = None, context: str = "post"):
@@ -205,3 +265,8 @@ def _post_id(path: str) -> int | None:
         if value.isdigit():
             return int(value)
     return None
+
+
+def _valid_md5(value: str | None) -> str | None:
+    value = str(value or "").strip().lower()
+    return value if len(value) == 32 and all(c in "0123456789abcdef" for c in value) else None

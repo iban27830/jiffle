@@ -15,6 +15,7 @@ class SourceMedia:
     file_extension: str
     character_tags: tuple[str, ...] = ()
     parent_id: str | None = None
+    content_md5: str | None = None
 
     @property
     def characters(self) -> tuple[str, ...]:

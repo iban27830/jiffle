@@ -1,4 +1,6 @@
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from hashlib import md5
 from pathlib import Path
 from threading import Thread
 
@@ -16,6 +18,7 @@ from jiffle.features.imports.set_import import (
     run_set_import_job,
 )
 from jiffle.features.imports.source_adapters.contracts import SourceMedia
+from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
 from urllib.parse import urlsplit
 from jiffle.features.imports.url_normalization import normalize_source_url
 from jiffle.infrastructure.database.connection import get_database
@@ -118,6 +121,91 @@ def create_url_job():
     else:
         Thread(target=run_url_import_job, args=arguments, daemon=True).start()
     return jsonify({"job_id": job_id, "status_url": f"/api/v1/jobs/{job_id}"}), 202
+
+
+@imports_blueprint.post("/api/v1/source-search")
+def search_sources():
+    """Find exact copies by MD5 without creating an import job."""
+    uploaded = request.files.get("file")
+    payload = request.get_json(silent=True) if uploaded is None else None
+    source_url = payload.get("url") if isinstance(payload, dict) else None
+    digest = None
+
+    if uploaded is not None:
+        if not uploaded.filename:
+            return _error("import.invalid_request", "A file is required.", 400)
+        digest = md5(uploaded.read()).hexdigest()
+    elif isinstance(source_url, str) and source_url.strip():
+        try:
+            normalized_url = normalize_source_url(source_url)
+        except ValueError as error:
+            return _error("import.invalid_source_url", str(error), 400)
+        providers = current_app.config["JIFFLE_SOURCE_PROVIDERS"]
+        provider = next(
+            (item for item in providers if item.can_handle(normalized_url)), None
+        )
+        metadata_md5 = getattr(provider, "metadata_md5", None)
+        if provider is None or not callable(metadata_md5):
+            return _error(
+                "import.source_search_unsupported",
+                "This URL cannot provide an image hash for source search.",
+                422,
+            )
+        try:
+            digest = metadata_md5(normalized_url)
+        except SourceProviderFailure as error:
+            return _error(error.code, error.message, 422)
+    else:
+        return _error(
+            "import.invalid_request", "An image file or supported source URL is required.", 400
+        )
+
+    if not digest:
+        return jsonify({"md5": None, "matches": [], "errors": []})
+    providers = current_app.config["JIFFLE_SOURCE_PROVIDERS"]
+    matches: list[dict[str, object]] = []
+    errors: list[dict[str, str]] = []
+    searchable = [
+        provider for provider in providers
+        if callable(getattr(provider, "search_by_md5", None))
+    ]
+
+    def lookup(provider):
+        return provider, provider.search_by_md5(digest)
+
+    with ThreadPoolExecutor(max_workers=max(1, len(searchable))) as executor:
+        futures = {
+            executor.submit(lookup, provider): provider for provider in searchable
+        }
+        for future in as_completed(futures):
+            provider = futures[future]
+            try:
+                _, provider_matches = future.result()
+                matches.extend(provider_matches or [])
+            except SourceProviderFailure as error:
+                errors.append({
+                    "provider": getattr(provider, "provider_name", "unknown"),
+                    "code": error.code,
+                    "message": error.message,
+                })
+            except Exception:
+                errors.append({
+                    "provider": getattr(provider, "provider_name", "unknown"),
+                    "code": "import.source_search_failed",
+                    "message": "The source search failed.",
+                })
+
+    unique: dict[tuple[str, str], dict[str, object]] = {}
+    for match in matches:
+        provider = str(match.get("provider") or "unknown")
+        remote_id = str(match.get("remote_id") or match.get("canonical_url") or "")
+        if remote_id:
+            unique[(provider, remote_id)] = match
+    return jsonify({
+        "md5": digest,
+        "matches": list(unique.values()),
+        "errors": errors,
+    })
 
 
 @imports_blueprint.get("/api/v1/jobs/<int:job_id>")

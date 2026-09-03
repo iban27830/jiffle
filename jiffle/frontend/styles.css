@@ -150,6 +150,15 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
 .drop-import.dragging { border-color: var(--accent); background: var(--surface-2); }
 .drop-import > svg { width:42px; height:42px; color:var(--accent); }
 .drop-import .control { width:min(520px, 90%); }
+.source-search { margin-top: 18px; }
+.source-search .page-head { padding: 13px; }
+.drop-import.compact { min-height: 220px; border-width: 1px; }
+.drop-import.compact > svg { width: 34px; height: 34px; }
+.source-match { grid-template-columns: 28px minmax(0, 1fr) auto; }
+.source-match > svg { width: 22px; height: 22px; color: var(--accent); }
+.source-match-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.source-match-tags span { padding: 2px 6px; border-radius: 4px; background: var(--surface-2); color: var(--muted); font-size: .82em; }
+.source-search-errors { padding: 4px 12px 10px; }
 .import-history { margin-top: 28px; }
 .history-issues { margin-top: 7px; color: var(--bad); }
 .history-issues summary { cursor: pointer; color: var(--bad); }

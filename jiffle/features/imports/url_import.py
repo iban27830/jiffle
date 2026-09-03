@@ -202,6 +202,7 @@ def _serialize_source(source) -> str:
         "character_tags": list(source.character_tags),
         "parent_id": source.parent_id,
         "file_extension": source.file_extension,
+        "content_md5": source.content_md5,
     })
 
 

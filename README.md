@@ -97,8 +97,13 @@ Supported online sources include:
 - e621 and e926 post sets such as `https://e621.net/post_sets/12345` or `https://e926.net/post_sets/12345.json`
 - Gelbooru
 - FurAffinity
+- TBIB (The Big ImageBoard)
 
 Some sources require account credentials configured under **Settings**. A direct image URL is also accepted; Jiffle downloads it, calculates its hash, and checks it for duplicates before placing it in the library or Review.
+
+To find where an image is already published, use **Import → Find source**. Drop or paste an image into the search area, or enter a supported post URL, then open one of the exact matches. Jiffle calculates the file's MD5 and checks the APIs of sources that support exact hash search; it does not upload the image to a search service. An **Import** button is shown when a matched post has downloadable media.
+
+For a deleted e621 post, e621 can still return the file's MD5 in its JSON metadata. Paste that post URL into **Find source** and Jiffle can use the MD5 to search TBIB and other supported sources. Exact matching requires the same file bytes; resized, recompressed, or edited copies need a perceptual or external reverse-image search and may not be found by this feature.
 
 For an e621 or e926 post set, Jiffle first checks the complete set (using the saved e621 username and API key when configured), then downloads the posts one at a time in the set's order. The set itself is not added as a local collection. A private set or a set that cannot be accessed fails before any files are downloaded. A set that contains an unavailable post can finish partially; the Import history entry lists that post and the reason.
 

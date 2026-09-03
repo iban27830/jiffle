@@ -196,6 +196,7 @@ def _candidate_source(raw_metadata: str | None) -> SourceMedia | None:
         file_extension=payload["file_extension"],
         character_tags=tuple(payload.get("character_tags", ())),
         parent_id=payload.get("parent_id"),
+        content_md5=payload.get("content_md5"),
     )
 
 
@@ -402,6 +403,7 @@ def _source_payload(source: SourceMedia) -> dict[str, object]:
         "character_tags": list(source.character_tags),
         "parent_id": source.parent_id,
         "file_extension": source.file_extension,
+        "content_md5": source.content_md5,
     }
 
 
