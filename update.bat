@@ -4,63 +4,64 @@ setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
 if errorlevel 1 goto :failure_directory
 
-set "REMOTE=origin"
-set "BRANCH=master"
-set "REPOSITORY_URL=https://github.com/iban27830/jiffle.git"
+set "DOWNLOAD_URL=https://github.com/iban27830/jiffle/archive/refs/heads/master.zip"
 set "DATA_ROOT=%JIFFLE_DATA_ROOT%"
 if not defined DATA_ROOT set "DATA_ROOT=%~dp0jiffle-data"
 set "BACKUP_DIR="
+set "UPDATE_ROOT=%TEMP%\jiffle-update-%RANDOM%-%RANDOM%"
+set "ARCHIVE_PATH=!UPDATE_ROOT!\jiffle.zip"
+set "STAGING_ROOT=!UPDATE_ROOT!\staging"
+set "SOURCE_ROOT="
 
 echo Jiffle updater
 echo.
 
-where git >nul 2>&1
-if errorlevel 1 goto :failure_git
+where powershell >nul 2>&1
+if errorlevel 1 goto :failure_powershell
 
 where python >nul 2>&1
 if errorlevel 1 goto :failure_python
 
-if not exist ".git\HEAD" goto :failure_repository
-
-for /f "delims=" %%B in ('git branch --show-current 2^>nul') do set "CURRENT_BRANCH=%%B"
-if /i not "%CURRENT_BRANCH%"=="%BRANCH%" goto :failure_branch
-
-git diff --quiet
-if errorlevel 1 goto :failure_dirty
-git diff --cached --quiet
-if errorlevel 1 goto :failure_staged
-
 netstat -ano | findstr /R /C:":5001 .*LISTENING" >nul
 if not errorlevel 1 goto :failure_running
-
-git remote get-url %REMOTE% >nul 2>&1
-if errorlevel 1 call :add_remote
-if errorlevel 1 goto :failure_remote
 
 call :backup_database
 if errorlevel 1 goto :failure_backup
 
-echo Fetching the latest version from GitHub...
-git fetch --prune %REMOTE% %BRANCH%
-if errorlevel 1 goto :failure_fetch
+if not exist "!UPDATE_ROOT!" mkdir "!UPDATE_ROOT!"
+if not exist "!UPDATE_ROOT!" goto :failure_temp
+if not exist "!STAGING_ROOT!" mkdir "!STAGING_ROOT!"
+if not exist "!STAGING_ROOT!" goto :failure_temp
 
-git merge --ff-only %REMOTE%/%BRANCH%
-if errorlevel 1 goto :failure_merge
+echo Downloading the latest version from GitHub...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing -Uri $env:DOWNLOAD_URL -OutFile $env:ARCHIVE_PATH"
+if errorlevel 1 goto :failure_download
+if not exist "!ARCHIVE_PATH!" goto :failure_download
 
-echo Checking the updated Python files...
-python -m compileall jiffle run.py
+echo Extracting the update...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; Expand-Archive -LiteralPath $env:ARCHIVE_PATH -DestinationPath $env:STAGING_ROOT -Force"
+if errorlevel 1 goto :failure_extract
+
+for /d %%D in ("!STAGING_ROOT!\*") do if not defined SOURCE_ROOT set "SOURCE_ROOT=%%~fD"
+if not defined SOURCE_ROOT goto :failure_archive
+if not exist "!SOURCE_ROOT!\jiffle" goto :failure_archive
+if not exist "!SOURCE_ROOT!\run.py" goto :failure_archive
+
+echo Checking the downloaded Python files...
+python -m compileall "!SOURCE_ROOT!\jiffle" "!SOURCE_ROOT!\run.py"
 if errorlevel 1 goto :failure_compile
 
+echo Installing the update...
+robocopy "!SOURCE_ROOT!" "%CD%" /E /R:2 /W:1 /COPY:DAT /DCOPY:DAT /XD __pycache__ /XF settings.json update.bat *.pyc
+set "ROBOCOPY_EXIT=!errorlevel!"
+if !ROBOCOPY_EXIT! GEQ 8 goto :failure_install
+
+call :cleanup
 echo.
 echo Update completed. Pending database migrations will run automatically when Jiffle starts.
 if defined BACKUP_DIR echo Database backup: %BACKUP_DIR%\jiffle-v2.db
 echo Starting Jiffle...
 call .\run.bat
-exit /b %errorlevel%
-
-:add_remote
-echo The %REMOTE% remote is missing. Adding %REPOSITORY_URL%...
-git remote add %REMOTE% "%REPOSITORY_URL%"
 exit /b %errorlevel%
 
 :backup_database
@@ -80,60 +81,56 @@ python -c "import sqlite3,sys; source=sqlite3.connect(sys.argv[1]); target=sqlit
 if errorlevel 1 exit /b 1
 exit /b 0
 
+:cleanup
+if defined UPDATE_ROOT if exist "!UPDATE_ROOT!" rmdir /s /q "!UPDATE_ROOT!" >nul 2>&1
+exit /b 0
+
 :failure_directory
 echo Could not switch to the Jiffle folder.
 goto :failure
 
-:failure_git
-echo Git was not found. Install Git for Windows and try again.
+:failure_powershell
+echo PowerShell was not found. Windows PowerShell 5.1 or newer is required for updates.
 goto :failure
 
 :failure_python
 echo Python was not found. Install Python 3.11 or newer and try again.
 goto :failure
 
-:failure_repository
-echo This folder is not a Git working copy.
-goto :failure
-
-:failure_branch
-echo The current branch is "%CURRENT_BRANCH%". Switch to "%BRANCH%" before updating.
-goto :failure
-
-:failure_dirty
-echo Tracked working-tree changes were found. Commit or stash them before updating.
-goto :failure
-
-:failure_staged
-echo Staged changes were found. Commit or stash them before updating.
-goto :failure
-
 :failure_running
 echo Jiffle is still running on port 5001. Close its terminal and try again.
-goto :failure
-
-:failure_remote
-echo The GitHub remote could not be configured.
 goto :failure
 
 :failure_backup
 echo The database backup failed. The update was cancelled.
 goto :failure
 
-:failure_fetch
-echo Could not fetch updates. Check the internet connection and GitHub access.
+:failure_temp
+echo Could not create a temporary folder for the downloaded update.
 goto :failure
 
-:failure_merge
-echo The update could not be applied as a fast-forward.
-echo Resolve the branch state manually, then run this updater again.
+:failure_download
+echo Could not download the update from GitHub. Check the internet connection and GitHub access.
+goto :failure
+
+:failure_extract
+echo The downloaded update could not be opened as a ZIP archive.
+goto :failure
+
+:failure_archive
+echo The downloaded archive does not contain a valid Jiffle application.
 goto :failure
 
 :failure_compile
-echo The updated source failed the syntax check. Jiffle was not started.
+echo The downloaded source failed the syntax check. Jiffle was not changed.
+goto :failure
+
+:failure_install
+echo The downloaded files could not be copied into the Jiffle folder.
 goto :failure
 
 :failure
+call :cleanup
 echo.
 echo Update failed. No application restart was attempted.
 pause

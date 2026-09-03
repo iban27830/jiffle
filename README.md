@@ -67,13 +67,19 @@ Keep the terminal window open while using the application. Press `Ctrl+C` in the
 
 ### Update from GitHub
 
+The updater does not require Git. It downloads the current application ZIP archive directly from GitHub:
+
+`https://github.com/iban27830/jiffle/archive/refs/heads/master.zip`
+
 1. Stop Jiffle by pressing `Ctrl+C` in its terminal window and wait for the process to exit.
 2. Double-click `update.bat` in the Jiffle folder.
-3. The updater creates a SQLite backup under `jiffle-data\migration-backups`, downloads the latest `master` branch from the configured GitHub remote, checks the updated Python files, and starts Jiffle again.
+3. Allow the updater to finish downloading and checking the files. It then starts Jiffle again.
 
-The updater does not replace `jiffle-data`, media folders, thumbnails, or the local `settings.json`. When a newer version needs database changes, Jiffle applies the pending migrations automatically during startup. Keep the backup until you have confirmed that the updated version works.
+The updater requires Python (which Jiffle also needs) and Windows PowerShell 5.1 or newer. It creates a SQLite backup under `jiffle-data\migration-backups` before replacing application files. It does not replace `jiffle-data`, media folders, thumbnails, or the local `settings.json`. When a newer version needs database changes, Jiffle applies the pending migrations automatically during startup. Keep the backup until you have confirmed that the updated version works.
 
-The update stops before changing files when Git or Python is unavailable, Jiffle is still listening on port 5001, or the working copy contains tracked changes. Commit or stash local source changes before retrying. If a migration or startup fails after an update, stop Jiffle, keep the backup folder, and restore the affected `jiffle-v2.db` backup before starting the previous version.
+If the download or ZIP check fails, check the internet connection and GitHub access, then run `update.bat` again. If a migration or startup fails after an update, stop Jiffle, keep the backup folder, and restore the affected `jiffle-v2.db` backup before starting the previous version.
+
+For an older installation whose updater still reports that Git is missing, download the current [`update.bat`](https://github.com/iban27830/jiffle/raw/refs/heads/master/update.bat?download=1) and replace the old file once. This replacement does not affect the library or its database.
 
 ## Using Jiffle
 
