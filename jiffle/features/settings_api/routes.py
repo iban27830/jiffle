@@ -6,8 +6,15 @@ from flask import Blueprint, current_app, jsonify, request
 import requests
 
 from jiffle.configuration.settings import Settings, persist_settings
-from jiffle.features.background_editor.runtime import validate_huggingface_token
-from jiffle.features.background_editor.workflow import BackgroundFailure, MODEL_NAME
+from jiffle.features.background_editor.runtime import (
+    clear_runtime_cache,
+    validate_huggingface_token,
+)
+from jiffle.features.background_editor.workflow import (
+    BackgroundFailure,
+    background_model_value,
+    resolve_background_model,
+)
 from jiffle.features.imports.source_adapters.registry import build_source_providers
 from jiffle.infrastructure.database.connection import get_database
 
@@ -31,6 +38,7 @@ def update_settings():
         "max_video_export_size_bytes", "export_format_rules", "block_previously_deleted",
         "crop_vision_url", "crop_vision_key", "crop_vision_model", "crop_vision_format",
         "crop_min_area_percent", "crop_padding_percent", "crop_background_tolerance", "crop_selected_analysis",
+        "background_model",
         "huggingface_token",
         "danbooru_login", "danbooru_api_key", "e621_login", "e621_api_key",
         "gelbooru_user_id", "gelbooru_api_key", "furaffinity_cookie_a",
@@ -47,6 +55,8 @@ def update_settings():
     except OSError:
         return _error("settings.write_failed", "Settings could not be saved.", 500)
     current_app.config["JIFFLE_SETTINGS"] = updated
+    if updated.background_model != current.background_model:
+        clear_runtime_cache()
     if not current_app.config["JIFFLE_CUSTOM_SOURCE_PROVIDERS"]:
         current_app.config["JIFFLE_SOURCE_PROVIDERS"] = build_source_providers(updated)
     return jsonify(_public_settings(updated))
@@ -69,7 +79,9 @@ def test_huggingface_access():
             token = _validated_update(
                 settings, {"huggingface_token": payload["token"]}
             ).huggingface_token
-        account = validate_huggingface_token(token)
+        account = validate_huggingface_token(
+            token, resolve_background_model(settings.background_model)
+        )
     except (TypeError, ValueError) as error:
         return _error("settings.invalid_value", str(error), 400)
     except BackgroundFailure as error:
@@ -80,7 +92,11 @@ def test_huggingface_access():
             "background.huggingface_unavailable": 503,
         }
         return _error(error.code, error.message, statuses.get(error.code, 503))
-    return jsonify({"status": "ok", "model": MODEL_NAME, "account": account})
+    return jsonify({
+        "status": "ok",
+        "model": resolve_background_model(settings.background_model),
+        "account": account,
+    })
 
 
 @settings_blueprint.post("/api/v1/settings/choose-directory")
@@ -252,6 +268,8 @@ def _validated_update(settings, payload):
         raise ValueError("crop_vision_format must be openai or gemini.")
     if "crop_selected_analysis" in values and values["crop_selected_analysis"] not in {"local", "vision"}:
         raise ValueError("crop_selected_analysis must be local or vision.")
+    if "background_model" in values:
+        values["background_model"] = background_model_value(values["background_model"])
     if "crop_min_area_percent" in values:
         value=values["crop_min_area_percent"]
         if not isinstance(value,(int,float)) or isinstance(value,bool) or not 1<=value<=50:raise ValueError("crop_min_area_percent must be from 1 to 50.")
@@ -301,6 +319,8 @@ def _public_settings(settings):
         "crop_padding_percent": settings.crop_padding_percent,
         "crop_background_tolerance": settings.crop_background_tolerance,
         "crop_selected_analysis": settings.crop_selected_analysis,
+        "background_model": settings.background_model,
+        "background_model_name": resolve_background_model(settings.background_model),
         "huggingface_token_configured": bool(settings.huggingface_token),
         "danbooru_login": settings.danbooru_login,
         "danbooru_api_key_configured": bool(settings.danbooru_api_key),

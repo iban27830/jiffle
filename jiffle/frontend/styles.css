@@ -214,6 +214,12 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
 .transparent-preview img, .transparent-preview .background-preview-placeholder { background-color: #e6eaec; background-image: linear-gradient(45deg,#f8f9f9 25%,transparent 25%),linear-gradient(-45deg,#f8f9f9 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#f8f9f9 75%),linear-gradient(-45deg,transparent 75%,#f8f9f9 75%); background-position: 0 0,0 8px,8px -8px,-8px 0; background-size: 16px 16px; }
 .background-preview-placeholder [data-lucide] { width: 32px; height: 32px; }
 .background-after-preview { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+.background-advanced-controls { margin-bottom: 14px; border: 1px solid var(--line); border-radius: 6px; }
+.background-advanced-controls summary { display: flex; align-items: center; gap: 8px; min-height: 38px; padding: 0 11px; list-style: none; cursor: pointer; color: var(--muted); font-size: .84em; font-weight: 650; }
+.background-advanced-controls summary::-webkit-details-marker { display: none; }
+.background-advanced-controls summary [data-lucide] { width: 15px; height: 15px; margin-left: auto; transition: transform .15s; }
+.background-advanced-controls[open] summary [data-lucide] { transform: rotate(180deg); }
+.background-advanced-controls .background-mask-controls { margin: 0; padding: 10px 11px 11px; border-top: 1px solid var(--line); }
 .background-mask-controls { display: grid; grid-template-columns: minmax(220px,300px) minmax(180px,1fr); gap: 5px 12px; align-items: center; margin-bottom: 14px; }
 .background-mask-controls label { display: flex; justify-content: space-between; color: var(--muted); font-size: .82em; font-weight: 650; }
 .background-mask-controls input[type="range"] { width: 100%; accent-color: var(--accent); }

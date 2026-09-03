@@ -14,7 +14,20 @@ from jiffle.features.crop_editor.workflow import media_path
 DETECTOR_VERSION = 1
 DEFAULT_TOLERANCE = 24
 DEFAULT_MIN_BACKGROUND_PERCENT = 25.0
-MODEL_NAME = "briaai/RMBG-2.0"
+# BiRefNet is a higher-resolution dichotomous segmentation model and is the
+# default for the automatic background-removal path. RMBG remains available
+# as a compatibility fallback for installations that already have it cached.
+MODEL_NAME = "ZhengPeng7/BiRefNet"
+LEGACY_MODEL_NAME = "briaai/RMBG-2.0"
+BACKGROUND_MODEL_AUTO = "auto"
+BACKGROUND_MODEL_BIREFNET = "birefnet"
+BACKGROUND_MODEL_RMBG = "rmbg"
+DEFAULT_BACKGROUND_MODEL = BACKGROUND_MODEL_AUTO
+BACKGROUND_MODEL_CHOICES = (
+    BACKGROUND_MODEL_AUTO,
+    BACKGROUND_MODEL_BIREFNET,
+    BACKGROUND_MODEL_RMBG,
+)
 MIN_PRESERVE = 0
 MAX_PRESERVE = 100
 DEFAULT_PRESERVE = 0
@@ -29,6 +42,28 @@ class BackgroundFailure(Exception):
         self.code = code
         self.message = message
         self.details = details or {}
+
+
+def background_model_value(value=DEFAULT_BACKGROUND_MODEL):
+    """Normalize the user-facing model mode stored in Settings."""
+    value = str(value or DEFAULT_BACKGROUND_MODEL).strip().lower()
+    if value not in BACKGROUND_MODEL_CHOICES:
+        raise ValueError(
+            "background_model must be auto, birefnet, or rmbg."
+        )
+    return value
+
+
+def resolve_background_model(value=DEFAULT_BACKGROUND_MODEL):
+    """Return the Hugging Face model id for a configured mode."""
+    if isinstance(value, str) and value in {MODEL_NAME, LEGACY_MODEL_NAME}:
+        return value
+    mode = background_model_value(value)
+    return {
+        BACKGROUND_MODEL_AUTO: MODEL_NAME,
+        BACKGROUND_MODEL_BIREFNET: MODEL_NAME,
+        BACKGROUND_MODEL_RMBG: LEGACY_MODEL_NAME,
+    }[mode]
 
 
 def preserve_value(value=DEFAULT_PRESERVE):
@@ -288,7 +323,14 @@ def _color_bucket(pixel):
     return tuple(channel // 32 for channel in pixel[:3])
 
 
-def create_background_preview(connection, settings, media_id, remover, force=False):
+def create_background_preview(
+    connection,
+    settings,
+    media_id,
+    remover,
+    force=False,
+    model_name=MODEL_NAME,
+):
     if isinstance(force, str):
         force = force.strip().lower() in {"1", "true", "yes", "on"}
     row = connection.execute(
@@ -307,7 +349,11 @@ def create_background_preview(connection, settings, media_id, remover, force=Fal
         ).fetchone()
         if existing is not None:
             preview_path = media_path(preview_root(settings), existing["file_path"])
-            if preview_path is not None and preview_path.is_file():
+            if (
+                existing["model"] == model_name
+                and preview_path is not None
+                and preview_path.is_file()
+            ):
                 return existing
     source = media_path(settings.media_path, row["file_path"])
     if source is None or not source.is_file():
@@ -332,6 +378,7 @@ def create_background_preview(connection, settings, media_id, remover, force=Fal
                 raise BackgroundFailure(
                     "background.inference_failed", "The background model returned no image."
                 )
+            actual_model_name = isolated.info.get("jiffle_model", model_name)
             isolated = isolated.convert("RGBA")
             if isolated.size != original.size:
                 isolated = isolated.resize(original.size, Image.Resampling.LANCZOS)
@@ -371,7 +418,7 @@ def create_background_preview(connection, settings, media_id, remover, force=Fal
                 isolated.width,
                 isolated.height,
                 round(100.0 * coverage, 2),
-                MODEL_NAME,
+                actual_model_name,
             ),
         )
         connection.commit()
@@ -538,7 +585,7 @@ def _store_composed_revision(
                 "blur": blur,
                 "preserve": preserve,
                 "remove_halo": remove_halo,
-                "model": MODEL_NAME,
+                "model": preview["model"],
                 "preview_id": preview["id"],
                 "source_revision_id": preview["source_revision_id"],
             }

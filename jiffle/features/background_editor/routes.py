@@ -17,7 +17,7 @@ from .workflow import (
     BackgroundFailure, analyze_background_candidate, background_root,
     compose_background, compose_background_preview, create_background_preview,
     detector_parameters, detector_signature, preserve_value, remove_halo_value,
-    preview_root, _apply_mask_adjustments, _hash_file,
+    preview_root, resolve_background_model, _apply_mask_adjustments, _hash_file,
 )
 
 
@@ -261,12 +261,14 @@ def create_preview(media_id):
                 previous_digest = _hash_file(previous_path)
     remover = configured or (
         lambda image, model_root: remove_background(
-            image, model_root, settings.huggingface_token
+            image, model_root, settings.huggingface_token,
+            settings.background_model,
         )
     )
     try:
         row = create_background_preview(
             get_database(), settings, media_id, remover,
+            model_name=resolve_background_model(settings.background_model),
             force=bool(force),
         )
     except BackgroundFailure as error:
@@ -539,6 +541,7 @@ def _serialize_preview(row, preserve=0, remove_halo=0, same_as_previous=False):
         "status": "ready", "preview_id": row["id"],
         "source_revision_id": row["source_revision_id"], "width": row["width"],
         "height": row["height"], "subject_coverage": row["subject_coverage"],
+        "model": row["model"],
         "preserve": preserve,
         "remove_halo": remove_halo,
         "same_as_previous": bool(same_as_previous),

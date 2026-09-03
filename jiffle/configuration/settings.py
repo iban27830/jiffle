@@ -4,6 +4,8 @@ import json
 import os
 from pathlib import Path
 
+from jiffle.features.background_editor.workflow import DEFAULT_BACKGROUND_MODEL
+
 
 DEFAULT_EXPORT_FORMAT_RULES = (("gif", "mp4"), ("webm", "mp4"))
 
@@ -31,6 +33,7 @@ class Settings:
     crop_padding_percent: float = 2.0
     crop_background_tolerance: int = 14
     crop_selected_analysis: str = "local"
+    background_model: str = DEFAULT_BACKGROUND_MODEL
     huggingface_token: str | None = None
     danbooru_login: str | None = None
     danbooru_api_key: str | None = None
@@ -96,6 +99,7 @@ class Settings:
                 "block_previously_deleted",
                 "crop_vision_url", "crop_vision_key", "crop_vision_model", "crop_vision_format",
                 "crop_min_area_percent", "crop_padding_percent", "crop_background_tolerance", "crop_selected_analysis",
+                "background_model",
                 "huggingface_token",
                 "danbooru_login", "danbooru_api_key", "e621_login", "e621_api_key",
                 "gelbooru_user_id", "gelbooru_api_key", "furaffinity_cookie_a",
@@ -139,6 +143,7 @@ def persist_settings(settings: Settings) -> None:
         "crop_padding_percent": settings.crop_padding_percent,
         "crop_background_tolerance": settings.crop_background_tolerance,
         "crop_selected_analysis": settings.crop_selected_analysis,
+        "background_model": settings.background_model,
         "huggingface_token": settings.huggingface_token,
         "danbooru_login": settings.danbooru_login,
         "danbooru_api_key": settings.danbooru_api_key,

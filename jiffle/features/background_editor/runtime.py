@@ -7,13 +7,28 @@ import threading
 from PIL import Image
 import requests
 
-from .workflow import BackgroundFailure, MODEL_NAME
+from .workflow import (
+    BackgroundFailure,
+    BACKGROUND_MODEL_AUTO,
+    background_model_value,
+    LEGACY_MODEL_NAME,
+    MODEL_NAME,
+    resolve_background_model,
+)
 
 
 _runtime_lock = threading.Lock()
 _loaded_runtime = None
+_loaded_runtimes = {}
 HUGGINGFACE_WHOAMI_URL = "https://huggingface.co/api/whoami-v2"
-MODEL_CONFIG_URL = f"https://huggingface.co/{MODEL_NAME}/resolve/main/config.json"
+
+
+def _model_config_url(model_name):
+    return f"https://huggingface.co/{model_name}/resolve/main/config.json"
+
+
+# Kept for integrations that imported the old constant directly.
+MODEL_CONFIG_URL = _model_config_url(LEGACY_MODEL_NAME)
 
 # RMBG-2.0's trusted remote model code imports kornia and timm in addition to
 # the base PyTorch and Transformers packages. Keep the import names separate
@@ -28,8 +43,38 @@ RUNTIME_DEPENDENCIES = (
 )
 
 
-def remove_background(image, model_root, huggingface_token=None):
-    model, torch, transforms, device = _load_runtime(model_root, huggingface_token)
+def remove_background(
+    image,
+    model_root,
+    huggingface_token=None,
+    model_name=MODEL_NAME,
+):
+    configured_mode = background_model_value(model_name)
+    candidates = [resolve_background_model(configured_mode)]
+    if configured_mode == BACKGROUND_MODEL_AUTO and (
+        huggingface_token or _model_cache_available(model_root, LEGACY_MODEL_NAME)
+    ):
+        candidates.append(LEGACY_MODEL_NAME)
+    last_error = None
+    for candidate in candidates:
+        try:
+            result = _infer_with_model(image, model_root, huggingface_token, candidate)
+            result.info["jiffle_model"] = candidate
+            return result
+        except BackgroundFailure as error:
+            last_error = error
+    if last_error is not None:
+        raise last_error
+    raise BackgroundFailure(
+        "background.inference_failed",
+        "The background model could not process the image.",
+    )
+
+
+def _infer_with_model(image, model_root, huggingface_token, model_name):
+    model, torch, transforms, device = _load_runtime(
+        model_root, huggingface_token, model_name
+    )
     try:
         preprocessing = transforms.Compose(
             [
@@ -61,16 +106,16 @@ def remove_background(image, model_root, huggingface_token=None):
     except Exception as error:
         raise BackgroundFailure(
             "background.inference_failed",
-            "RMBG-2.0 could not remove the image background.",
+            f"{model_name} could not remove the image background.",
         ) from error
 
 
-def validate_huggingface_token(token):
+def validate_huggingface_token(token, model_name=LEGACY_MODEL_NAME):
     token = token.strip() if isinstance(token, str) else ""
     if not token:
         raise BackgroundFailure(
             "background.huggingface_token_required",
-            "Add a Hugging Face access token in Settings before loading RMBG-2.0.",
+            "Add a Hugging Face access token in Settings before loading the background model.",
         )
     headers = {"Authorization": f"Bearer {token}"}
     try:
@@ -91,21 +136,23 @@ def validate_huggingface_token(token):
             "Hugging Face could not verify the access token. Try again later.",
         )
     try:
-        access = requests.get(MODEL_CONFIG_URL, headers=headers, timeout=30)
+        access = requests.get(
+            _model_config_url(model_name), headers=headers, timeout=30
+        )
     except requests.RequestException as error:
         raise BackgroundFailure(
             "background.huggingface_unavailable",
-            "Hugging Face could not verify access to RMBG-2.0. Check the network connection and try again.",
+            f"Hugging Face could not verify access to {model_name}. Check the network connection and try again.",
         ) from error
     if access.status_code in {401, 403}:
         raise BackgroundFailure(
             "background.huggingface_access_denied",
-            "This Hugging Face account does not have access to briaai/RMBG-2.0. Accept the model terms first.",
+            f"This Hugging Face account does not have access to {model_name}. Accept the model terms first.",
         )
     if access.status_code != 200:
         raise BackgroundFailure(
             "background.huggingface_unavailable",
-            "Hugging Face could not verify access to RMBG-2.0. Try again later.",
+            f"Hugging Face could not verify access to {model_name}. Try again later.",
         )
     try:
         payload = identity.json()
@@ -114,16 +161,29 @@ def validate_huggingface_token(token):
     return payload.get("name") or payload.get("fullname") or "authenticated"
 
 
-def _load_runtime(model_root, huggingface_token=None):
+def clear_runtime_cache():
+    """Release cached model handles after the model setting changes."""
     global _loaded_runtime
-    if _loaded_runtime is not None:
-        return _loaded_runtime
     with _runtime_lock:
-        if _loaded_runtime is not None:
+        _loaded_runtime = None
+        _loaded_runtimes.clear()
+
+
+def _load_runtime(model_root, huggingface_token=None, model_name=LEGACY_MODEL_NAME):
+    global _loaded_runtime
+    model_name = resolve_background_model(model_name)
+    if model_name == LEGACY_MODEL_NAME and _loaded_runtime is not None:
+        return _loaded_runtime
+    if model_name in _loaded_runtimes:
+        return _loaded_runtimes[model_name]
+    with _runtime_lock:
+        if model_name == LEGACY_MODEL_NAME and _loaded_runtime is not None:
             return _loaded_runtime
-        cache_available = _model_cache_available(model_root)
+        if model_name in _loaded_runtimes:
+            return _loaded_runtimes[model_name]
+        cache_available = _model_cache_available(model_root, model_name)
         token_validated = False
-        if not cache_available:
+        if not cache_available and model_name == LEGACY_MODEL_NAME:
             validate_huggingface_token(huggingface_token)
             token_validated = True
         _ensure_dependencies()
@@ -134,7 +194,7 @@ def _load_runtime(model_root, huggingface_token=None):
         except Exception as error:
             raise BackgroundFailure(
                 "background.runtime_install_failed",
-                "The installed RMBG-2.0 runtime could not be loaded. Reinstall PyTorch, torchvision, and transformers in this Python environment.",
+                "The installed background-model runtime could not be loaded. Reinstall PyTorch, torchvision, and transformers in this Python environment.",
             ) from error
         try:
             model_root.mkdir(parents=True, exist_ok=True)
@@ -142,36 +202,39 @@ def _load_runtime(model_root, huggingface_token=None):
             token = huggingface_token or False
             try:
                 model = AutoModelForImageSegmentation.from_pretrained(
-                    MODEL_NAME,
+                    model_name,
                     trust_remote_code=True,
                     cache_dir=model_root,
                     local_files_only=True,
                     token=token,
                 )
             except Exception:
-                if not token_validated:
-                    validate_huggingface_token(huggingface_token)
+                if not token_validated and model_name == LEGACY_MODEL_NAME:
+                    validate_huggingface_token(huggingface_token, model_name)
                 model = AutoModelForImageSegmentation.from_pretrained(
-                    MODEL_NAME,
+                    model_name,
                     trust_remote_code=True,
                     cache_dir=model_root,
                     token=huggingface_token,
                 )
             model.to(device)
             model.eval()
-            _loaded_runtime = (model, torch, transforms, device)
-            return _loaded_runtime
+            runtime = (model, torch, transforms, device)
+            _loaded_runtimes[model_name] = runtime
+            if model_name == LEGACY_MODEL_NAME:
+                _loaded_runtime = runtime
+            return runtime
         except BackgroundFailure:
             raise
         except Exception as error:
             raise BackgroundFailure(
                 "background.model_download_failed",
-                "RMBG-2.0 could not be downloaded or loaded. Check network access and available disk space.",
+                f"{model_name} could not be downloaded or loaded. Check network access and available disk space.",
             ) from error
 
 
-def _model_cache_available(model_root):
-    model_directory = model_root / "models--briaai--RMBG-2.0" / "snapshots"
+def _model_cache_available(model_root, model_name=LEGACY_MODEL_NAME):
+    model_directory = model_root / f"models--{model_name.replace('/', '--')}" / "snapshots"
     if not model_directory.is_dir():
         return False
     return any(
@@ -204,7 +267,7 @@ def _ensure_dependencies():
         if still_missing:
             raise BackgroundFailure(
                 "background.runtime_install_failed",
-                "The RMBG-2.0 runtime is missing required packages: "
+                "The background-model runtime is missing required packages: "
                 + ", ".join(still_missing)
                 + ".",
                 {"missing_packages": still_missing},
@@ -215,7 +278,7 @@ def _ensure_dependencies():
     except Exception as error:
         raise BackgroundFailure(
             "background.runtime_install_failed",
-            "The RMBG-2.0 runtime could not install its required packages "
+            "The background-model runtime could not install its required packages "
             + ", ".join(missing)
             + ". Check network access and Python permissions.",
             {"packages": missing},
@@ -237,6 +300,6 @@ def _verify_dependency_imports():
         except Exception as error:
             raise BackgroundFailure(
                 "background.runtime_install_failed",
-                f"The RMBG-2.0 runtime could not import required package '{module}'.",
+                f"The background-model runtime could not import required package '{module}'.",
                 {"module": module},
             ) from error
