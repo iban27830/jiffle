@@ -85,6 +85,23 @@ def normalize_tags(values: object) -> tuple[str, ...]:
     return tuple(normalized)
 
 
+def build_tag_alias_map(connection: sqlite3.Connection) -> dict[str, frozenset[str]]:
+    aliases: dict[str, set[str]] = {}
+    for row in connection.execute("SELECT canonical_tag, alias FROM tag_aliases"):
+        canonical = str(row["canonical_tag"]).strip().lower()
+        alias = str(row["alias"]).strip().lower()
+        if not canonical or not alias:
+            continue
+        aliases.setdefault(canonical, set()).update((canonical, alias))
+        aliases.setdefault(alias, set()).update((canonical, alias))
+    return {tag: frozenset(values) for tag, values in aliases.items()}
+
+
+def expand_tag_aliases(tag: object, aliases: dict[str, frozenset[str]]) -> frozenset[str]:
+    value = str(tag).strip().lower()
+    return aliases.get(value, frozenset((value,)))
+
+
 def build_collection_preview(
     connection: sqlite3.Connection,
     included_tags: tuple[str, ...],
@@ -318,27 +335,20 @@ def _collection_media(connection, collection_id):
 
 
 def _matching_candidates(connection, included_tags, excluded_tags, excluded_ids):
-    aliases = {}
-    for row in connection.execute("SELECT canonical_tag, alias FROM tag_aliases"):
-        canonical, alias = row["canonical_tag"].lower(), row["alias"].lower()
-        aliases.setdefault(canonical, set()).update((canonical, alias))
-        aliases.setdefault(alias, set()).update((canonical, alias))
-
-    def expanded(tag):
-        value = str(tag).strip().lower()
-        return aliases.get(value, {value})
+    aliases = build_tag_alias_map(connection)
 
     clauses = ["item.deleted_at IS NULL"]
     parameters: list[object] = []
     for tag in included_tags:
-        values = expanded(tag)
+        values = expand_tag_aliases(tag, aliases)
         clauses.append("EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_item_id=item.id AND LOWER(mt.tag) IN (" + ",".join("?" for _ in values) + "))")
         parameters.extend(values)
     for tag in excluded_tags:
+        values = expand_tag_aliases(tag, aliases)
         clauses.append(
-            "NOT EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_item_id=item.id AND LOWER(mt.tag) IN (" + ",".join("?" for _ in expanded(tag)) + "))"
+            "NOT EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_item_id=item.id AND LOWER(mt.tag) IN (" + ",".join("?" for _ in values) + "))"
         )
-        parameters.extend(expanded(tag))
+        parameters.extend(values)
     if excluded_ids:
         clauses.append(f"item.id NOT IN ({','.join('?' for _ in excluded_ids)})")
         parameters.extend(excluded_ids)

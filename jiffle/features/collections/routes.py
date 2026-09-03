@@ -6,8 +6,9 @@ from urllib.parse import urlsplit
 
 from jiffle.configuration.settings import Settings
 from jiffle.features.collections.workflow import (
-    CollectionFailure, build_collection_preview, create_export_job, normalize_tags, parse_collection_query,
-    preview_export, replace_collection_items, run_export_job,
+    CollectionFailure, build_collection_preview, build_tag_alias_map, create_export_job,
+    expand_tag_aliases, normalize_tags, parse_collection_query, preview_export,
+    replace_collection_items, run_export_job,
 )
 from jiffle.infrastructure.database.connection import get_database
 
@@ -378,6 +379,9 @@ def _collection_error(error):
 def _validate_composition(connection, media_ids, included_tags, excluded_tags):
     if len(media_ids) != len(set(media_ids)):
         raise CollectionFailure("collections.duplicate_item", "A collection cannot contain an item twice.")
+    aliases = build_tag_alias_map(connection)
+    included_values = tuple(expand_tag_aliases(tag, aliases) for tag in included_tags)
+    excluded_values = tuple(expand_tag_aliases(tag, aliases) for tag in excluded_tags)
     for media_id in media_ids:
         row = connection.execute(
             "SELECT id FROM media_items WHERE id=? AND deleted_at IS NULL", (media_id,)
@@ -385,11 +389,14 @@ def _validate_composition(connection, media_ids, included_tags, excluded_tags):
         if row is None:
             raise CollectionFailure("collections.media_not_found", "One or more media items were not found.")
         tags = {
-            value[0] for value in connection.execute(
+            str(value[0]).lower()
+            for value in connection.execute(
                 "SELECT tag FROM media_tags WHERE media_item_id=?", (media_id,)
             )
         }
-        if not set(included_tags).issubset(tags) or set(excluded_tags) & tags:
+        if any(not values.intersection(tags) for values in included_values) or any(
+            values.intersection(tags) for values in excluded_values
+        ):
             raise CollectionFailure(
                 "collections.composition_stale", "One or more items no longer match the collection tags."
             )
