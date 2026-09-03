@@ -166,14 +166,27 @@ def run_url_import_job(
 
 
 def _attach_source(connection, media_item_id, source) -> None:
+    try:
+        connection.execute(
+            "INSERT INTO media_sources "
+            "(media_item_id, canonical_url, direct_media_url, provider, remote_id, author, domain, parent_id, character_tags_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(media_item_id) DO UPDATE SET "
+            "canonical_url=excluded.canonical_url, direct_media_url=excluded.direct_media_url, "
+            "provider=excluded.provider, remote_id=excluded.remote_id, author=excluded.author, "
+            "domain=excluded.domain, parent_id=excluded.parent_id, character_tags_json=excluded.character_tags_json",
+            (
+                media_item_id, source.canonical_url, source.direct_media_url,
+                source.provider, source.remote_id, source.author, source.domain,
+                source.parent_id, json.dumps(list(source.character_tags)),
+            ),
+        )
+    except sqlite3.IntegrityError:
+        # A canonical URL may already belong to another library item.
+        pass
     connection.execute(
-        "INSERT OR IGNORE INTO media_sources "
-        "(media_item_id, canonical_url, direct_media_url, provider, remote_id, author, domain) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (
-            media_item_id, source.canonical_url, source.direct_media_url,
-            source.provider, source.remote_id, source.author, source.domain,
-        ),
+        "UPDATE media_items SET parent_id=?, character_tags_json=? WHERE id=?",
+        (source.parent_id, json.dumps(list(source.character_tags)), media_item_id),
     )
 
 
@@ -186,6 +199,8 @@ def _serialize_source(source) -> str:
         "author": source.author,
         "domain": source.domain,
         "tags": list(source.tags),
+        "character_tags": list(source.character_tags),
+        "parent_id": source.parent_id,
         "file_extension": source.file_extension,
     })
 

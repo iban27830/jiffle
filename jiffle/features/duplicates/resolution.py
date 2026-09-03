@@ -84,9 +84,18 @@ def _merge_metadata(connection, keep, remove):
         (keep["id"], remove["id"]),
     )
     updates = {}
-    for field in ("source_url", "author", "domain"):
+    available = set(keep.keys())
+    for field in ("source_url", "author", "domain", "parent_id"):
+        if field not in available:
+            continue
         if not keep[field] and remove[field]:
             updates[field] = remove[field]
+    if "character_tags_json" in available:
+        keep_characters = _json_tags(keep["character_tags_json"])
+        remove_characters = _json_tags(remove["character_tags_json"])
+        merged_characters = sorted(keep_characters | remove_characters)
+        if merged_characters != sorted(keep_characters):
+            updates["character_tags_json"] = json.dumps(merged_characters)
     if updates:
         assignments = ", ".join(f"{field}=?" for field in updates)
         connection.execute(
@@ -101,6 +110,14 @@ def _merge_metadata(connection, keep, remove):
             "UPDATE media_sources SET media_item_id=? WHERE media_item_id=?",
             (keep["id"], remove["id"]),
         )
+
+
+def _json_tags(raw):
+    try:
+        values = json.loads(raw or "[]")
+    except (TypeError, ValueError):
+        return set()
+    return {str(value) for value in values} if isinstance(values, list) else set()
 
 
 def _pending_match(connection, match_id):

@@ -577,6 +577,38 @@ def migration_23(connection: sqlite3.Connection) -> None:
     )
 
 
+def migration_24(connection: sqlite3.Connection) -> None:
+    """Store source parent relationships and categorized character tags."""
+    connection.execute("ALTER TABLE media_items ADD COLUMN parent_id TEXT")
+    connection.execute(
+        "ALTER TABLE media_items ADD COLUMN character_tags_json TEXT NOT NULL DEFAULT '[]'"
+    )
+    connection.execute("ALTER TABLE media_sources ADD COLUMN parent_id TEXT")
+    connection.execute(
+        "ALTER TABLE media_sources ADD COLUMN character_tags_json TEXT NOT NULL DEFAULT '[]'"
+    )
+    connection.execute("CREATE INDEX media_items_parent_idx ON media_items(parent_id)")
+    connection.execute("CREATE INDEX media_sources_parent_idx ON media_sources(parent_id)")
+
+
+def migration_25(connection: sqlite3.Connection) -> None:
+    """Queue fetched source metadata for explicit user approval."""
+    connection.execute(
+        "CREATE TABLE metadata_suggestions ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "job_id INTEGER NOT NULL UNIQUE REFERENCES background_jobs(id) ON DELETE CASCADE, "
+        "media_item_id INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE, "
+        "provider TEXT NOT NULL, "
+        "source_metadata_json TEXT NOT NULL DEFAULT '{}', "
+        "status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'rejected')), "
+        "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+        "resolved_at TEXT)"
+    )
+    connection.execute(
+        "CREATE INDEX metadata_suggestions_status_idx ON metadata_suggestions(status, id)"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -601,6 +633,8 @@ MIGRATIONS: tuple[Migration, ...] = (
     (21, migration_21),
     (22, migration_22),
     (23, migration_23),
+    (24, migration_24),
+    (25, migration_25),
 )
 
 

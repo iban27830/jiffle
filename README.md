@@ -107,6 +107,8 @@ For an e621 or e926 post set, Jiffle first checks the complete set (using the sa
 - Open **Library** to browse imported media and filter it by tags. When an online source provides an author, the author name appears on the media card and in the item details.
 - On wide screens, the library list scrolls independently while the selected item's details and actions remain visible in the right panel. The right panel has its own scroll when its contents are taller than the window.
 - Search for an exact library item with `id:123`. The media ID is shown in the item details and can be selected there to apply the same search.
+- Images imported from e621/e926, Danbooru, or Gelbooru may show a parent marker on the thumbnail. Select it to open the imported parent when it is already in the library, or to search for the source post with `parent:123`. The item details panel shows the parent ID, an external source link, and categorized character tags when the source provides them.
+- To fill in parent or character data for an older imported item, open its details and select **Refresh metadata**. The fetched result appears in **Review**; select **Apply** to add the new metadata and tags, or use the trash button to ignore it. The original file is not downloaded again.
 - In the item details, use the full-size button to open the current file by itself in a new browser tab. **Open in Editor** opens the current version beside the original and shows the complete version history. Select **Analyze current** when you want a new crop proposal.
 - Select an author in the item details to add an `author:name` filter without clearing the current search. The active author and selected media card remain highlighted while results update. Items with multiple authors show each author separately.
 - Select an item to inspect its source, dimensions, tags, edits, and available actions. Images whose active version was changed in Editor have an edit icon on the library thumbnail; restoring the original removes the icon while keeping version history.
@@ -126,6 +128,8 @@ For an e621 or e926 post set, Jiffle first checks the complete set (using the sa
 ### Import and review
 
 Open **Import** and drop an image, video, or browser link into the drop area, or paste a supported source URL. The attempt appears in Import history immediately with an **Importing** status while downloading and parsing continue. Its status changes when processing finishes. Repeated imports of the same file or link do not add another item to **Review** when an identical file is already waiting there. Items needing a decision appear in **Review**, where the total and counts by reason are shown. Accept an item to add it to the library, provide a source when requested, or reject it.
+
+Metadata refreshes for existing source-backed items also appear in **Review** as **Metadata update** entries. They are suggestions until you apply them, so a refresh cannot silently replace your current tags or parent relationship.
 
 By default, previously deleted media is held in **Review** before it can be added again. To block it without asking, open **Settings**, enable **Never re-import deleted media**, and save the settings.
 

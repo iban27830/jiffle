@@ -58,6 +58,9 @@ class DanbooruSourceProvider:
         if direct_url.startswith("//"):
             direct_url = "https:" + direct_url
         tags = tuple(filter(None, str(payload.get("tag_string", "")).split()))
+        character_tags = tuple(filter(None, str(payload.get("tag_string_character", "")).split()))
+        raw_parent_id = payload.get("parent_id")
+        parent_id = str(raw_parent_id) if raw_parent_id not in (None, "", 0, "0") else None
         artists = str(payload.get("tag_string_artist", "")).split()
         extension = PurePosixPath(urlparse(direct_url).path).suffix.lower() or ".jpg"
         return SourceMedia(
@@ -69,6 +72,7 @@ class DanbooruSourceProvider:
             domain=domain,
             tags=tags,
             file_extension=extension,
+            character_tags=character_tags, parent_id=parent_id,
         )
 
     def check_connection(self) -> None:

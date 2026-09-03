@@ -114,12 +114,16 @@ class E621SourceProvider:
         tags_payload = post.get("tags") or {}
         artists = tags_payload.get("artist", [])
         tags = tuple(tag for group in tags_payload.values() if isinstance(group, (list, tuple)) for tag in group)
+        character_tags = tuple(str(tag) for tag in tags_payload.get("character", []) if str(tag).strip())
+        raw_parent_id = post.get("parent_id")
+        parent_id = str(raw_parent_id) if raw_parent_id not in (None, "", 0, "0") else None
         return SourceMedia(
             canonical_url=f"https://{domain}/posts/{post_id}", direct_media_url=direct_url,
             provider=self.provider_name, remote_id=post_id,
             author=", ".join(str(artist) for artist in artists) if artists else None,
             domain=domain, tags=tags,
             file_extension=PurePosixPath(urlparse(direct_url).path).suffix.lower() or ".jpg",
+            character_tags=character_tags, parent_id=parent_id,
         )
 
     def _get_json(self, url: str, params: dict | None = None, context: str = "post"):

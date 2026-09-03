@@ -13,6 +13,10 @@ from jiffle.features.review_queue.workflow import (
     create_manual_source_job,
     reject_review_item,
     run_manual_source_job,
+    create_metadata_refresh_job,
+    run_metadata_refresh_job,
+    accept_metadata_suggestion,
+    reject_metadata_suggestion,
 )
 from jiffle.infrastructure.database.connection import get_database
 
@@ -42,9 +46,24 @@ def list_review_items():
         "ON candidate.id=review.import_candidate_id WHERE review.status='pending' "
         "ORDER BY review.id LIMIT ? OFFSET ?", (limit, offset)
     ).fetchall()
+    items = [_serialize(row) for row in rows]
+    metadata_rows = connection.execute(
+        "SELECT suggestion.id, suggestion.media_item_id, suggestion.provider, suggestion.created_at, "
+        "suggestion.source_metadata_json, media.file_path, media.media_type, media.width, media.height, media.file_size "
+        "FROM metadata_suggestions suggestion JOIN media_items media ON media.id=suggestion.media_item_id "
+        "WHERE suggestion.status='pending' ORDER BY suggestion.id LIMIT ? OFFSET ?",
+        (limit, offset),
+    ).fetchall()
+    metadata_items = [_serialize_metadata(row) for row in metadata_rows]
+    items.extend(metadata_items)
+    metadata_count = connection.execute(
+        "SELECT COUNT(*) FROM metadata_suggestions WHERE status='pending'"
+    ).fetchone()[0]
+    if metadata_count:
+        counts["metadata_update"] = int(metadata_count)
     return jsonify({
-        "items": [_serialize(row) for row in rows],
-        "page": {"total": total, "limit": limit, "offset": offset, "by_reason": counts},
+        "items": items,
+        "page": {"total": int(total) + int(metadata_count), "limit": limit, "offset": offset, "by_reason": counts},
     })
 
 
@@ -134,6 +153,70 @@ def apply_manual_source(review_id: int):
     return jsonify({"job_id": job_id, "status_url": f"/api/v1/jobs/{job_id}"}), 202
 
 
+@review_blueprint.post("/api/v1/media/<int:media_id>/metadata-refresh")
+@review_blueprint.post("/api/v1/metadata-refresh-jobs")
+def refresh_metadata(media_id: int | None = None):
+    payload = request.get_json(silent=True) or {}
+    if media_id is None:
+        try:
+            media_id = int(payload.get("media_id"))
+        except (TypeError, ValueError):
+            media_id = 0
+    if media_id < 1:
+        return _error("metadata.invalid_media", "A valid media ID is required.", 400)
+    connection = get_database()
+    source = connection.execute(
+        "SELECT provider FROM media_sources WHERE media_item_id=?", (media_id,)
+    ).fetchone()
+    provider = next(
+        (item for item in current_app.config["JIFFLE_SOURCE_PROVIDERS"]
+         if source is not None and getattr(item, "provider_name", None) == source["provider"]),
+        None,
+    )
+    if provider is None:
+        return _error("metadata.unsupported_source", "No provider supports this source.", 400)
+    try:
+        job_id = create_metadata_refresh_job(connection, media_id)
+    except ReviewFailure as error:
+        return _review_error(error)
+    settings: Settings = current_app.config["JIFFLE_SETTINGS"]
+    args = (settings.database_path, job_id, media_id, provider)
+    if settings.run_jobs_inline:
+        run_metadata_refresh_job(*args)
+    else:
+        Thread(target=run_metadata_refresh_job, args=args, daemon=True).start()
+    return jsonify({"job_id": job_id, "status_url": f"/api/v1/jobs/{job_id}"}), 202
+
+
+@review_blueprint.get("/api/v1/metadata-suggestions")
+def list_metadata_suggestions():
+    rows = get_database().execute(
+        "SELECT suggestion.id, suggestion.media_item_id, suggestion.provider, suggestion.created_at, "
+        "suggestion.source_metadata_json, media.file_path, media.media_type, media.width, media.height, media.file_size "
+        "FROM metadata_suggestions suggestion JOIN media_items media ON media.id=suggestion.media_item_id "
+        "WHERE suggestion.status='pending' ORDER BY suggestion.id"
+    ).fetchall()
+    return jsonify({"items": [_serialize_metadata(row) for row in rows]})
+
+
+@review_blueprint.post("/api/v1/metadata-suggestions/<int:suggestion_id>/accept")
+def accept_metadata(suggestion_id: int):
+    try:
+        media_item_id = accept_metadata_suggestion(get_database(), suggestion_id)
+    except ReviewFailure as error:
+        return _review_error(error)
+    return jsonify({"status": "accepted", "media_item_id": media_item_id})
+
+
+@review_blueprint.post("/api/v1/metadata-suggestions/<int:suggestion_id>/reject")
+def reject_metadata(suggestion_id: int):
+    try:
+        reject_metadata_suggestion(get_database(), suggestion_id)
+    except ReviewFailure as error:
+        return _review_error(error)
+    return jsonify({"status": "rejected"})
+
+
 def _review_row(review_id):
     return get_database().execute(
         "SELECT review.id, review.reason, review.status, review.created_at, "
@@ -162,6 +245,32 @@ def _serialize(row):
         "file_size": row["file_size"], "created_at": row["created_at"],
         "content_url": f"/api/v1/review-items/{review_id}/content",
         "thumbnail_url": f"/api/v1/review-items/{review_id}/thumbnail",
+    }
+
+
+def _serialize_metadata(row):
+    return {
+        "id": row["id"], "kind": "metadata", "suggestion_id": row["id"],
+        "media_id": row["media_item_id"], "reason": "metadata_update",
+        "status": "pending", "original_name": f"Media #{row['media_item_id']}",
+        "type": row["media_type"], "width": row["width"], "height": row["height"],
+        "file_size": row["file_size"], "created_at": row["created_at"],
+        "thumbnail_url": f"/api/v1/media/{row['media_item_id']}/thumbnail",
+        "content_url": f"/api/v1/media/{row['media_item_id']}/content",
+        "source_metadata": _metadata_summary(row["source_metadata_json"]),
+    }
+
+
+def _metadata_summary(raw):
+    try:
+        import json
+        payload = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return {
+        "parent_id": payload.get("parent_id"),
+        "character_tags": payload.get("character_tags", []),
+        "tag_count": len(payload.get("tags", [])),
     }
 
 

@@ -1,6 +1,7 @@
 from pathlib import Path
 import shutil
 from datetime import datetime, timezone
+import re
 
 from flask import Blueprint, current_app, jsonify, request, send_file
 
@@ -123,6 +124,12 @@ def _parse_query() -> tuple[LibraryQuery | None, str | None]:
         return None, "Media ID must be an integer."
     if media_id is not None and media_id < 1:
         return None, "Media ID must be a positive integer."
+    text = _optional_parameter("q")
+    remote_id = _optional_parameter("remote_id")
+    if remote_id is None and text:
+        parent_match = re.fullmatch(r"parent:(\d+)", text, re.IGNORECASE)
+        if parent_match:
+            remote_id, text = parent_match.group(1), None
     return LibraryQuery(
         limit=limit,
         offset=offset,
@@ -131,10 +138,12 @@ def _parse_query() -> tuple[LibraryQuery | None, str | None]:
         author=_optional_parameter("author"),
         domain=_optional_parameter("domain"),
         media_type=media_type,
-        text=_optional_parameter("q"),
+        text=text,
         media_id=media_id,
         tags=tuple(value.strip().lower() for value in request.args.getlist("tag") if value.strip()),
         excluded_tags=tuple(value.strip().lower() for value in request.args.getlist("exclude_tag") if value.strip()),
+        parent_id=_optional_parameter("parent_id"),
+        remote_id=remote_id,
     ), None
 
 
@@ -169,6 +178,13 @@ def _serialize(item: MediaItem) -> dict[str, object]:
         "is_edited": bool(item.edit_operations),
         "edit_operations": list(item.edit_operations),
         "tags": list(item.tags),
+        "character_tags": list(item.character_tags),
+        "characters": list(item.character_tags),
+        "parent_id": item.parent_id,
+        "parent_media_id": item.parent_media_id,
+        "remote_id": item.remote_id,
+        "parent_url": item.parent_url,
+        "has_parent": bool(item.parent_id),
         "content_url": f"/api/v1/media/{item.id}/content?revision={item.active_revision_id or 0}",
         "thumbnail_url": f"/api/v1/media/{item.id}/thumbnail?revision={item.active_revision_id or 0}",
     }

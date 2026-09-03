@@ -13,6 +13,12 @@ class SourceMedia:
     domain: str
     tags: tuple[str, ...]
     file_extension: str
+    character_tags: tuple[str, ...] = ()
+    parent_id: str | None = None
+
+    @property
+    def characters(self) -> tuple[str, ...]:
+        return self.character_tags
 
 
 @dataclass(frozen=True)

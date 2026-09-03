@@ -276,15 +276,17 @@ async function showLibrary() {
     const query = '';
     const authorFilter = parsedSearch.authors.length ? `&author=${encodeURIComponent(parsedSearch.authors.at(-1))}` : '';
     const idFilter = parsedSearch.mediaIds.length ? `&id=${parsedSearch.mediaIds.at(-1)}` : '';
+    const parentFilter = parsedSearch.parentIds?.length ? `&remote_id=${encodeURIComponent(parsedSearch.parentIds.at(-1))}` : '';
     const type = document.querySelector('#mediaType').value;
     const filters = `${parsedSearch.includedTags.map(tag => `&tag=${encodeURIComponent(tag)}`).join('')}${parsedSearch.excludedTags.map(tag => `&exclude_tag=${encodeURIComponent(tag)}`).join('')}`;
     saveViewState('library', {search:librarySearch, offset:libraryOffset, mediaType:type});
-    const data = await api(`/api/v1/media?limit=${pageSize}&offset=${libraryOffset}&q=${query}&type=${type}${authorFilter}${idFilter}${filters}`);
+    const data = await api(`/api/v1/media?limit=${pageSize}&offset=${libraryOffset}&q=${query}&type=${type}${authorFilter}${idFilter}${parentFilter}${filters}`);
     meta.textContent = `${data.page.total} files`;
     statusText.textContent = `Showing ${data.items.length}`;
     document.querySelector('#activeFilters').innerHTML = activeFiltersHtml();
-    document.querySelector('#gallery').innerHTML = data.items.length ? data.items.map(item => `<button class="media-card" data-id="${item.id}"><span class="media-card-preview"><img loading="lazy" src="${item.thumbnail_url}" alt="">${item.is_edited?`<span class="edited-marker" title="Edited: ${esc(editSummary(item.edit_operations))}"><i data-lucide="wand-sparkles"></i></span>`:''}</span><span class="media-card-body"><strong>${esc(item.author || 'Unknown author')}</strong><small>${esc(item.domain || item.type)} · ${item.width || '?'}×${item.height || '?'}</small></span></button>`).join('') : '<div class="empty">The library is empty</div>';
+    document.querySelector('#gallery').innerHTML = data.items.length ? data.items.map(item => `<button class="media-card" data-id="${item.id}"><span class="media-card-preview"><img loading="lazy" src="${item.thumbnail_url}" alt="">${item.is_edited?`<span class="edited-marker" title="Edited: ${esc(editSummary(item.edit_operations))}"><i data-lucide="wand-sparkles"></i></span>`:''}${item.has_parent?`<span class="parent-marker" data-parent-media-id="${item.parent_media_id || ''}" data-parent-remote-id="${esc(item.parent_id || '')}" title="Has parent"><i data-lucide="corner-left-up"></i></span>`:''}</span><span class="media-card-body"><strong>${esc(item.author || 'Unknown author')}</strong><small>${esc(item.domain || item.type)} · ${item.width || '?'}×${item.height || '?'}</small></span></button>`).join('') : '<div class="empty">The library is empty</div>';
     document.querySelectorAll('.media-card').forEach(card => card.onclick = () => inspectMedia(Number(card.dataset.id)));
+    document.querySelectorAll('.parent-marker').forEach(marker => marker.onclick = event => { event.stopPropagation(); const localId=Number(marker.dataset.parentMediaId||0); appendSearchTerm(localId ? `id:${localId}` : `parent:${marker.dataset.parentRemoteId}`); });
     if (selectedMedia) document.querySelector(`.media-card[data-id="${selectedMedia.id}"]`)?.classList.add('selected');
     const from = data.page.total ? libraryOffset + 1 : 0;
     const to = Math.min(libraryOffset + data.items.length, data.page.total);
@@ -356,7 +358,9 @@ async function inspectMedia(id) {
   const preview = selectedMedia.type === 'video' ? `<video class="inspector-preview" src="${selectedMedia.content_url}" controls></video>` : `<img class="inspector-preview" src="${selectedMedia.content_url}" alt="">`;
   pane.classList.add('has-media');
   const edits=selectedMedia.is_edited?`<div class="field"><label>Edits</label><span class="edit-description"><i data-lucide="wand-sparkles"></i>${esc(editSummary(selectedMedia.edit_operations))}</span></div>`:'';
-  pane.innerHTML = `<button id="closeInspector" class="icon-btn inspector-close" title="Close"><i data-lucide="x"></i></button>${preview}<h2>${esc(selectedMedia.author || 'Unknown author')}</h2><div class="field"><label>Media ID</label><button type="button" id="searchMediaId" class="text-link">${selectedMedia.id}</button></div><div class="field"><label>Source</label><a href="${esc(selectedMedia.source_url || '#')}" target="_blank" rel="noopener" class="ellipsis">${esc(selectedMedia.source_url || 'Not specified')}</a></div><div class="field"><label>Size</label>${selectedMedia.width || '?'} × ${selectedMedia.height || '?'} · ${formatBytes(selectedMedia.file_size)}</div>${edits}<details class="tag-section field" open><summary><span>Tags</span><span class="badge">${selectedMedia.tags.length}</span></summary><div class="tag-scroll"><div class="tags">${selectedMedia.tags.map(tagHtml).join('') || 'No tags'}</div></div></details><div class="form-actions inspector-actions"><a class="icon-btn" href="${selectedMedia.content_url}" target="_blank" rel="noopener" title="Open full size"><i data-lucide="maximize-2"></i></a><button id="openEditor" class="btn"><i data-lucide="panel-top-open"></i>Open in Editor</button>${selectedMedia.type==='image'?'<button id="replaceMediaBackground" class="btn"><i data-lucide="image-plus"></i>Replace background</button>':''}<button id="addCollection" class="btn"><i data-lucide="folder-plus"></i>Build collection</button><button id="deleteMedia" class="icon-btn danger" title="Delete"><i data-lucide="trash-2"></i></button></div>`;
+  const parentField = selectedMedia.has_parent ? `<div class="field parent-field"><label>Parent</label>${selectedMedia.parent_media_id ? `<button type="button" id="searchParentMedia" class="text-link">Media #${selectedMedia.parent_media_id}</button>` : `<button type="button" id="searchParentRemote" class="text-link">Post #${esc(selectedMedia.parent_id)}</button>`}${selectedMedia.parent_url ? ` <a href="${esc(selectedMedia.parent_url)}" target="_blank" rel="noopener" title="Open parent source"><i data-lucide="external-link"></i></a>` : ''}</div>` : '';
+  const characters = selectedMedia.character_tags?.length ? `<div class="field"><label>Characters</label><div class="tags">${selectedMedia.character_tags.map(tagHtml).join('')}</div></div>` : '';
+  pane.innerHTML = `<button id="closeInspector" class="icon-btn inspector-close" title="Close"><i data-lucide="x"></i></button>${preview}<h2>${esc(selectedMedia.author || 'Unknown author')}</h2><div class="field"><label>Media ID</label><button type="button" id="searchMediaId" class="text-link">${selectedMedia.id}</button></div><div class="field"><label>Source</label><a href="${esc(selectedMedia.source_url || '#')}" target="_blank" rel="noopener" class="ellipsis">${esc(selectedMedia.source_url || 'Not specified')}</a></div>${parentField}${characters}<div class="field"><label>Size</label>${selectedMedia.width || '?'} × ${selectedMedia.height || '?'} · ${formatBytes(selectedMedia.file_size)}</div>${edits}<details class="tag-section field" open><summary><span>Tags</span><span class="badge">${selectedMedia.tags.length}</span></summary><div class="tag-scroll"><div class="tags">${selectedMedia.tags.map(tagHtml).join('') || 'No tags'}</div></div></details><div class="form-actions inspector-actions"><a class="icon-btn" href="${selectedMedia.content_url}" target="_blank" rel="noopener" title="Open full size"><i data-lucide="maximize-2"></i></a>${selectedMedia.source_url?'<button id="refreshMetadata" class="btn"><i data-lucide="refresh-cw"></i>Refresh metadata</button>':''}<button id="openEditor" class="btn"><i data-lucide="panel-top-open"></i>Open in Editor</button>${selectedMedia.type==='image'?'<button id="replaceMediaBackground" class="btn"><i data-lucide="image-plus"></i>Replace background</button>':''}<button id="addCollection" class="btn"><i data-lucide="folder-plus"></i>Build collection</button><button id="deleteMedia" class="icon-btn danger" title="Delete"><i data-lucide="trash-2"></i></button></div>`;
   const authorHeading = pane.querySelector('h2');
   authorHeading.insertAdjacentHTML('beforebegin', '<div class="field author-field"><label>Author</label></div>');
   authorHeading.className = 'author-value';
@@ -366,6 +370,9 @@ async function inspectMedia(id) {
   bindAuthorFilters(pane);
   document.querySelector('#closeInspector').onclick = () => { pane.classList.remove('has-media'); selectedMedia=null; saveViewState('library',{selectedMediaId:null}); };
   document.querySelector('#searchMediaId').onclick = () => { librarySearch=`id:${id}`; libraryOffset=0; document.querySelector('#search').value=librarySearch; reloadLibrary(); };
+  const parentSearch = (selectedMedia.parent_media_id ? `id:${selectedMedia.parent_media_id}` : `parent:${selectedMedia.parent_id}`);
+  document.querySelector('#searchParentMedia')?.addEventListener('click', () => { librarySearch=parentSearch; libraryOffset=0; document.querySelector('#search').value=librarySearch; reloadLibrary(); });
+  document.querySelector('#searchParentRemote')?.addEventListener('click', () => { librarySearch=parentSearch; libraryOffset=0; document.querySelector('#search').value=librarySearch; reloadLibrary(); });
   pane.querySelectorAll('[data-include-tag]').forEach(node => {
     const include = () => appendSearchTerm(node.dataset.includeTag);
     node.onclick = event => { if (!event.target.closest('[data-exclude-tag]')) include(); };
@@ -377,6 +384,8 @@ async function inspectMedia(id) {
   document.querySelector('#openEditor').onclick = () => { saveViewState('editor',{targetMediaId:id,analysisId:null,backgroundOpen:false}); navigate('editor'); };
   const replaceBackground=document.querySelector('#replaceMediaBackground');
   if(replaceBackground)replaceBackground.onclick=()=>{saveViewState('editor',{targetMediaId:id,analysisId:null,backgroundOpen:true});navigate('editor')};
+  const refreshMetadata = document.querySelector('#refreshMetadata');
+  if (refreshMetadata) refreshMetadata.onclick = async () => { try { const job = await api(`/api/v1/media/${id}/metadata-refresh`, {method:'POST'}); await waitForJob(job.status_url); toast('Metadata refresh is ready in Review'); refreshCounts(); } catch(error) { toast(error.message,true); } };
   icons();
 }
 
@@ -406,7 +415,9 @@ async function showImport() {
 async function showReview() {
   setHeader('Review');
   const data = await api('/api/v1/review-items?limit=100');
-  const sourceItems = data.items.map(item => `<article class="queue-item"><img src="${item.thumbnail_url}" alt=""><div><strong>${esc(item.original_name)}</strong><small class="ellipsis">${esc(item.reason)} · ${item.width || '?'}×${item.height || '?'}</small></div><div class="actions"><button class="btn accept" data-id="${item.id}"><i data-lucide="check"></i>Accept</button><button class="btn source" data-id="${item.id}"><i data-lucide="link"></i>Source</button><button class="icon-btn danger reject" data-id="${item.id}" title="Reject"><i data-lucide="trash-2"></i></button></div></article>`).join('');
+  const sourceItems = data.items.map(item => item.kind === 'metadata'
+    ? `<article class="queue-item"><img src="${item.thumbnail_url}" alt=""><div><strong>Media #${item.media_id}</strong><small class="ellipsis">Metadata update · ${item.source_metadata?.parent_id ? `parent #${esc(item.source_metadata.parent_id)}` : 'no parent'} · ${Number(item.source_metadata?.tag_count || 0)} tags</small></div><div class="actions"><button class="icon-btn open-review-media" data-media-id="${item.media_id}" title="Open in Library"><i data-lucide="images"></i></button><button class="btn accept-metadata" data-id="${item.suggestion_id}"><i data-lucide="check"></i>Apply</button><button class="icon-btn danger reject-metadata" data-id="${item.suggestion_id}" title="Ignore"><i data-lucide="trash-2"></i></button></div></article>`
+    : `<article class="queue-item"><img src="${item.thumbnail_url}" alt=""><div><strong>${esc(item.original_name)}</strong><small class="ellipsis">${esc(item.reason)} · ${item.width || '?'}×${item.height || '?'}</small></div><div class="actions"><button class="btn accept" data-id="${item.id}"><i data-lucide="check"></i>Accept</button><button class="btn source" data-id="${item.id}"><i data-lucide="link"></i>Source</button><button class="icon-btn danger reject" data-id="${item.id}" title="Reject"><i data-lucide="trash-2"></i></button></div></article>`).join('');
   const groups = data.items.reduce((acc,item)=>(acc[item.reason]=(acc[item.reason]||0)+1,acc),{});
   const summary = Object.entries(groups).map(([reason,count])=>`<span class="badge">${esc(reason)}: ${count}</span>`).join('');
   workspace.innerHTML = `<div class="page"><div class="page-head"><h2>Needs attention</h2><span class="badge">${data.page.total}</span></div><div class="review-summary">${summary}</div><div class="item-list">${sourceItems || '<div class="empty">Nothing needs review</div>'}</div></div>`;
@@ -417,6 +428,9 @@ async function showReview() {
     try { await runJob(() => api(`/api/v1/review-items/${node.dataset.id}/source`,{method:'POST',body:JSON.stringify({url})})); toast('Source applied'); showReview(); }
     catch (error) { toast(error.message,true); }
   });
+  document.querySelectorAll('.accept-metadata').forEach(node => node.onclick = async () => { try { await api(`/api/v1/metadata-suggestions/${node.dataset.id}/accept`,{method:'POST'}); toast('Metadata applied'); showReview(); } catch(error) { toast(error.message,true); } });
+  document.querySelectorAll('.reject-metadata').forEach(node => node.onclick = async () => { try { await api(`/api/v1/metadata-suggestions/${node.dataset.id}/reject`,{method:'POST'}); toast('Metadata ignored'); showReview(); } catch(error) { toast(error.message,true); } });
+  document.querySelectorAll('.open-review-media').forEach(node => node.onclick = () => openMediaInLibrary(Number(node.dataset.mediaId)));
   meta.textContent = `${data.page.total} awaiting review`; icons(); await refreshCounts();
 }
 

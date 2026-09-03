@@ -23,6 +23,15 @@ class MediaItem:
     edit_operations: tuple[str, ...]
     created_at: str
     tags: tuple[str, ...]
+    character_tags: tuple[str, ...] = ()
+    parent_id: str | None = None
+    parent_media_id: int | None = None
+    remote_id: str | None = None
+    parent_url: str | None = None
+
+    @property
+    def characters(self) -> tuple[str, ...]:
+        return self.character_tags
 
 
 @dataclass(frozen=True)
@@ -38,6 +47,8 @@ class LibraryQuery:
     media_id: int | None = None
     tags: tuple[str, ...] = ()
     excluded_tags: tuple[str, ...] = ()
+    parent_id: str | None = None
+    remote_id: str | None = None
 
 
 @dataclass(frozen=True)

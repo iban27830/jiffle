@@ -36,11 +36,16 @@ class GelbooruSourceProvider:
             direct_url = post["file_url"]
         except (requests.RequestException, KeyError, IndexError, TypeError, ValueError) as error:
             raise SourceProviderFailure("import.provider_unavailable", "Gelbooru metadata could not be loaded.") from error
+        raw_parent_id = post.get("parent_id")
+        parent_id = str(raw_parent_id) if raw_parent_id not in (None, "", 0, "0") else None
+        raw_characters = post.get("character") or post.get("tag_string_character") or ""
+        character_tags = tuple(str(raw_characters).split()) if isinstance(raw_characters, str) else tuple(str(value) for value in raw_characters)
         return SourceMedia(
             canonical_url=url, direct_media_url=direct_url, provider=self.provider_name,
             remote_id=str(post_id), author=post.get("owner") or None, domain=domain,
             tags=tuple(str(post.get("tags", "")).split()),
             file_extension=PurePosixPath(urlparse(direct_url).path).suffix or ".jpg",
+            character_tags=character_tags, parent_id=parent_id,
         )
 
     def check_connection(self):

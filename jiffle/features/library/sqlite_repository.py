@@ -1,3 +1,5 @@
+import json
+import re
 import sqlite3
 
 from jiffle.features.library.domain import (
@@ -36,14 +38,24 @@ class SqliteLibraryRepository:
         # Older imports may have left media_items.author empty while retaining
         # the provider metadata in media_sources. Use that metadata for display.
         author = row["author"]
-        if not author:
+        keys = set(row.keys())
+        source_row = None
+        if _table_has_column(self.connection, "media_sources", "media_item_id"):
             source_row = self.connection.execute(
-                "SELECT author FROM media_sources "
-                "WHERE media_item_id = ? AND author IS NOT NULL AND TRIM(author) <> '' "
-                "LIMIT 1",
+                "SELECT * FROM media_sources WHERE media_item_id = ? LIMIT 1",
                 (row["id"],),
             ).fetchone()
-            author = source_row["author"] if source_row else None
+        if not author:
+            if source_row is not None and source_row["author"]:
+                author = source_row["author"]
+            else:
+                author_row = self.connection.execute(
+                    "SELECT author FROM media_sources "
+                    "WHERE media_item_id = ? AND author IS NOT NULL AND TRIM(author) <> '' "
+                    "LIMIT 1",
+                    (row["id"],),
+                ).fetchone() if _table_has_column(self.connection, "media_sources", "author") else None
+                author = author_row["author"] if author_row else None
         tags = tuple(
             tag_row[0]
             for tag_row in self.connection.execute(
@@ -51,6 +63,29 @@ class SqliteLibraryRepository:
                 (row["id"],),
             )
         )
+        parent_id = row["parent_id"] if "parent_id" in keys else None
+        character_tags = _decode_tags(row["character_tags_json"] if "character_tags_json" in keys else None)
+        remote_id = None
+        parent_media_id = None
+        parent_url = None
+        if source_row is not None:
+            remote_id = source_row["remote_id"] if "remote_id" in source_row.keys() else None
+            if parent_id is None and "parent_id" in source_row.keys():
+                parent_id = source_row["parent_id"]
+            if not character_tags and "character_tags_json" in source_row.keys():
+                character_tags = _decode_tags(source_row["character_tags_json"])
+            if remote_id and "provider" in source_row.keys() and parent_id:
+                parent = self.connection.execute(
+                    "SELECT item.id FROM media_items item "
+                    "JOIN media_sources source ON source.media_item_id=item.id "
+                    "WHERE item.deleted_at IS NULL AND source.provider=? AND source.remote_id=? "
+                    "LIMIT 1",
+                    (source_row["provider"], parent_id),
+                ).fetchone()
+                parent_media_id = int(parent[0]) if parent else None
+            if parent_id:
+                canonical = source_row["canonical_url"] if "canonical_url" in source_row.keys() else None
+                parent_url = _parent_url(canonical or row["source_url"] or "", parent_id) or None
         return MediaItem(
             id=row["id"],
             file_path=row["file_path"],
@@ -67,6 +102,11 @@ class SqliteLibraryRepository:
             if "active_revision_id" in row.keys() else (),
             created_at=row["created_at"],
             tags=tags,
+            character_tags=character_tags,
+            parent_id=parent_id,
+            parent_media_id=parent_media_id,
+            remote_id=remote_id,
+            parent_url=parent_url,
         )
 
 
@@ -109,6 +149,16 @@ def _build_filter(query: LibraryQuery, connection) -> tuple[str, tuple[object, .
     if query.media_type:
         clauses.append("item.media_type = ?")
         parameters.append(query.media_type.value)
+    if query.parent_id:
+        if _table_has_column(connection, "media_items", "parent_id"):
+            clauses.append("item.parent_id = ?")
+            parameters.append(query.parent_id)
+        else:
+            clauses.append("EXISTS (SELECT 1 FROM media_sources source WHERE source.media_item_id=item.id AND source.parent_id = ?)")
+            parameters.append(query.parent_id)
+    if query.remote_id:
+        clauses.append("EXISTS (SELECT 1 FROM media_sources source WHERE source.media_item_id=item.id AND source.remote_id = ?)")
+        parameters.append(query.remote_id)
     if query.text:
         pattern = f"%{query.text}%"
         clauses.append(
@@ -119,3 +169,27 @@ def _build_filter(query: LibraryQuery, connection) -> tuple[str, tuple[object, .
         parameters.extend((pattern, pattern, pattern, pattern))
     where_sql = "WHERE " + " AND ".join(clauses) if clauses else ""
     return where_sql, tuple(parameters)
+
+
+def _table_has_column(connection: sqlite3.Connection, table: str, column: str) -> bool:
+    return any(row[1] == column for row in connection.execute(f"PRAGMA table_info({table})"))
+
+
+def _decode_tags(raw) -> tuple[str, ...]:
+    if not raw:
+        return ()
+    try:
+        values = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return ()
+    return tuple(str(value) for value in values if str(value).strip()) if isinstance(values, (list, tuple)) else ()
+
+
+def _parent_url(canonical_url: str, parent_id: str) -> str:
+    if "/posts/" in canonical_url:
+        return re.sub(r"(/posts/)\d+", rf"\g<1>{parent_id}", canonical_url)
+    if "id=" in canonical_url:
+        return re.sub(r"([?&]id=)\d+", rf"\g<1>{parent_id}", canonical_url)
+    if "/view/" in canonical_url:
+        return re.sub(r"(/view/)\d+", rf"\g<1>{parent_id}", canonical_url)
+    return canonical_url
