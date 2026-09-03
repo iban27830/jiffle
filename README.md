@@ -10,10 +10,16 @@ Jiffle is a local application for importing, organizing, tagging, editing, and c
 
 ## Installation
 
-Open PowerShell in the Jiffle folder and install the required packages:
+Open PowerShell in the Jiffle folder and start the application:
 
 ```powershell
-python -m pip install flask requests pillow
+python .\run.py
+```
+
+On the first run Jiffle checks for the Python packages it needs (Flask, Pillow, Requests, ImageHash, and OpenCV for video thumbnails and video imports) and installs any missing ones through pip. The first start therefore requires an internet connection and can take a few minutes. If you prefer to install everything up front, run:
+
+```powershell
+python -m pip install -r requirements.txt
 ```
 
 For NVIDIA GPU background removal, install the CUDA 12.8 PyTorch builds in the same Python environment:
@@ -128,7 +134,8 @@ If **Test access** reports an invalid token, create a new read token and replace
 ## Troubleshooting
 
 - If `python` is not recognized, install Python and enable **Add Python to PATH** during installation.
-- If startup or background removal reports that a runtime package is missing, keep Jiffle connected to the network and retry the action in the same Python environment used to start it. The error names the missing package, such as `einops`; install that package and restart Jiffle if automatic installation is blocked by permissions.
+- If startup reports that a required package is missing, Jiffle normally installs it automatically on the next start when an internet connection is available. If automatic installation is blocked by permissions or the network, install the packages manually with `python -m pip install -r requirements.txt` in the Jiffle folder and restart Jiffle.
+- If background removal reports that a runtime package is missing, keep Jiffle connected to the network and retry the action in the same Python environment used to start it. The error names the missing package, such as `einops`; install that package and restart Jiffle if automatic installation is blocked by permissions.
 - If the page does not open automatically, visit `http://127.0.0.1:5001/` manually.
 - If an online import fails, check the source credentials under **Settings** and confirm that the source URL is accessible in a browser.
 - If Vision crop analysis fails, verify that the configured model accepts images and returns JSON coordinates. Local crop scanning and manual crop controls remain available without a model.
