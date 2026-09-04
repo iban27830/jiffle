@@ -85,10 +85,10 @@ For an older installation whose updater still reports that Git is missing, downl
 
 ### Import media
 
-1. Open **Import**.
-2. Enter a local file path or a supported source URL.
-3. Select **Import** or **Download**.
-4. Review files that require confirmation under **Review**.
+Open **Import**. It has one window for every import type: drag a local image/video,
+drag a browser link, paste an image from the clipboard, or enter a URL and select
+**Resolve and import**. Jiffle detects whether the input is a local file, a post
+link, or a direct media URL and keeps the progress entry in **Import history**.
 
 Supported online sources include:
 
@@ -101,9 +101,17 @@ Supported online sources include:
 
 Some sources require account credentials configured under **Settings**. A direct image URL is also accepted; Jiffle downloads it, calculates its hash, and checks it for duplicates before placing it in the library or Review.
 
-To find where an image is already published, use **Import → Find source**. Drop or paste an image into the search area, or enter a supported post URL, then open one of the exact matches. Jiffle calculates the file's MD5 and checks the APIs of sources that support exact hash search; it does not upload the image to a search service. An **Import** button is shown when a matched post has downloadable media.
+Jiffle first checks the local library and then searches supported providers for an
+exact MD5 copy. A downloaded copy is checked again locally before it is accepted,
+so an unavailable source or an incorrect media response is skipped automatically.
 
-For a deleted e621 post, e621 can still return the file's MD5 in its JSON metadata. Paste that post URL into **Find source** and Jiffle can use the MD5 to search TBIB and other supported sources. Exact matching requires the same file bytes; resized, recompressed, or edited copies need a perceptual or external reverse-image search and may not be found by this feature.
+For a deleted e621 post, e621 can still return the file's MD5 in its JSON metadata.
+Paste that post URL into the same Import window and Jiffle can use the MD5 to search
+TBIB and other supported sources. If no exact copy is downloadable, Jiffle checks
+local perceptual fingerprints and can query IQDB for an approximate match. Results
+below 80% similarity are ignored. Exact matching requires the same file bytes;
+resized, recompressed, or edited copies may therefore appear as Review choices
+instead of being imported automatically.
 
 For an e621 or e926 post set, Jiffle first checks the complete set (using the saved e621 username and API key when configured), then downloads the posts one at a time in the set's order. The set itself is not added as a local collection. A private set or a set that cannot be accessed fails before any files are downloaded. A set that contains an unavailable post can finish partially; the Import history entry lists that post and the reason.
 
@@ -134,7 +142,18 @@ For an e621 or e926 post set, Jiffle first checks the complete set (using the sa
 
 ### Import and review
 
-Open **Import** and drop an image, video, or browser link into the drop area, or paste a supported source URL. The attempt appears in Import history immediately with an **Importing** status while downloading and parsing continue. Its status changes when processing finishes. Repeated imports of the same file or link do not add another item to **Review** when an identical file is already waiting there. Items needing a decision appear in **Review**, where the total and counts by reason are shown. Accept an item to add it to the library, provide a source when requested, or reject it.
+The attempt appears in Import history immediately with an **Importing** status while
+downloading and resolving continue. Its status changes to Imported, Already
+imported, Waiting for review, or Import failed. Repeated imports of the same file
+do not create another pending Review item.
+
+When several source pages match at 80% or more, Review shows one card for the
+submitted file and a list of source candidates with provider, remote ID, confidence,
+dimensions, and a preview. Select **Use this source** to keep one candidate and its
+metadata; the other staged files are removed. **Reject** removes the whole group.
+When no usable source is found, the existing **Source** action remains available as
+a manual fallback. The history entry records the submitted input, resolution method,
+providers checked, and the URL that supplied the accepted file.
 
 Metadata refreshes for existing source-backed items also appear in **Review** as **Metadata update** entries. They are suggestions until you apply them, so a refresh cannot silently replace your current tags or parent relationship.
 
