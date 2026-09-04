@@ -77,6 +77,25 @@ def run_universal_import_job(
         source_path = Path(submitted_input)
         original_path: Path
         if input_kind == "url":
+            normalized_input = normalize_source_url(submitted_input)
+            candidate_id = _candidate_id(connection, job_id)
+            blocked_source = connection.execute(
+                "SELECT 1 FROM blocked_media_signatures WHERE source_url=?",
+                (normalized_input,),
+            ).fetchone()
+            if blocked_source and settings.block_previously_deleted:
+                raise ImportFailure("import.previously_deleted", "This source was previously deleted and is blocked by settings.")
+            existing_source = _existing_source(connection, normalized_input)
+            if existing_source:
+                _set_candidate_result(connection, candidate_id, "duplicate", existing_source)
+                details.update({"resolution_method": "source", "resolved_source_url": normalized_input})
+                _finish(
+                    connection,
+                    job_id,
+                    {"outcome": "duplicate", "candidate_id": candidate_id, "media_item_id": existing_source},
+                    details,
+                )
+                return
             original_path, source, metadata_errors = _resolve_url_metadata(
                 submitted_input, providers
             )
@@ -87,15 +106,11 @@ def run_universal_import_job(
                 ).fetchone()
                 if blocked_source and settings.block_previously_deleted:
                     raise ImportFailure("import.previously_deleted", "This source was previously deleted and is blocked by settings.")
-                existing_source = connection.execute(
-                    "SELECT source.media_item_id FROM media_sources source JOIN media_items item ON item.id=source.media_item_id "
-                    "WHERE source.canonical_url=? AND item.deleted_at IS NULL", (source.canonical_url,)
-                ).fetchone()
+                existing_source = _existing_source(connection, source.canonical_url)
                 if existing_source:
-                    candidate_id = _candidate_id(connection, job_id)
-                    _set_candidate_result(connection, candidate_id, "duplicate", int(existing_source[0]))
+                    _set_candidate_result(connection, candidate_id, "duplicate", existing_source)
                     details.update({"resolution_method": "source", "resolved_source_url": source.canonical_url})
-                    _finish(connection, job_id, {"outcome": "duplicate", "candidate_id": candidate_id, "media_item_id": int(existing_source[0])}, details)
+                    _finish(connection, job_id, {"outcome": "duplicate", "candidate_id": candidate_id, "media_item_id": existing_source}, details)
                     return
             if source is not None and source.direct_media_url:
                 settings.resolved_import_staging_path.mkdir(parents=True, exist_ok=True)
@@ -111,7 +126,8 @@ def run_universal_import_job(
             if original_path is not None:
                 temporary.append(original_path)
                 result = _accept_downloaded(
-                    connection, settings, job_id, original_path, source, submitted_input
+                    connection, settings, job_id, original_path, source, submitted_input,
+                    source_url_override=normalized_input,
                 )
                 details.update({
                     "resolution_method": "source",
@@ -148,7 +164,10 @@ def run_universal_import_job(
                         downloaded.unlink(missing_ok=True)
                         continue
                     source = _match_to_source(match)
-                    result = _accept_downloaded(connection, settings, job_id, downloaded, source, submitted_input)
+                    result = _accept_downloaded(
+                        connection, settings, job_id, downloaded, source, submitted_input,
+                        source_url_override=normalized_input,
+                    )
                     details.update({"resolution_method": "exact", "resolved_source_url": match.canonical_url})
                     _finish(connection, job_id, result, details)
                     downloaded.unlink(missing_ok=True)
@@ -459,13 +478,21 @@ def _match_to_source(match: SourceMatch) -> SourceMedia:
     )
 
 
-def _accept_downloaded(connection, settings, job_id, path, source, submitted_input):
+def _accept_downloaded(
+    connection, settings, job_id, path, source, submitted_input,
+    source_url_override=None,
+):
     inspection = inspect_media(path)
     existing = connection.execute("SELECT id FROM media_items WHERE content_hash=?", (inspection.content_hash,)).fetchone()
     candidate_id = _candidate_id(connection, job_id)
     if existing:
         if source:
             _store_source(connection, int(existing[0]), source)
+        if source_url_override:
+            connection.execute(
+                "UPDATE media_items SET source_url=? WHERE id=?",
+                (source_url_override, int(existing[0])),
+            )
         _set_candidate_result(connection, candidate_id, "duplicate", int(existing[0]))
         return {"outcome": "duplicate", "candidate_id": candidate_id, "media_item_id": int(existing[0])}
     stored = atomic_copy(path, settings.media_path, "media")
@@ -473,7 +500,7 @@ def _accept_downloaded(connection, settings, job_id, path, source, submitted_inp
         cursor = connection.execute(
             "INSERT INTO media_items (file_path, media_type, source_url, author, domain, width, height, file_size, content_hash) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (stored, inspection.media_type, source.canonical_url if source else None,
+            (stored, inspection.media_type, source_url_override or (source.canonical_url if source else None),
              source.author if source else None, source.domain if source else None,
              inspection.width, inspection.height, inspection.file_size, inspection.content_hash),
         )
@@ -514,6 +541,17 @@ def _store_source(connection, media_id, source):
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(media_item_id) DO UPDATE SET canonical_url=excluded.canonical_url, direct_media_url=excluded.direct_media_url, provider=excluded.provider, remote_id=excluded.remote_id, author=excluded.author, domain=excluded.domain, parent_id=excluded.parent_id, character_tags_json=excluded.character_tags_json",
         (media_id, source.canonical_url, source.direct_media_url, source.provider, source.remote_id, source.author, source.domain, source.parent_id, json.dumps(list(source.character_tags))),
     )
+
+
+def _existing_source(connection, canonical_url):
+    row = connection.execute(
+        "SELECT item.id FROM media_items item "
+        "LEFT JOIN media_sources source ON source.media_item_id=item.id "
+        "WHERE item.deleted_at IS NULL "
+        "AND (item.source_url=? OR source.canonical_url=?) LIMIT 1",
+        (canonical_url, canonical_url),
+    ).fetchone()
+    return int(row[0]) if row else None
 
 
 def _candidate_id(connection, job_id):
