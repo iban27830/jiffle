@@ -1,5 +1,6 @@
 """TBIB source and exact MD5 lookup adapter."""
 
+import time
 from pathlib import PurePosixPath
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -12,6 +13,8 @@ from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailu
 class TbibSourceProvider:
     provider_name = "tbib"
     domains = {"tbib.org", "www.tbib.org"}
+    api_hosts = ("tbib.org", "www.tbib.org")
+    max_attempts = 3
 
     def can_handle(self, url: str) -> bool:
         parsed = urlparse(url)
@@ -145,19 +148,65 @@ class TbibSourceProvider:
 
     @staticmethod
     def _get_json(url: str, params: dict[str, object]) -> object:
-        try:
-            response = requests.get(
-                url,
-                params=params,
-                headers={"User-Agent": "Jiffle/2.0", "Accept": "application/json"},
-                timeout=15,
-            )
-            response.raise_for_status()
-            return response.json()
-        except (requests.RequestException, ValueError, TypeError) as error:
-            raise SourceProviderFailure(
-                "import.provider_unavailable", "TBIB metadata could not be loaded."
-            ) from error
+        """Load DAPI JSON with transient retries and a host fallback.
+
+        The fallback is only for the API request.  Post and media URLs built
+        from the response keep their canonical TBIB host and are not rewritten.
+        """
+        parsed = urlparse(url)
+        hosts = [parsed.hostname] if parsed.hostname in TbibSourceProvider.api_hosts else [None]
+        if parsed.hostname in TbibSourceProvider.api_hosts:
+            hosts.append(next(host for host in TbibSourceProvider.api_hosts if host != parsed.hostname))
+        last_error: Exception | None = None
+        for host in hosts:
+            request_url = url
+            if host:
+                request_url = parsed._replace(netloc=host).geturl()
+            for attempt in range(TbibSourceProvider.max_attempts):
+                try:
+                    response = requests.get(
+                        request_url,
+                        params=params,
+                        headers={"User-Agent": "Jiffle/2.0", "Accept": "application/json"},
+                        timeout=15,
+                    )
+                    status = getattr(response, "status_code", None)
+                    try:
+                        status = int(status)
+                    except (TypeError, ValueError):
+                        status = None
+                    if status in (401, 403):
+                        raise SourceProviderFailure(
+                            "import.provider_auth_required",
+                            "TBIB requires authorization for this request.",
+                        )
+                    if status is not None and 500 <= status <= 599:
+                        last_error = requests.HTTPError(f"TBIB returned HTTP {status}")
+                        if attempt + 1 < TbibSourceProvider.max_attempts:
+                            time.sleep(0.05 * (attempt + 1))
+                            continue
+                        break
+                    response.raise_for_status()
+                    return response.json()
+                except SourceProviderFailure:
+                    raise
+                except (requests.Timeout, requests.ConnectionError) as error:
+                    last_error = error
+                    if attempt + 1 < TbibSourceProvider.max_attempts:
+                        time.sleep(0.05 * (attempt + 1))
+                        continue
+                    break
+                except requests.RequestException as error:
+                    raise SourceProviderFailure(
+                        "import.provider_unavailable", "TBIB metadata could not be loaded."
+                    ) from error
+                except (ValueError, TypeError) as error:
+                    raise SourceProviderFailure(
+                        "import.provider_unavailable", "TBIB metadata could not be loaded."
+                    ) from error
+        raise SourceProviderFailure(
+            "import.provider_unavailable", "TBIB metadata could not be loaded."
+        ) from last_error
 
 
 def _post_id(parsed) -> str | None:

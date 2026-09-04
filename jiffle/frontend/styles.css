@@ -167,6 +167,11 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
 .history-issues summary { cursor: pointer; color: var(--bad); }
 .history-issues ul { margin: 6px 0 0; padding-left: 18px; }
 .history-issues a { color: inherit; }
+.history-diagnostics { margin-top: 7px; color: var(--muted); }
+.history-diagnostics summary { cursor: pointer; color: var(--text); font-size: .88em; }
+.history-diagnostics ul { margin: 6px 0 0; padding-left: 18px; }
+.history-diagnostics li { margin: 3px 0; line-height: 1.4; }
+.history-diagnostics code { margin-left: 3px; color: var(--bad); font-size: .9em; }
 .spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .review-summary { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0 18px; }

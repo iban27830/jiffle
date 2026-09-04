@@ -34,6 +34,11 @@ class GelbooruSourceProvider:
             payload = response.json()
             post = payload["post"][0] if isinstance(payload, dict) else payload[0]
             direct_url = post["file_url"]
+        except requests.HTTPError as error:
+            failure = _http_auth_failure(error)
+            if failure:
+                raise failure from error
+            raise SourceProviderFailure("import.provider_unavailable", "Gelbooru metadata could not be loaded.") from error
         except (requests.RequestException, KeyError, IndexError, TypeError, ValueError) as error:
             raise SourceProviderFailure("import.provider_unavailable", "Gelbooru metadata could not be loaded.") from error
         raw_parent_id = post.get("parent_id")
@@ -71,6 +76,13 @@ class GelbooruSourceProvider:
             )
             response.raise_for_status()
             payload = response.json()
+        except requests.HTTPError as error:
+            failure = _http_auth_failure(error)
+            if failure:
+                raise failure from error
+            raise SourceProviderFailure(
+                "import.provider_unavailable", "Gelbooru search could not be loaded."
+            ) from error
         except (requests.RequestException, ValueError) as error:
             raise SourceProviderFailure(
                 "import.provider_unavailable", "Gelbooru search could not be loaded."
@@ -115,3 +127,16 @@ class GelbooruSourceProvider:
 def _valid_md5(value: str | None) -> str | None:
     value = str(value or "").strip().lower()
     return value if len(value) == 32 and all(c in "0123456789abcdef" for c in value) else None
+
+
+def _http_auth_failure(error):
+    status = getattr(getattr(error, "response", None), "status_code", None)
+    if status == 401:
+        return SourceProviderFailure(
+            "import.provider_auth_required", "Gelbooru credentials were rejected."
+        )
+    if status == 403:
+        return SourceProviderFailure(
+            "import.provider_access_denied", "Gelbooru denied access to this resource."
+        )
+    return None

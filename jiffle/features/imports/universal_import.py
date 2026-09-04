@@ -6,6 +6,7 @@ provides the single resolver used by the current Import screen.
 
 import hashlib
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import shutil
@@ -52,6 +53,10 @@ def create_universal_import_job(
         "resolution_method": "pending",
         "exact_candidates_checked": 0,
         "similar_candidates_found": 0,
+        "search_status": "no_result",
+        "search_state": "no_result",
+        "search_outcome": "no_result",
+        "provider_diagnostics": [],
     })
     connection.commit()
     return job_id
@@ -80,6 +85,11 @@ def run_universal_import_job(
         "resolved_source_url": None,
         "provider_errors": [],
         "provider_timings": [],
+        "provider_diagnostics": [],
+        "search_status": "no_result",
+        "search_state": "no_result",
+        "search_outcome": "no_result",
+        "source_download_failed": False,
         "timing": {"duration_ms": 0, "phases_ms": {}},
     }
     started_at = time.perf_counter()
@@ -101,6 +111,7 @@ def run_universal_import_job(
             if existing_source:
                 _set_candidate_result(connection, candidate_id, "duplicate", existing_source)
                 details.update({"resolution_method": "source", "resolved_source_url": normalized_input})
+                _set_search_status(details, "resolved")
                 _finish(
                     connection,
                     job_id,
@@ -109,9 +120,12 @@ def run_universal_import_job(
                 )
                 return
             original_path, source, metadata_errors = _resolve_url_metadata(
-                submitted_input, providers, details["provider_timings"], details["timing"]["phases_ms"]
+                submitted_input, providers, details["provider_timings"], details["timing"]["phases_ms"],
+                details["provider_diagnostics"],
             )
             details["provider_errors"] = metadata_errors
+            if metadata_errors:
+                _set_search_status(details, _status_from_errors(metadata_errors))
             if source is not None:
                 blocked_source = connection.execute(
                     "SELECT 1 FROM blocked_media_signatures WHERE source_url=?", (source.canonical_url,)
@@ -122,6 +136,7 @@ def run_universal_import_job(
                 if existing_source:
                     _set_candidate_result(connection, candidate_id, "duplicate", existing_source)
                     details.update({"resolution_method": "source", "resolved_source_url": source.canonical_url})
+                    _set_search_status(details, "resolved")
                     _finish(connection, job_id, {"outcome": "duplicate", "candidate_id": candidate_id, "media_item_id": existing_source}, details)
                     return
             if source is not None and source.direct_media_url:
@@ -133,9 +148,40 @@ def run_universal_import_job(
                     if source.content_md5 and _md5(original_path) != source.content_md5:
                         original_path.unlink(missing_ok=True)
                         original_path = None
-                except Exception:
+                        details["source_download_failed"] = True
+                        details.setdefault("provider_errors", []).append({
+                            "provider": source.provider,
+                            "code": "import.candidate_hash_mismatch",
+                            "message": "The downloaded source did not match the source hash.",
+                            "remote_id": source.remote_id,
+                        })
+                        _record_provider_diagnostic(
+                            details["provider_diagnostics"], "exact_download", source.provider, "unavailable", 0,
+                            "import.candidate_hash_mismatch",
+                            "The downloaded source did not match the source hash.",
+                            remote_id=source.remote_id,
+                        )
+                    else:
+                        _record_provider_diagnostic(
+                            details["provider_diagnostics"], "exact_download", source.provider, "matched", 1,
+                            remote_id=source.remote_id,
+                        )
+                except Exception as error:
                     original_path.unlink(missing_ok=True)
                     original_path = None
+                    details["source_download_failed"] = True
+                    details.setdefault("provider_errors", []).append({
+                        "provider": source.provider,
+                        "code": "import.candidate_unavailable",
+                        "message": _safe_error_message(error, "The source file was unavailable."),
+                        "remote_id": source.remote_id,
+                    })
+                    _record_provider_diagnostic(
+                        details["provider_diagnostics"], "exact_download", source.provider, "unavailable", 0,
+                        "import.candidate_unavailable",
+                        _safe_error_message(error, "The source file was unavailable."),
+                        remote_id=source.remote_id,
+                    )
                 details["timing"]["phases_ms"]["source_download"] = _elapsed_ms(source_download_started)
             if original_path is not None:
                 temporary.append(original_path)
@@ -147,6 +193,7 @@ def run_universal_import_job(
                     "resolution_method": result.get("resolution_method", "source"),
                     "resolved_source_url": source.canonical_url if source else submitted_input,
                 })
+                _set_search_status(details, "resolved")
                 _finish(connection, job_id, result, details)
                 return
             digest = source.content_md5 if source else None
@@ -164,12 +211,23 @@ def run_universal_import_job(
             if connection.execute("SELECT 1 FROM blocked_media_signatures WHERE content_hash=?", (digest,)).fetchone() and settings.block_previously_deleted:
                 raise ImportFailure("import.previously_deleted", "This media was previously deleted and is blocked by settings.")
             exact_started = time.perf_counter()
-            exact, errors = _search_exact(providers, digest, source_hint, details["provider_timings"])
+            exact, errors = _search_exact(
+                providers, digest, source_hint, details["provider_timings"], details["provider_diagnostics"]
+            )
             details["timing"]["phases_ms"]["exact_search"] = _elapsed_ms(exact_started)
             details["exact_candidates_checked"] = len(exact)
             details["provider_errors"] = list(details.get("provider_errors", [])) + errors
+            _set_search_status(
+                details,
+                "matched" if exact else (
+                    "candidate_download_failed" if details.get("source_download_failed")
+                    else _status_from_errors(errors)
+                ),
+            )
             download_started = time.perf_counter()
-            valid_candidates, download_errors = _download_exact_candidates(exact, digest, settings, downloader)
+            valid_candidates, download_errors = _download_exact_candidates(
+                exact, digest, settings, downloader, details["provider_diagnostics"]
+            )
             details["timing"]["phases_ms"]["exact_download"] = _elapsed_ms(download_started)
             details.setdefault("provider_errors", []).extend(download_errors)
             for match, downloaded in valid_candidates:
@@ -183,14 +241,21 @@ def run_universal_import_job(
                         "resolution_method": result.get("resolution_method", "exact"),
                         "resolved_source_url": match.canonical_url,
                     })
+                    _set_search_status(details, "resolved")
                     _finish(connection, job_id, result, details)
                     for _, other in valid_candidates:
                         other.unlink(missing_ok=True)
                     return
                 except Exception as error:
-                    details.setdefault("provider_errors", []).append({"provider": match.provider, "code": "import.candidate_unavailable", "message": str(error)})
+                    message = _safe_error_message(error, "The exact candidate was unavailable.")
+                    details.setdefault("provider_errors", []).append({"provider": match.provider, "code": "import.candidate_unavailable", "message": message, "remote_id": match.remote_id})
+                    _record_provider_diagnostic(details["provider_diagnostics"], "exact_download", match.provider, "unavailable", 0, "import.candidate_unavailable", message, remote_id=match.remote_id)
                 finally:
                     downloaded.unlink(missing_ok=True)
+            if exact and (download_errors or details.get("search_status") == "matched"):
+                _set_search_status(details, "candidate_download_failed")
+            elif details.get("search_status") not in {"network_error", "authorization_error"}:
+                _set_search_status(details, _status_from_errors(errors))
             raise ImportFailure("import.source_not_found", "No downloadable exact copy was found for this source.")
 
         inspection = inspect_media(original_path)
@@ -237,12 +302,17 @@ def run_universal_import_job(
         if not digest:
             digest = _md5(original_path)
         exact_started = time.perf_counter()
-        exact, errors = _search_exact(providers, digest, source_hint, details["provider_timings"])
+        exact, errors = _search_exact(
+            providers, digest, source_hint, details["provider_timings"], details["provider_diagnostics"]
+        )
         details["timing"]["phases_ms"]["exact_search"] = _elapsed_ms(exact_started)
         details["exact_candidates_checked"] = len(exact)
         details["provider_errors"] = list(details.get("provider_errors", [])) + errors
+        _set_search_status(details, "matched" if exact else _status_from_errors(errors))
         download_started = time.perf_counter()
-        valid_candidates, download_errors = _download_exact_candidates(exact, digest, settings, downloader)
+        valid_candidates, download_errors = _download_exact_candidates(
+            exact, digest, settings, downloader, details["provider_diagnostics"]
+        )
         details["timing"]["phases_ms"]["exact_download"] = _elapsed_ms(download_started)
         details["provider_errors"] = list(details.get("provider_errors", [])) + download_errors
         for match, downloaded in valid_candidates:
@@ -254,6 +324,7 @@ def run_universal_import_job(
                     "resolution_method": result.get("resolution_method", "exact"),
                     "resolved_source_url": match.canonical_url,
                 })
+                _set_search_status(details, "resolved")
                 _finish(connection, job_id, result, details)
                 temporary.remove(downloaded)
                 downloaded.unlink(missing_ok=True)
@@ -262,12 +333,19 @@ def run_universal_import_job(
                 return
             except Exception as error:
                 downloaded.unlink(missing_ok=True)
-                details.setdefault("provider_errors", []).append({"provider": match.provider, "code": "import.candidate_unavailable", "message": str(error)})
+                message = _safe_error_message(error, "The exact candidate was unavailable.")
+                details.setdefault("provider_errors", []).append({"provider": match.provider, "code": "import.candidate_unavailable", "message": message, "remote_id": match.remote_id})
+                _record_provider_diagnostic(details["provider_diagnostics"], "exact_download", match.provider, "unavailable", 0, "import.candidate_unavailable", message, remote_id=match.remote_id)
             finally:
                 if downloaded in temporary:
                     temporary.remove(downloaded)
         for _, downloaded in valid_candidates:
             downloaded.unlink(missing_ok=True)
+
+        if exact and (download_errors or details.get("search_status") == "matched"):
+            _set_search_status(details, "candidate_download_failed")
+        elif details.get("search_status") not in {"network_error", "authorization_error"}:
+            _set_search_status(details, _status_from_errors(errors))
 
         perceptual_duplicate = find_exact_perceptual_duplicate(
             connection, settings, original_path, inspection
@@ -292,14 +370,23 @@ def run_universal_import_job(
         original_staged = atomic_copy(original_path, settings.resolved_import_staging_path, "candidate")
         candidate_paths: list[tuple[SourceMatch, Path, object]] = []
         similar = _local_similar(connection, settings, original_path, inspection)
+        _record_provider_diagnostic(
+            details["provider_diagnostics"], "perceptual_search", "local",
+            "matched" if similar else "no_result", len(similar)
+        )
         if inspection.media_type == "image":
-            similar.extend(_reverse_similar(original_path, providers))
+            similar.extend(_reverse_similar(original_path, providers, details["provider_diagnostics"]))
         similar = [_coerce_match(match, "perceptual") for match in similar]
         similar = [match for match in _unique_similar(similar) if match.confidence >= MIN_SIMILAR_CONFIDENCE]
         details["similar_candidates_found"] = len(similar)
         for match in similar:
             media_url = match.direct_media_url or match.preview_url
             if not media_url:
+                _record_provider_diagnostic(
+                    details["provider_diagnostics"], "perceptual_search", match.provider,
+                    "unavailable", 0, "import.candidate_unavailable",
+                    "The similar candidate has no media URL.", remote_id=match.remote_id,
+                )
                 continue
             path = settings.resolved_import_staging_path / f"candidate-{uuid4().hex}{_extension(media_url)}"
             try:
@@ -310,8 +397,13 @@ def run_universal_import_job(
                     downloader.download(media_url, path, match.canonical_url)
                 candidate_inspection = inspect_media(path)
                 candidate_paths.append((match, path, candidate_inspection))
-            except Exception:
+            except Exception as error:
                 path.unlink(missing_ok=True)
+                _record_provider_diagnostic(
+                    details["provider_diagnostics"], "perceptual_search", match.provider, "unavailable", 0,
+                    "import.candidate_unavailable", _safe_error_message(error, "The similar candidate was unavailable."),
+                    remote_id=match.remote_id,
+                )
         if candidate_paths:
             cursor = connection.execute(
                 "UPDATE import_candidates SET status='review', stored_path=?, media_type=?, "
@@ -376,10 +468,20 @@ def run_universal_import_job(
         connection.close()
 
 
-def _resolve_url_metadata(url: str, providers, provider_timings=None, phase_timings=None):
+def _resolve_url_metadata(
+    url: str,
+    providers,
+    provider_timings=None,
+    phase_timings=None,
+    diagnostics=None,
+):
     normalized = normalize_source_url(url)
     provider = next((item for item in providers if item.can_handle(normalized)), None)
     if provider is None:
+        if diagnostics is not None:
+            _record_provider_diagnostic(
+                diagnostics, "metadata", "direct", "matched", 1,
+            )
         return None, SourceMedia(normalized, normalized, "direct", "", None,
                                  urlsplit(normalized).netloc, (), _extension(normalized)), []
     errors = []
@@ -389,6 +491,13 @@ def _resolve_url_metadata(url: str, providers, provider_timings=None, phase_timi
         source = _coerce_source(fetch_metadata(normalized), normalized, getattr(provider, "provider_name", "unknown"))
         duration_ms = _elapsed_ms(started)
         _record_provider_timing(provider_timings, provider, duration_ms, "ok")
+        if diagnostics is not None:
+            _record_provider_diagnostic(
+                diagnostics, "metadata", getattr(provider, "provider_name", "unknown"),
+                "matched" if source else "no_result", 1 if source else 0,
+                duration_ms=duration_ms,
+                remote_id=getattr(source, "remote_id", None),
+            )
         if phase_timings is not None:
             phase_timings["metadata"] = duration_ms
         if source.direct_media_url:
@@ -397,20 +506,40 @@ def _resolve_url_metadata(url: str, providers, provider_timings=None, phase_timi
     except SourceProviderFailure as error:
         duration_ms = _elapsed_ms(started)
         _record_provider_timing(provider_timings, provider, duration_ms, "error")
+        message = _safe_error_message(error.message, "The source provider is unavailable.")
+        if diagnostics is not None:
+            _record_provider_diagnostic(
+                diagnostics, "metadata", getattr(provider, "provider_name", "unknown"),
+                _status_for_error(error.code), 0, error.code, message,
+                duration_ms, getattr(error, "remote_id", None),
+            )
         if phase_timings is not None:
             phase_timings["metadata"] = duration_ms
-        errors.append({"provider": getattr(provider, "provider_name", "unknown"), "code": error.code, "message": error.message})
+        errors.append({"provider": getattr(provider, "provider_name", "unknown"), "code": error.code, "message": message})
         return None, None, errors
     except Exception as error:
         duration_ms = _elapsed_ms(started)
         _record_provider_timing(provider_timings, provider, duration_ms, "error")
+        message = _safe_error_message(error, "The source provider is unavailable.")
+        if diagnostics is not None:
+            _record_provider_diagnostic(
+                diagnostics, "metadata", getattr(provider, "provider_name", "unknown"),
+                "network_error", 0, "import.provider_unavailable", message,
+                duration_ms,
+            )
         if phase_timings is not None:
             phase_timings["metadata"] = duration_ms
-        errors.append({"provider": getattr(provider, "provider_name", "unknown"), "code": "import.provider_unavailable", "message": str(error) or "The source provider is unavailable."})
+        errors.append({"provider": getattr(provider, "provider_name", "unknown"), "code": "import.provider_unavailable", "message": message})
         return None, None, errors
 
 
-def _search_exact(providers, digest: str, source_hint: SourceMedia | None, provider_timings=None):
+def _search_exact(
+    providers,
+    digest: str,
+    source_hint: SourceMedia | None,
+    provider_timings=None,
+    diagnostics=None,
+):
     ordered = list(providers)
     if source_hint:
         ordered.sort(key=lambda p: 0 if getattr(p, "provider_name", "") == source_hint.provider else 1)
@@ -422,11 +551,12 @@ def _search_exact(providers, digest: str, source_hint: SourceMedia | None, provi
         try:
             raw_matches = getattr(provider, "search_by_md5")(digest) or []
             matches = [_coerce_match(raw, "exact") for raw in raw_matches]
-            return position, [match for match in matches if match], [], _elapsed_ms(started), "ok"
+            matches = [match for match in matches if match]
+            return position, matches, [], _elapsed_ms(started), "ok"
         except SourceProviderFailure as error:
-            return position, [], [{"provider": getattr(provider, "provider_name", "unknown"), "code": error.code, "message": error.message}], _elapsed_ms(started), "error"
-        except Exception:
-            return position, [], [{"provider": getattr(provider, "provider_name", "unknown"), "code": "import.source_search_failed", "message": "The source search failed."}], _elapsed_ms(started), "error"
+            return position, [], [{"provider": getattr(provider, "provider_name", "unknown"), "code": error.code, "message": _safe_error_message(error.message, "The source search failed.")}], _elapsed_ms(started), "error"
+        except Exception as error:
+            return position, [], [{"provider": getattr(provider, "provider_name", "unknown"), "code": "import.source_search_failed", "message": _safe_error_message(error, "The source search failed.")}], _elapsed_ms(started), "error"
 
     results = []
     with ThreadPoolExecutor(max_workers=max(1, len(searchable))) as executor:
@@ -442,6 +572,19 @@ def _search_exact(providers, digest: str, source_hint: SourceMedia | None, provi
         if provider_timings is not None:
             provider = searchable[_index][1]
             _record_provider_timing(provider_timings, provider, duration_ms, status)
+        if diagnostics is not None:
+            provider = searchable[_index][1]
+            error = provider_errors[0] if provider_errors else None
+            _record_provider_diagnostic(
+                diagnostics,
+                "exact_search",
+                getattr(provider, "provider_name", "unknown"),
+                (_status_for_error(error["code"]) if error else ("matched" if provider_matches else "no_result")),
+                len(provider_matches),
+                error.get("code") if error else None,
+                error.get("message") if error else None,
+                duration_ms,
+            )
     unique = {}
     for match in matches:
         key = (match.provider, match.remote_id or match.canonical_url)
@@ -449,23 +592,35 @@ def _search_exact(providers, digest: str, source_hint: SourceMedia | None, provi
     return list(unique.values()), errors
 
 
-def _download_exact_candidates(exact, digest, settings, downloader):
+def _download_exact_candidates(exact, digest, settings, downloader, diagnostics=None):
     settings.resolved_import_staging_path.mkdir(parents=True, exist_ok=True)
 
     def download_one(index, match):
         media_url = match.direct_media_url or match.preview_url
         if not media_url:
-            return index, match, None, {"provider": match.provider, "code": "import.candidate_unavailable", "message": "The exact candidate has no media URL."}
+            error = {"provider": match.provider, "code": "import.candidate_unavailable", "message": "The exact candidate has no media URL.", "remote_id": match.remote_id}
+            if diagnostics is not None:
+                _record_provider_diagnostic(diagnostics, "exact_download", match.provider, "unavailable", 0, error["code"], error["message"], remote_id=match.remote_id)
+            return index, match, None, error
         downloaded = settings.resolved_import_staging_path / f"resolve-{uuid4().hex}{_extension(media_url)}"
         try:
             downloader.download(media_url, downloaded, match.canonical_url)
             if _md5(downloaded) != digest:
                 downloaded.unlink(missing_ok=True)
-                return index, match, None, {"provider": match.provider, "code": "import.candidate_hash_mismatch", "message": "The downloaded candidate did not match the source hash."}
+                error = {"provider": match.provider, "code": "import.candidate_hash_mismatch", "message": "The downloaded candidate did not match the source hash.", "remote_id": match.remote_id}
+                if diagnostics is not None:
+                    _record_provider_diagnostic(diagnostics, "exact_download", match.provider, "unavailable", 0, error["code"], error["message"], remote_id=match.remote_id)
+                return index, match, None, error
+            if diagnostics is not None:
+                _record_provider_diagnostic(diagnostics, "exact_download", match.provider, "matched", 1, remote_id=match.remote_id)
             return index, match, downloaded, None
         except Exception as error:
             downloaded.unlink(missing_ok=True)
-            return index, match, None, {"provider": match.provider, "code": "import.candidate_unavailable", "message": str(error) or "The exact candidate was unavailable."}
+            message = _safe_error_message(error, "The exact candidate was unavailable.")
+            item = {"provider": match.provider, "code": "import.candidate_unavailable", "message": message, "remote_id": match.remote_id}
+            if diagnostics is not None:
+                _record_provider_diagnostic(diagnostics, "exact_download", match.provider, "unavailable", 0, item["code"], message, remote_id=match.remote_id)
+            return index, match, None, item
 
     valid = []
     errors = []
@@ -490,6 +645,76 @@ def _record_provider_timing(target, provider, duration_ms, status):
             "duration_ms": duration_ms,
             "status": status,
         })
+
+
+def _record_provider_diagnostic(
+    target,
+    stage: str,
+    provider: str,
+    status: str,
+    candidate_count: int = 0,
+    code: str | None = None,
+    message: str | None = None,
+    duration_ms: int | None = None,
+    remote_id: str | None = None,
+) -> None:
+    """Append a safe, UI-friendly result for one provider and resolution stage."""
+    if target is None:
+        return
+    item: dict[str, object] = {
+        "stage": stage,
+        "provider": provider or "unknown",
+        "status": status,
+        "candidate_count": max(0, int(candidate_count or 0)),
+    }
+    if code:
+        item["code"] = str(code)
+        item["error_code"] = str(code)
+    if message:
+        safe_message = _safe_error_message(message, "The provider did not complete this step.")
+        item["message"] = safe_message
+        item["error_message"] = safe_message
+    if duration_ms is not None:
+        item["duration_ms"] = max(0, int(duration_ms))
+    if remote_id not in (None, ""):
+        item["remote_id"] = str(remote_id)
+    target.append(item)
+
+
+def _safe_error_message(error, fallback: str) -> str:
+    """Keep diagnostics useful without leaking URLs, credentials, or exception data."""
+    message = str(error or "").strip()
+    if not message:
+        return fallback
+    # Provider failures already expose a curated message.  For arbitrary
+    # exceptions retain only a short first line so request details cannot leak.
+    message = re.sub(r"https?://[^\s)]+", "<redacted-url>", message.splitlines()[0])
+    return message[:240]
+
+
+def _status_for_error(code: str | None) -> str:
+    value = str(code or "").lower()
+    if any(token in value for token in ("auth", "credential", "access_denied", "authorization")):
+        return "authorization_error"
+    if any(token in value for token in ("unavailable", "network", "timeout", "connection", "rate_limited", "source_search_failed")):
+        return "network_error"
+    return "unavailable"
+
+
+def _status_from_errors(errors) -> str:
+    statuses = {_status_for_error(item.get("code")) for item in (errors or []) if isinstance(item, dict)}
+    if "authorization_error" in statuses:
+        return "authorization_error"
+    if "network_error" in statuses:
+        return "network_error"
+    return "no_result"
+
+
+def _set_search_status(details: dict[str, object], status: str) -> None:
+    details["search_status"] = status
+    # Keep an explicit alias for consumers that call this a search state.
+    details["search_state"] = status
+    details["search_outcome"] = status
 
 
 def _local_similar(connection, settings, original_path, inspection):
@@ -527,7 +752,7 @@ def _local_similar(connection, settings, original_path, inspection):
     return results
 
 
-def _reverse_similar(image_path, providers):
+def _reverse_similar(image_path, providers, diagnostics=None):
     results = []
     reverse_providers = list(providers)
     try:
@@ -539,10 +764,33 @@ def _reverse_similar(image_path, providers):
         method = getattr(provider, "search_similar", None)
         if not callable(method):
             continue
+        provider_name = getattr(provider, "provider_name", None) or provider.__class__.__name__.lower()
+        started = time.perf_counter()
         try:
-            results.extend(_coerce_match(item, "perceptual") for item in method(image_path) or [])
-        except Exception:
-            continue
+            matches = [_coerce_match(item, "perceptual") for item in method(image_path) or []]
+            matches = [item for item in matches if item is not None]
+            results.extend(matches)
+            if diagnostics is not None:
+                _record_provider_diagnostic(
+                    diagnostics, "perceptual_search", provider_name,
+                    "matched" if matches else "no_result", len(matches),
+                    duration_ms=_elapsed_ms(started),
+                )
+        except SourceProviderFailure as error:
+            if diagnostics is not None:
+                _record_provider_diagnostic(
+                    diagnostics, "perceptual_search", provider_name,
+                    _status_for_error(error.code), 0, error.code,
+                    _safe_error_message(error.message, "The reverse search failed."),
+                    _elapsed_ms(started),
+                )
+        except Exception as error:
+            if diagnostics is not None:
+                _record_provider_diagnostic(
+                    diagnostics, "perceptual_search", provider_name, "network_error", 0,
+                    "import.source_search_failed", _safe_error_message(error, "The reverse search failed."),
+                    _elapsed_ms(started),
+                )
     return [item for item in results if item is not None and item.confidence >= MIN_SIMILAR_CONFIDENCE]
 
 

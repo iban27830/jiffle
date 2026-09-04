@@ -89,6 +89,55 @@ function editSummary(operations=[]) {
   return [...counts].map(([operation,count])=>`${operationName(operation)}${count>1?` ×${count}`:''}`).join(' + ');
 }
 
+const diagnosticStageLabels = {
+  metadata: 'metadata', exact_search: 'exact search', exact_download: 'candidate download',
+  perceptual_search: 'perceptual search',
+};
+const diagnosticStatusLabels = {
+  matched: 'matched', no_result: 'no result', network_error: 'network error',
+  authorization_error: 'authorization required', unavailable: 'unavailable',
+};
+function historyDiagnostics(details) {
+  const diagnostics = Array.isArray(details.provider_diagnostics) ? details.provider_diagnostics.map(item => ({...item})) : [];
+  if (diagnostics.length) return diagnostics;
+  return (Array.isArray(details.provider_errors) ? details.provider_errors : []).map(error => ({
+    stage: 'provider', provider: error.provider || 'unknown', status: /auth|credential|access/i.test(error.code || '') ? 'authorization_error' : /candidate_(unavailable|hash_mismatch)/i.test(error.code || '') ? 'unavailable' : 'network_error',
+    candidate_count: 0, code: error.code, message: error.message, remote_id: error.remote_id,
+  }));
+}
+function historyDiagnosticSummary(details, diagnostics) {
+  const status = details.search_status || details.search_state || details.search_outcome || (diagnostics.some(item => item.status === 'authorization_error') ? 'authorization_error' : diagnostics.some(item => item.status === 'network_error') ? 'network_error' : diagnostics.some(item => item.status === 'unavailable') ? 'candidate_download_failed' : 'no_result');
+  const tbibDownload = diagnostics.some(item => String(item.provider || '').toLowerCase() === 'tbib' && item.stage === 'exact_download' && item.status === 'unavailable');
+  const tbibNetwork = diagnostics.some(item => String(item.provider || '').toLowerCase() === 'tbib' && item.status === 'network_error');
+  if (status === 'candidate_download_failed') {
+    if (tbibDownload) return 'TBIB returned a post, but the file could not be downloaded';
+    const count = Number(details.exact_candidates_checked || 0);
+    return count ? `Found ${count} candidates, but none passed verification` : 'A source was found, but its file could not be downloaded';
+  }
+  if (status === 'authorization_error') return 'Source requires authorization';
+  if (status === 'network_error') return tbibNetwork ? 'TBIB unavailable over the network' : 'A source was unavailable over the network';
+  if (status === 'resolved') return 'Source found and verified';
+  return 'Exact source not found';
+}
+function historyDiagnosticsHtml(details, item) {
+  if (item.event_type === 'import.pending') {
+    return '<details class="history-diagnostics"><summary>Provider diagnostics</summary><p>Resolving providers...</p></details>';
+  }
+  const diagnostics = historyDiagnostics(details);
+  if (!diagnostics.length && !details.search_status && !details.search_state && !details.search_outcome) return '';
+  const summary = historyDiagnosticSummary(details, diagnostics);
+  const rows = diagnostics.length ? diagnostics.map(item => {
+    const stage = diagnosticStageLabels[item.stage] || item.stage || 'provider';
+    const status = diagnosticStatusLabels[item.status] || item.status || 'unknown';
+    const count = item.candidate_count != null ? ` · ${Number(item.candidate_count)} result${Number(item.candidate_count) === 1 ? '' : 's'}` : '';
+    const remote = item.remote_id ? ` · #${esc(item.remote_id)}` : '';
+    const technical = item.code ? ` <code>${esc(item.code)}</code>` : '';
+    const message = item.message ? `: ${esc(item.message)}` : '';
+    return `<li><strong>${esc(item.provider || 'unknown')}</strong> · ${esc(stage)} · ${esc(status)}${count}${remote}${technical}${message}</li>`;
+  }).join('') : '<li>No provider diagnostics were recorded.</li>';
+  return `<details class="history-diagnostics"><summary>${esc(summary)}</summary><ul>${rows}</ul></details>`;
+}
+
 function toast(message, error = false) {
   const node = document.querySelector('#toast');
   const savebar = document.querySelector('.builder-savebar');
@@ -407,6 +456,7 @@ async function showImport() {
     const set=details.set || {};
     const counters=['accepted','duplicate','review','blocked','failed'].filter(key=>details[key] != null).map(key=>`${key}: ${details[key]}`).join(' · ');
     const issues=Array.isArray(details.issues) && details.issues.length ? `<details class="history-issues"><summary>Issues (${details.issues.length})</summary><ul>${details.issues.map(issue=>`<li><a href="${esc(issue.url || '#')}" target="_blank" rel="noopener">${esc(issue.post_id || issue.remote_id || 'post')}</a>: ${esc(issue.message || issue.code || 'Import failed')}</li>`).join('')}</ul></details>` : '';
+    const diagnostics=historyDiagnosticsHtml(details, item);
     const mediaId = Number(details.media_item_id);
     const hasMedia = item.event_type === 'import.duplicate' && Number.isInteger(mediaId) && mediaId > 0;
     const label = hasMedia ? 'Already imported' : (historyLabels[item.event_type] || item.event_type);
@@ -415,11 +465,11 @@ async function showImport() {
     const duration = details.timing?.duration_ms != null ? ` · ${formatDuration(details.timing.duration_ms)}` : '';
     const slowest = details.timing?.slowest_posts?.[0];
     const slowestLabel = slowest ? ` · slowest #${esc(slowest.post_id)} (${formatDuration(slowest.duration_ms)})` : '';
-    return `<article class="history-row"><i data-lucide="${item.event_type === 'import.pending' ? 'loader-circle' : 'activity'}" class="${item.event_type === 'import.pending' ? 'spin' : ''}"></i><div><strong>${esc(label)}</strong><small>${set.name ? `${esc(set.name)} · ` : ''}Import #${item.entity_id}${counters ? ` · ${esc(counters)}` : ''}${duration}${slowestLabel}${resolved}</small>${issues}</div><div class="history-meta"><time>${esc(formatDateTime(item.created_at))}</time>${openAction}</div></article>`;
+    return `<article class="history-row"><i data-lucide="${item.event_type === 'import.pending' ? 'loader-circle' : 'activity'}" class="${item.event_type === 'import.pending' ? 'spin' : ''}"></i><div><strong>${esc(label)}</strong><small>${set.name ? `${esc(set.name)} · ` : ''}Import #${item.entity_id}${counters ? ` · ${esc(counters)}` : ''}${duration}${slowestLabel}${resolved}</small>${diagnostics}${issues}</div><div class="history-meta"><time>${esc(formatDateTime(item.created_at))}</time>${openAction}</div></article>`;
   }).join('');
   workspace.innerHTML = `<div class="page"><section id="dropImport" class="drop-import" tabindex="0"><i data-lucide="upload-cloud"></i><strong>Drop a file, image link, or post link here</strong><span>Paste an image, video, or URL into this window</span><input id="fileImport" type="file" accept="image/*,video/*" hidden><button id="chooseImport" type="button" class="btn primary"><i data-lucide="file-up"></i>Choose file</button><input id="pasteImport" class="control" type="url" placeholder="https://..." aria-label="Image or post URL"><button id="submitUrlImport" type="button" class="btn"><i data-lucide="link"></i>Resolve and import</button><div id="importResolveStatus" class="muted" aria-live="polite"></div></section><section class="import-history"><div class="page-head"><h2>Import history</h2><span class="badge">${history.page.total}</span></div><div class="item-list">${historyRows || '<div class="empty">History is empty</div>'}</div></section></div>`;
   const drop = document.querySelector('#dropImport'); const fileInput = document.querySelector('#fileImport');
-  const showQueued = created => { const list=document.querySelector('.import-history .item-list'); const empty=list.querySelector('.empty'); if(empty) empty.remove(); list.insertAdjacentHTML('afterbegin',`<article class="history-row"><i data-lucide="loader-circle" class="spin"></i><div><strong>Importing</strong><small>Import #${created.job_id}</small></div><time>now</time></article>`); document.querySelector('.import-history .badge').textContent=String(Number(document.querySelector('.import-history .badge').textContent)+1); const status=document.querySelector('#importResolveStatus'); if(status) status.textContent=`Resolving import #${created.job_id}...`; icons(); };
+  const showQueued = created => { const list=document.querySelector('.import-history .item-list'); const empty=list.querySelector('.empty'); if(empty) empty.remove(); list.insertAdjacentHTML('afterbegin',`<article class="history-row"><i data-lucide="loader-circle" class="spin"></i><div><strong>Importing</strong><small>Import #${created.job_id}</small><details class="history-diagnostics"><summary>Provider diagnostics</summary><p>Resolving providers...</p></details></div><time>now</time></article>`); document.querySelector('.import-history .badge').textContent=String(Number(document.querySelector('.import-history .badge').textContent)+1); const status=document.querySelector('#importResolveStatus'); if(status) status.textContent=`Resolving import #${created.job_id}...`; icons(); };
   const submitFile = async file => { if (!file) return; try { const body = new FormData(); body.append('file', file); const job = await runJob(() => api('/api/v1/import-resolve-jobs',{method:'POST',body}),showQueued); toast(`Import: ${job.result?.outcome || 'failed'}`); refreshCounts(); showImport(); } catch (error) { toast(error.message,true); showImport(); } };
   document.querySelector('#chooseImport').onclick = () => fileInput.click(); fileInput.onchange = () => submitFile(fileInput.files[0]);
   const submitUrl = async url => { if (!url) return; try { const job=await runJob(()=>api('/api/v1/import-resolve-jobs',{method:'POST',body:JSON.stringify({url})}),showQueued); toast(`Import: ${job.result?.outcome || 'failed'}`); refreshCounts(); showImport(); } catch(error){toast(error.message,true);showImport();} };

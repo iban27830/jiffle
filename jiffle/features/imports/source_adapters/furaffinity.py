@@ -35,6 +35,13 @@ class FurAffinitySourceProvider:
             direct = re.search(r'href="(//(?:d\.furaffinity\.net|d\.facdn\.net)/art/[^"]+)"', response.text)
             if not direct:
                 raise ValueError("media link missing")
+        except requests.HTTPError as error:
+            failure = _http_auth_failure(error)
+            if failure:
+                raise failure from error
+            raise SourceProviderFailure(
+                "import.provider_unavailable", "FurAffinity submission could not be loaded."
+            ) from error
         except (requests.RequestException, ValueError) as error:
             raise SourceProviderFailure("import.provider_unavailable", "FurAffinity submission could not be loaded.") from error
         direct_url = "https:" + direct.group(1)
@@ -61,3 +68,16 @@ class FurAffinitySourceProvider:
         response.raise_for_status()
         if "logout" not in response.text.lower() and "log out" not in response.text.lower():
             raise ValueError("FurAffinity cookies were rejected")
+
+
+def _http_auth_failure(error):
+    status = getattr(getattr(error, "response", None), "status_code", None)
+    if status == 401:
+        return SourceProviderFailure(
+            "import.provider_auth_required", "FurAffinity credentials were rejected."
+        )
+    if status == 403:
+        return SourceProviderFailure(
+            "import.provider_access_denied", "FurAffinity denied access to this resource."
+        )
+    return None
