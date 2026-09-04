@@ -156,14 +156,16 @@ def run_set_import_job(
                         (child_id,),
                     ).fetchone()
                     outcome = _child_outcome(child)
+                    if child is None or child["status"] != "completed":
+                        outcome = "failed"
                     if outcome in counts:
                         counts[outcome] += 1
                     elif outcome == "failed":
                         counts["failed"] += 1
                     child_result = _child_result(child)
-                    if child and child["status"] == "failed":
-                        code = child["error_code"] or "import.url_import_failed"
-                        message = child["error_message"] or "The post could not be imported."
+                    if child is None or child["status"] != "completed":
+                        code = (child["error_code"] if child else None) or "import.url_import_failed"
+                        message = (child["error_message"] if child else None) or "The post could not be imported."
                         child_result["issue"] = {
                             "remote_id": post_id, "post_id": post_id,
                             "url": source_by_id[post_id].canonical_url,
