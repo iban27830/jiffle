@@ -11,6 +11,7 @@ def get_database() -> sqlite3.Connection:
         connection = sqlite3.connect(settings.database_path)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA busy_timeout = 15000")
         g.jiffle_database = connection
     return g.jiffle_database
 

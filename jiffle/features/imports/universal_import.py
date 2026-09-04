@@ -6,9 +6,11 @@ provides the single resolver used by the current Import screen.
 
 import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import shutil
 import sqlite3
+import time
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -62,6 +64,7 @@ def run_universal_import_job(
     connection = sqlite3.connect(database_path)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA busy_timeout = 15000")
     temporary: list[Path] = []
     details: dict[str, object] = {
         "submitted_input": submitted_input,
@@ -71,7 +74,11 @@ def run_universal_import_job(
         "similar_candidates_found": 0,
         "resolved_source_url": None,
         "provider_errors": [],
+        "provider_timings": [],
+        "timing": {"duration_ms": 0, "phases_ms": {}},
     }
+    started_at = time.perf_counter()
+    details["_started_at"] = started_at
     try:
         _running(connection, job_id)
         source_path = Path(submitted_input)
@@ -97,7 +104,7 @@ def run_universal_import_job(
                 )
                 return
             original_path, source, metadata_errors = _resolve_url_metadata(
-                submitted_input, providers
+                submitted_input, providers, details["provider_timings"], details["timing"]["phases_ms"]
             )
             details["provider_errors"] = metadata_errors
             if source is not None:
@@ -115,6 +122,7 @@ def run_universal_import_job(
             if source is not None and source.direct_media_url:
                 settings.resolved_import_staging_path.mkdir(parents=True, exist_ok=True)
                 original_path = settings.resolved_import_staging_path / f"download-{uuid4().hex}{_extension(source.direct_media_url)}"
+                source_download_started = time.perf_counter()
                 try:
                     downloader.download(source.direct_media_url, original_path, source.canonical_url)
                     if source.content_md5 and _md5(original_path) != source.content_md5:
@@ -123,6 +131,7 @@ def run_universal_import_job(
                 except Exception:
                     original_path.unlink(missing_ok=True)
                     original_path = None
+                details["timing"]["phases_ms"]["source_download"] = _elapsed_ms(source_download_started)
             if original_path is not None:
                 temporary.append(original_path)
                 result = _accept_downloaded(
@@ -149,20 +158,17 @@ def run_universal_import_job(
                 raise ImportFailure("import.source_media_missing", "The source has no downloadable media or file hash.")
             if connection.execute("SELECT 1 FROM blocked_media_signatures WHERE content_hash=?", (digest,)).fetchone() and settings.block_previously_deleted:
                 raise ImportFailure("import.previously_deleted", "This media was previously deleted and is blocked by settings.")
-            exact, errors = _search_exact(providers, digest, source_hint)
+            exact_started = time.perf_counter()
+            exact, errors = _search_exact(providers, digest, source_hint, details["provider_timings"])
+            details["timing"]["phases_ms"]["exact_search"] = _elapsed_ms(exact_started)
             details["exact_candidates_checked"] = len(exact)
             details["provider_errors"] = list(details.get("provider_errors", [])) + errors
-            for match in exact:
-                media_url = match.direct_media_url or match.preview_url
-                if not media_url:
-                    continue
-                downloaded = settings.resolved_import_staging_path / f"resolve-{uuid4().hex}{_extension(media_url)}"
+            download_started = time.perf_counter()
+            valid_candidates, download_errors = _download_exact_candidates(exact, digest, settings, downloader)
+            details["timing"]["phases_ms"]["exact_download"] = _elapsed_ms(download_started)
+            details.setdefault("provider_errors", []).extend(download_errors)
+            for match, downloaded in valid_candidates:
                 try:
-                    settings.resolved_import_staging_path.mkdir(parents=True, exist_ok=True)
-                    downloader.download(media_url, downloaded, match.canonical_url)
-                    if _md5(downloaded) != digest:
-                        downloaded.unlink(missing_ok=True)
-                        continue
                     source = _match_to_source(match)
                     result = _accept_downloaded(
                         connection, settings, job_id, downloaded, source, submitted_input,
@@ -170,11 +176,13 @@ def run_universal_import_job(
                     )
                     details.update({"resolution_method": "exact", "resolved_source_url": match.canonical_url})
                     _finish(connection, job_id, result, details)
-                    downloaded.unlink(missing_ok=True)
+                    for _, other in valid_candidates:
+                        other.unlink(missing_ok=True)
                     return
                 except Exception as error:
-                    downloaded.unlink(missing_ok=True)
                     details.setdefault("provider_errors", []).append({"provider": match.provider, "code": "import.candidate_unavailable", "message": str(error)})
+                finally:
+                    downloaded.unlink(missing_ok=True)
             raise ImportFailure("import.source_not_found", "No downloadable exact copy was found for this source.")
 
         inspection = inspect_media(original_path)
@@ -199,20 +207,17 @@ def run_universal_import_job(
 
         if not digest:
             digest = _md5(original_path)
-        exact, errors = _search_exact(providers, digest, source_hint)
+        exact_started = time.perf_counter()
+        exact, errors = _search_exact(providers, digest, source_hint, details["provider_timings"])
+        details["timing"]["phases_ms"]["exact_search"] = _elapsed_ms(exact_started)
         details["exact_candidates_checked"] = len(exact)
         details["provider_errors"] = list(details.get("provider_errors", [])) + errors
-        for index, match in enumerate(exact):
-            media_url = match.direct_media_url or match.preview_url
-            if not media_url:
-                continue
-            downloaded = settings.resolved_import_staging_path / f"resolve-{uuid4().hex}{_extension(media_url)}"
+        download_started = time.perf_counter()
+        valid_candidates, download_errors = _download_exact_candidates(exact, digest, settings, downloader)
+        details["timing"]["phases_ms"]["exact_download"] = _elapsed_ms(download_started)
+        details["provider_errors"] = list(details.get("provider_errors", [])) + download_errors
+        for match, downloaded in valid_candidates:
             try:
-                settings.resolved_import_staging_path.mkdir(parents=True, exist_ok=True)
-                downloader.download(media_url, downloaded, match.canonical_url)
-                if _md5(downloaded) != digest:
-                    downloaded.unlink(missing_ok=True)
-                    continue
                 temporary.append(downloaded)
                 source = _match_to_source(match)
                 result = _accept_downloaded(connection, settings, job_id, downloaded, source, submitted_input)
@@ -223,10 +228,17 @@ def run_universal_import_job(
                 _finish(connection, job_id, result, details)
                 temporary.remove(downloaded)
                 downloaded.unlink(missing_ok=True)
+                for _, other in valid_candidates:
+                    other.unlink(missing_ok=True)
                 return
             except Exception as error:
                 downloaded.unlink(missing_ok=True)
-                errors.append({"provider": match.provider, "code": "import.candidate_unavailable", "message": str(error)})
+                details.setdefault("provider_errors", []).append({"provider": match.provider, "code": "import.candidate_unavailable", "message": str(error)})
+            finally:
+                if downloaded in temporary:
+                    temporary.remove(downloaded)
+        for _, downloaded in valid_candidates:
+            downloaded.unlink(missing_ok=True)
 
         # Keep the original in staging before trying approximate candidates.
         original_staged = atomic_copy(original_path, settings.resolved_import_staging_path, "candidate")
@@ -316,51 +328,120 @@ def run_universal_import_job(
         connection.close()
 
 
-def _resolve_url_metadata(url: str, providers):
+def _resolve_url_metadata(url: str, providers, provider_timings=None, phase_timings=None):
     normalized = normalize_source_url(url)
     provider = next((item for item in providers if item.can_handle(normalized)), None)
     if provider is None:
         return None, SourceMedia(normalized, normalized, "direct", "", None,
                                  urlsplit(normalized).netloc, (), _extension(normalized)), []
     errors = []
+    started = time.perf_counter()
     try:
         fetch_metadata = getattr(provider, "fetch_metadata", provider.fetch)
         source = _coerce_source(fetch_metadata(normalized), normalized, getattr(provider, "provider_name", "unknown"))
+        duration_ms = _elapsed_ms(started)
+        _record_provider_timing(provider_timings, provider, duration_ms, "ok")
+        if phase_timings is not None:
+            phase_timings["metadata"] = duration_ms
         if source.direct_media_url:
             return None, source, errors
         return None, source, errors
     except SourceProviderFailure as error:
+        duration_ms = _elapsed_ms(started)
+        _record_provider_timing(provider_timings, provider, duration_ms, "error")
+        if phase_timings is not None:
+            phase_timings["metadata"] = duration_ms
         errors.append({"provider": getattr(provider, "provider_name", "unknown"), "code": error.code, "message": error.message})
         return None, None, errors
     except Exception as error:
+        duration_ms = _elapsed_ms(started)
+        _record_provider_timing(provider_timings, provider, duration_ms, "error")
+        if phase_timings is not None:
+            phase_timings["metadata"] = duration_ms
         errors.append({"provider": getattr(provider, "provider_name", "unknown"), "code": "import.provider_unavailable", "message": str(error) or "The source provider is unavailable."})
         return None, None, errors
 
 
-def _search_exact(providers, digest: str, source_hint: SourceMedia | None):
-    matches: list[SourceMatch] = []
-    errors: list[dict[str, str]] = []
+def _search_exact(providers, digest: str, source_hint: SourceMedia | None, provider_timings=None):
     ordered = list(providers)
     if source_hint:
         ordered.sort(key=lambda p: 0 if getattr(p, "provider_name", "") == source_hint.provider else 1)
-    for provider in ordered:
-        method = getattr(provider, "search_by_md5", None)
-        if not callable(method):
-            continue
+    searchable = [(index, provider) for index, provider in enumerate(ordered)
+                  if callable(getattr(provider, "search_by_md5", None))]
+
+    def lookup(position, provider):
+        started = time.perf_counter()
         try:
-            for raw in method(digest) or []:
-                match = _coerce_match(raw, "exact")
-                if match:
-                    matches.append(match)
+            raw_matches = getattr(provider, "search_by_md5")(digest) or []
+            matches = [_coerce_match(raw, "exact") for raw in raw_matches]
+            return position, [match for match in matches if match], [], _elapsed_ms(started), "ok"
         except SourceProviderFailure as error:
-            errors.append({"provider": getattr(provider, "provider_name", "unknown"), "code": error.code, "message": error.message})
+            return position, [], [{"provider": getattr(provider, "provider_name", "unknown"), "code": error.code, "message": error.message}], _elapsed_ms(started), "error"
         except Exception:
-            errors.append({"provider": getattr(provider, "provider_name", "unknown"), "code": "import.source_search_failed", "message": "The source search failed."})
+            return position, [], [{"provider": getattr(provider, "provider_name", "unknown"), "code": "import.source_search_failed", "message": "The source search failed."}], _elapsed_ms(started), "error"
+
+    results = []
+    with ThreadPoolExecutor(max_workers=max(1, len(searchable))) as executor:
+        futures = [executor.submit(lookup, position, provider) for position, (_index, provider) in enumerate(searchable)]
+        for future in as_completed(futures):
+            results.append(future.result())
+    results.sort(key=lambda item: item[0])
+    matches: list[SourceMatch] = []
+    errors: list[dict[str, str]] = []
+    for _index, provider_matches, provider_errors, duration_ms, status in results:
+        matches.extend(provider_matches)
+        errors.extend(provider_errors)
+        if provider_timings is not None:
+            provider = searchable[_index][1]
+            _record_provider_timing(provider_timings, provider, duration_ms, status)
     unique = {}
     for match in matches:
         key = (match.provider, match.remote_id or match.canonical_url)
         unique.setdefault(key, match)
     return list(unique.values()), errors
+
+
+def _download_exact_candidates(exact, digest, settings, downloader):
+    settings.resolved_import_staging_path.mkdir(parents=True, exist_ok=True)
+
+    def download_one(index, match):
+        media_url = match.direct_media_url or match.preview_url
+        if not media_url:
+            return index, match, None, {"provider": match.provider, "code": "import.candidate_unavailable", "message": "The exact candidate has no media URL."}
+        downloaded = settings.resolved_import_staging_path / f"resolve-{uuid4().hex}{_extension(media_url)}"
+        try:
+            downloader.download(media_url, downloaded, match.canonical_url)
+            if _md5(downloaded) != digest:
+                downloaded.unlink(missing_ok=True)
+                return index, match, None, {"provider": match.provider, "code": "import.candidate_hash_mismatch", "message": "The downloaded candidate did not match the source hash."}
+            return index, match, downloaded, None
+        except Exception as error:
+            downloaded.unlink(missing_ok=True)
+            return index, match, None, {"provider": match.provider, "code": "import.candidate_unavailable", "message": str(error) or "The exact candidate was unavailable."}
+
+    valid = []
+    errors = []
+    candidates = [(index, match) for index, match in enumerate(exact)]
+    if not candidates:
+        return valid, errors
+    with ThreadPoolExecutor(max_workers=min(4, len(candidates)), thread_name_prefix="jiffle-exact") as executor:
+        futures = [executor.submit(download_one, index, match) for index, match in candidates]
+        results = [future.result() for future in as_completed(futures)]
+    for index, match, downloaded, error in sorted(results, key=lambda item: item[0]):
+        if downloaded is not None:
+            valid.append((match, downloaded))
+        elif error:
+            errors.append(error)
+    return valid, errors
+
+
+def _record_provider_timing(target, provider, duration_ms, status):
+    if target is not None:
+        target.append({
+            "provider": getattr(provider, "provider_name", "unknown"),
+            "duration_ms": duration_ms,
+            "status": status,
+        })
 
 
 def _local_similar(connection, settings, original_path, inspection):
@@ -529,6 +610,29 @@ def _accept_downloaded(
             )
         _set_candidate_result(connection, candidate_id, "accepted", media_id, stored)
         return {"outcome": "accepted", "candidate_id": candidate_id, "media_item_id": media_id}
+    except sqlite3.IntegrityError as error:
+        if "media_items.content_hash" not in str(error):
+            (settings.media_path / stored).unlink(missing_ok=True)
+            connection.rollback()
+            raise
+        connection.rollback()
+        existing = connection.execute(
+            "SELECT id FROM media_items WHERE content_hash=? AND deleted_at IS NULL",
+            (inspection.content_hash,),
+        ).fetchone()
+        if existing:
+            (settings.media_path / stored).unlink(missing_ok=True)
+            if source:
+                _store_source(connection, int(existing[0]), source)
+            if source_url_override:
+                connection.execute(
+                    "UPDATE media_items SET source_url=? WHERE id=?",
+                    (source_url_override, int(existing[0])),
+                )
+            _set_candidate_result(connection, candidate_id, "duplicate", int(existing[0]))
+            return {"outcome": "duplicate", "candidate_id": candidate_id, "media_item_id": int(existing[0])}
+        (settings.media_path / stored).unlink(missing_ok=True)
+        raise
     except Exception:
         (settings.media_path / stored).unlink(missing_ok=True)
         connection.rollback()
@@ -577,6 +681,7 @@ def _running(connection, job_id):
 
 
 def _finish(connection, job_id, result, details):
+    _finalize_timing(details)
     payload = dict(result)
     payload["resolution"] = details
     connection.execute("UPDATE background_jobs SET status='completed', progress=100, result_json=?, finished_at=CURRENT_TIMESTAMP WHERE id=?", (json.dumps(payload), job_id))
@@ -585,8 +690,12 @@ def _finish(connection, job_id, result, details):
 
 
 def _failed(connection, job_id, code, message, details):
+    _finalize_timing(details)
     connection.rollback()
-    connection.execute("UPDATE background_jobs SET status='failed', error_code=?, error_message=?, finished_at=CURRENT_TIMESTAMP WHERE id=?", (code, message, job_id))
+    connection.execute(
+        "UPDATE background_jobs SET status='failed', error_code=?, error_message=?, result_json=?, finished_at=CURRENT_TIMESTAMP WHERE id=?",
+        (code, message, json.dumps({"outcome": "failed", "code": code, "message": message, "resolution": details}), job_id),
+    )
     connection.execute("UPDATE import_candidates SET status='failed' WHERE job_id=?", (job_id,))
     update_import_history(connection, job_id, "failed", {**details, "code": code, "message": message})
     connection.commit()
@@ -598,6 +707,17 @@ def _md5(path):
         for chunk in iter(lambda: file.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _elapsed_ms(started):
+    return max(0, int(round((time.perf_counter() - started) * 1000)))
+
+
+def _finalize_timing(details):
+    started = details.pop("_started_at", None)
+    if started is not None:
+        timing = details.setdefault("timing", {"duration_ms": 0, "phases_ms": {}})
+        timing["duration_ms"] = _elapsed_ms(started)
 
 
 def _extension(url):

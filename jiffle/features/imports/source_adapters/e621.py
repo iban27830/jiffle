@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import PurePosixPath
+import threading
 import time
 from urllib.parse import urlparse
 
@@ -20,6 +21,7 @@ class E621SourceProvider:
         self.api_key = api_key
         self.request_interval = max(0.0, float(request_interval))
         self._last_request = 0.0
+        self._rate_lock = threading.Lock()
 
     def can_handle(self, url):
         parsed = urlparse(url)
@@ -260,10 +262,11 @@ class E621SourceProvider:
     def _wait_for_rate_limit(self) -> None:
         if not self.request_interval:
             return
-        elapsed = time.monotonic() - self._last_request
-        if elapsed < self.request_interval:
-            time.sleep(self.request_interval - elapsed)
-        self._last_request = time.monotonic()
+        with self._rate_lock:
+            elapsed = time.monotonic() - self._last_request
+            if elapsed < self.request_interval:
+                time.sleep(self.request_interval - elapsed)
+            self._last_request = time.monotonic()
 
     @staticmethod
     def _sleep_retry_after(response) -> None:
