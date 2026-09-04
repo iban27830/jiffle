@@ -10,6 +10,10 @@ from jiffle.configuration.settings import Settings
 from jiffle.features.imports.domain import LocalImportCommand
 from jiffle.features.imports.local_import import create_local_import_job, run_local_import_job
 from jiffle.features.imports.url_import import create_url_import_job, run_url_import_job
+from jiffle.features.imports.universal_import import (
+    create_universal_import_job,
+    run_universal_import_job,
+)
 from jiffle.features.imports.set_import import (
     ActiveSetImportError,
     active_set_job,
@@ -20,10 +24,65 @@ from jiffle.features.imports.set_import import (
 from jiffle.features.imports.source_adapters.contracts import SourceMedia
 from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
 from urllib.parse import urlsplit
+from uuid import uuid4
 from jiffle.features.imports.url_normalization import normalize_source_url
 from jiffle.infrastructure.database.connection import get_database
 
 imports_blueprint = Blueprint("imports", __name__)
+
+
+@imports_blueprint.post("/api/v1/import-resolve-jobs")
+def create_import_resolve_job():
+    """Accept a file upload or URL and resolve it through one import workflow."""
+    uploaded = request.files.get("file")
+    settings: Settings = current_app.config["JIFFLE_SETTINGS"]
+    if uploaded is not None:
+        if not uploaded.filename:
+            return _error("import.invalid_request", "A file is required.", 400)
+        settings.resolved_import_staging_path.mkdir(parents=True, exist_ok=True)
+        target = settings.resolved_import_staging_path / (
+            f"upload-{uuid4().hex}-{Path(uploaded.filename).name}"
+        )
+        uploaded.save(target)
+        submitted_input, input_kind = str(target), "file"
+    else:
+        payload = request.get_json(silent=True)
+        raw_url = payload.get("url") if isinstance(payload, dict) else None
+        if not isinstance(raw_url, str) or not raw_url.strip():
+            return _error("import.invalid_request", "A file or URL is required.", 400)
+        try:
+            submitted_input = normalize_source_url(raw_url)
+        except ValueError as error:
+            return _error("import.invalid_source_url", str(error), 400)
+        input_kind = "url"
+    if input_kind == "url":
+        provider = next(
+            (item for item in current_app.config["JIFFLE_SOURCE_PROVIDERS"]
+             if item.can_handle(submitted_input)), None
+        )
+        if provider is not None and getattr(provider, "can_handle_set", lambda _url: False)(submitted_input):
+            try:
+                job_id = create_set_import_job(get_database(), submitted_input, provider)
+            except ActiveSetImportError as error:
+                return jsonify({"error": {"code": "import.set_already_active", "message": "A set import is already running.", "details": {"job_id": error.job_id}}}), 409
+            arguments = (settings.database_path, settings, job_id, submitted_input, provider, current_app.config["JIFFLE_MEDIA_DOWNLOADER"])
+            if settings.run_jobs_inline:
+                run_set_import_job(*arguments)
+            else:
+                Thread(target=run_set_import_job, args=arguments, daemon=True).start()
+            return jsonify({"job_id": job_id, "status_url": f"/api/v1/jobs/{job_id}"}), 202
+    connection = get_database()
+    job_id = create_universal_import_job(connection, submitted_input, input_kind)
+    arguments = (
+        settings.database_path, settings, job_id, submitted_input, input_kind,
+        current_app.config["JIFFLE_SOURCE_PROVIDERS"],
+        current_app.config["JIFFLE_MEDIA_DOWNLOADER"],
+    )
+    if settings.run_jobs_inline:
+        run_universal_import_job(*arguments)
+    else:
+        Thread(target=run_universal_import_job, args=arguments, daemon=True).start()
+    return jsonify({"job_id": job_id, "status_url": f"/api/v1/jobs/{job_id}"}), 202
 
 class _DirectMediaProvider:
     def can_handle(self, url):

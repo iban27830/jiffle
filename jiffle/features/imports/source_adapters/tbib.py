@@ -61,6 +61,9 @@ class TbibSourceProvider:
                 "import.source_media_missing", "The source has no downloadable media."
             ) from error
 
+    def fetch_metadata(self, url: str) -> SourceMedia:
+        return self.fetch(url)
+
     def search_by_md5(self, digest: str) -> list[dict[str, object]]:
         digest = _validate_md5(digest)
         if digest is None:
@@ -105,6 +108,9 @@ class TbibSourceProvider:
                 )
             )
         return matches
+
+    def search_similar(self, image_path):
+        return []
 
     def check_connection(self) -> None:
         self._get_json(

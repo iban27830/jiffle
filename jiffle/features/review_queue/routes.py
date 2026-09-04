@@ -10,6 +10,7 @@ from jiffle.features.library.thumbnail_cache import ensure_thumbnail
 from jiffle.features.review_queue.workflow import (
     ReviewFailure,
     accept_review_item,
+    accept_source_candidate,
     create_manual_source_job,
     reject_review_item,
     run_manual_source_job,
@@ -72,7 +73,9 @@ def get_review_item(review_id: int):
     row = _review_row(review_id)
     if row is None:
         return _error("review.not_found", "Review item was not found.", 404)
-    return jsonify(_serialize(row))
+    payload = _serialize(row)
+    payload["source_candidates"] = _source_candidates(review_id)
+    return jsonify(payload)
 
 
 @review_blueprint.get("/api/v1/review-items/<int:review_id>/content")
@@ -109,8 +112,15 @@ def get_review_thumbnail(review_id: int):
 @review_blueprint.post("/api/v1/review-items/<int:review_id>/accept")
 def accept_review(review_id: int):
     settings: Settings = current_app.config["JIFFLE_SETTINGS"]
+    payload = request.get_json(silent=True) or {}
     try:
-        media_item_id = accept_review_item(get_database(), settings, review_id)
+        candidate_id = payload.get("source_candidate_id")
+        if candidate_id is not None:
+            media_item_id = accept_source_candidate(
+                get_database(), settings, review_id, int(candidate_id)
+            )
+        else:
+            media_item_id = accept_review_item(get_database(), settings, review_id)
     except ReviewFailure as error:
         return _review_error(error)
     return jsonify({"status": "accepted", "media_item_id": media_item_id})
@@ -124,6 +134,42 @@ def reject_review(review_id: int):
     except ReviewFailure as error:
         return _review_error(error)
     return jsonify({"status": "rejected"})
+
+
+@review_blueprint.get("/api/v1/review-items/<int:review_id>/source-candidates/<int:candidate_id>/thumbnail")
+def get_source_candidate_thumbnail(review_id: int, candidate_id: int):
+    row = get_database().execute(
+        "SELECT stored_path, media_type, content_hash, width, height, file_size FROM import_source_candidates "
+        "WHERE id=? AND review_item_id=?", (candidate_id, review_id)
+    ).fetchone()
+    if row is None:
+        return _error("review.candidate_not_found", "The source candidate was not found.", 404)
+    settings: Settings = current_app.config["JIFFLE_SETTINGS"]
+    root = settings.resolved_import_staging_path.resolve()
+    path = (root / (row["stored_path"] or "")).resolve()
+    if not path.is_relative_to(root) or not path.is_file():
+        return _error("review.file_missing", "The source candidate is unavailable.", 404)
+    item = MediaItem(
+        id=-candidate_id, file_path=row["stored_path"], media_type=MediaType(row["media_type"]),
+        source_url=None, author=None, domain=None, width=row["width"], height=row["height"],
+        file_size=row["file_size"], content_hash=row["content_hash"], active_revision_id=None,
+        edit_operations=(), created_at="", tags=(),
+    )
+    try:
+        thumbnail = ensure_thumbnail(item, path, settings.thumbnail_path)
+    except (OSError, ValueError, RuntimeError):
+        return _error("review.thumbnail_unavailable", "Thumbnail is unavailable.", 422)
+    return send_file(thumbnail, mimetype="image/jpeg", conditional=True)
+
+
+@review_blueprint.post("/api/v1/review-items/<int:review_id>/source-candidates/<int:candidate_id>/accept")
+def accept_source_candidate_route(review_id: int, candidate_id: int):
+    settings: Settings = current_app.config["JIFFLE_SETTINGS"]
+    try:
+        media_item_id = accept_source_candidate(get_database(), settings, review_id, candidate_id)
+    except ReviewFailure as error:
+        return _review_error(error)
+    return jsonify({"status": "accepted", "media_item_id": media_item_id})
 
 
 @review_blueprint.post("/api/v1/review-items/<int:review_id>/source")
@@ -227,6 +273,29 @@ def _review_row(review_id):
     ).fetchone()
 
 
+def _source_candidates(review_id):
+    rows = get_database().execute(
+        "SELECT id, rank, match_method, confidence, provider, source_metadata_json, stored_path, "
+        "media_type, content_hash, width, height, file_size, status FROM import_source_candidates "
+        "WHERE review_item_id=? ORDER BY rank, id", (review_id,)
+    ).fetchall()
+    import json
+    items = []
+    for row in rows:
+        try:
+            metadata = json.loads(row["source_metadata_json"] or "{}")
+        except (TypeError, ValueError):
+            metadata = {}
+        items.append({
+            "id": row["id"], "rank": row["rank"], "match_method": row["match_method"],
+            "confidence": row["confidence"], "provider": row["provider"],
+            "status": row["status"], "source_metadata": metadata,
+            "width": row["width"], "height": row["height"], "file_size": row["file_size"],
+            "thumbnail_url": f"/api/v1/review-items/{review_id}/source-candidates/{row['id']}/thumbnail",
+        })
+    return items
+
+
 def _review_path(row) -> Path | None:
     if row is None or not row["stored_path"]:
         return None
@@ -245,6 +314,7 @@ def _serialize(row):
         "file_size": row["file_size"], "created_at": row["created_at"],
         "content_url": f"/api/v1/review-items/{review_id}/content",
         "thumbnail_url": f"/api/v1/review-items/{review_id}/thumbnail",
+        "source_candidates": _source_candidates(review_id),
     }
 
 

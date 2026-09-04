@@ -49,6 +49,9 @@ class GelbooruSourceProvider:
             content_md5=_valid_md5(post.get("hash") or post.get("md5")),
         )
 
+    def fetch_metadata(self, url):
+        return self.fetch(url)
+
     def search_by_md5(self, digest: str) -> list[dict[str, object]]:
         digest = _valid_md5(digest)
         if digest is None:
@@ -97,6 +100,9 @@ class GelbooruSourceProvider:
                 "deleted": bool(str(post.get("status", "")).lower() == "deleted"),
             })
         return matches
+
+    def search_similar(self, image_path):
+        return []
 
     def check_connection(self):
         params = {"page": "dapi", "s": "post", "q": "index", "limit": 1, "json": 1}

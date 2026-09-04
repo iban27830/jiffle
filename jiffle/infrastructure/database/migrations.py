@@ -625,6 +625,28 @@ def migration_26(connection: sqlite3.Connection) -> None:
     )
 
 
+def migration_27(connection: sqlite3.Connection) -> None:
+    """Store multiple external source choices for one pending review item."""
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS import_source_candidates ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "review_item_id INTEGER NOT NULL REFERENCES review_items(id) ON DELETE CASCADE, "
+        "rank INTEGER NOT NULL DEFAULT 0, "
+        "match_method TEXT NOT NULL CHECK (match_method IN ('exact', 'perceptual')), "
+        "confidence REAL NOT NULL CHECK (confidence BETWEEN 0 AND 100), "
+        "provider TEXT NOT NULL, "
+        "source_metadata_json TEXT NOT NULL DEFAULT '{}', "
+        "stored_path TEXT, media_type TEXT, content_hash TEXT, width INTEGER, "
+        "height INTEGER, file_size INTEGER, "
+        "status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'selected', 'rejected')), "
+        "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, resolved_at TEXT)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS import_source_candidates_review_idx "
+        "ON import_source_candidates(review_item_id, status, rank)"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -652,6 +674,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (24, migration_24),
     (25, migration_25),
     (26, migration_26),
+    (27, migration_27),
 )
 
 

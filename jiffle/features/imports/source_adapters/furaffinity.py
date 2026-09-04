@@ -48,6 +48,12 @@ class FurAffinitySourceProvider:
             file_extension="." + direct_url.rsplit(".", 1)[-1].split("?", 1)[0].lower(),
         )
 
+    def fetch_metadata(self, url):
+        return self.fetch(url)
+
+    def search_similar(self, image_path):
+        return []
+
     def check_connection(self):
         if not self.cookies:
             raise ValueError("FurAffinity cookies are not configured")

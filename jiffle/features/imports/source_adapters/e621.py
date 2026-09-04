@@ -43,6 +43,21 @@ class E621SourceProvider:
         except (KeyError, TypeError, ValueError) as error:
             raise SourceProviderFailure("import.source_media_missing", "The source has no downloadable media.") from error
 
+    def fetch_metadata(self, url):
+        """Load post metadata even when the post's media URL was removed."""
+        parsed = urlparse(url)
+        post_id = _post_id(parsed.path)
+        if post_id is None:
+            raise SourceProviderFailure("import.invalid_source_url", "The URL is not an e621 post URL.")
+        domain = parsed.hostname or "e621.net"
+        payload = self._get_json(f"https://{domain}/posts/{post_id}.json", context="post")
+        post = payload["post"] if isinstance(payload, dict) and "post" in payload else payload
+        if isinstance(post, list):
+            post = post[0] if post else {}
+        if not isinstance(post, dict):
+            raise SourceProviderFailure("import.source_media_missing", "The source has no metadata.")
+        return self._post_to_source(post, domain, str(post_id), allow_missing=True)
+
     def metadata_md5(self, url: str) -> str | None:
         """Return the stored file MD5 even when e621 has deleted the media."""
         parsed = urlparse(url)
@@ -101,6 +116,9 @@ class E621SourceProvider:
                 "deleted": bool((post.get("flags") or {}).get("deleted")),
             })
         return matches
+
+    def search_similar(self, image_path):
+        return []
 
     def fetch_set(self, url: str) -> SourceSet:
         parsed = parse_set_url(url)
@@ -162,13 +180,16 @@ class E621SourceProvider:
     def check_connection(self):
         self._get_json("https://e621.net/posts.json", params={"limit": 1}, context="connection")
 
-    def _post_to_source(self, post: dict, domain: str, post_id: str) -> SourceMedia:
+    def _post_to_source(self, post: dict, domain: str, post_id: str, allow_missing: bool = False) -> SourceMedia:
         file_payload = post.get("file") or {}
         sample_payload = post.get("sample") or {}
         direct_url = file_payload.get("url") or sample_payload.get("url")
         if not isinstance(direct_url, str) or not direct_url:
-            raise ValueError("missing media")
-        if direct_url.startswith("//"):
+            if allow_missing:
+                direct_url = None
+            else:
+                raise ValueError("missing media")
+        if isinstance(direct_url, str) and direct_url.startswith("//"):
             direct_url = "https:" + direct_url
         tags_payload = post.get("tags") or {}
         artists = tags_payload.get("artist", [])
@@ -181,7 +202,7 @@ class E621SourceProvider:
             provider=self.provider_name, remote_id=post_id,
             author=", ".join(str(artist) for artist in artists) if artists else None,
             domain=domain, tags=tags,
-            file_extension=PurePosixPath(urlparse(direct_url).path).suffix.lower() or ".jpg",
+            file_extension=PurePosixPath(urlparse(direct_url or "").path).suffix.lower() or ".jpg",
             character_tags=character_tags, parent_id=parent_id,
             content_md5=_valid_md5(file_payload.get("md5")),
         )

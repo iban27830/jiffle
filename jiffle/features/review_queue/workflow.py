@@ -2,6 +2,10 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+from urllib.parse import urlsplit
+
+import imagehash
+from PIL import Image
 
 from jiffle.configuration.settings import Settings
 from jiffle.features.imports.local_import import atomic_copy
@@ -40,6 +44,7 @@ def accept_review_item(
                 connection, review_id, row["candidate_id"], media_item_id, source
             )
             staged.unlink(missing_ok=True)
+            _cleanup_source_candidates(connection, settings, review_id)
             return media_item_id
 
     duplicate = connection.execute(
@@ -52,6 +57,7 @@ def accept_review_item(
             _store_tags(connection, media_item_id, source.tags)
         _complete_review(connection, review_id, row["candidate_id"], media_item_id, source)
         staged.unlink(missing_ok=True)
+        _cleanup_source_candidates(connection, settings, review_id)
         return media_item_id
 
     stored_path = atomic_copy(staged, settings.media_path, "media")
@@ -83,6 +89,93 @@ def accept_review_item(
         connection.rollback()
         raise
     staged.unlink(missing_ok=True)
+    _cleanup_source_candidates(connection, settings, review_id)
+    return media_item_id
+
+
+def accept_source_candidate(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    review_id: int,
+    candidate_id: int,
+) -> int:
+    """Accept one staged external source candidate and discard its siblings."""
+    row = connection.execute(
+        "SELECT review.status, review.import_candidate_id, candidate.content_hash AS input_hash, "
+        "candidate.stored_path AS input_path, source.id, source.stored_path, source.media_type, "
+        "source.content_hash, source.width, source.height, source.file_size, source.source_metadata_json "
+        "FROM review_items review JOIN import_candidates candidate ON candidate.id=review.import_candidate_id "
+        "JOIN import_source_candidates source ON source.review_item_id=review.id "
+        "WHERE review.id=? AND source.id=? AND source.status='pending'",
+        (review_id, candidate_id),
+    ).fetchone()
+    if row is None:
+        raise ReviewFailure("review.candidate_not_found", "The source candidate was not found.")
+    if row["status"] != "pending":
+        raise ReviewFailure("review.already_resolved", "Review item is already resolved.")
+    if row["stored_path"] is None:
+        raise ReviewFailure("review.file_missing", "The source candidate is unavailable.")
+    selected_path = _staged_path(settings, row["stored_path"])
+    if not selected_path.is_file():
+        raise ReviewFailure("review.file_missing", "The source candidate is unavailable.")
+    source = _candidate_source(row["source_metadata_json"])
+    duplicate = connection.execute(
+        "SELECT id FROM media_items WHERE content_hash=? AND deleted_at IS NULL",
+        (row["content_hash"],),
+    ).fetchone()
+    stored_path = None
+    if duplicate:
+        media_item_id = int(duplicate[0])
+        if source:
+            _store_source(connection, media_item_id, source)
+            _store_tags(connection, media_item_id, source.tags)
+    else:
+        stored_path = atomic_copy(selected_path, settings.media_path, "media")
+        try:
+            cursor = connection.execute(
+                "INSERT INTO media_items (file_path, media_type, source_url, author, domain, width, height, file_size, content_hash) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (stored_path, row["media_type"], source.canonical_url if source else None,
+                 source.author if source else None, source.domain if source else None,
+                 row["width"], row["height"], row["file_size"], row["content_hash"]),
+            )
+            media_item_id = int(cursor.lastrowid)
+            create_original_revision(connection, media_item_id)
+            if row["media_type"] == "image":
+                try:
+                    with Image.open(selected_path) as image:
+                        connection.execute(
+                            "INSERT INTO media_fingerprints (media_item_id, perceptual_hash) VALUES (?, ?)",
+                            (media_item_id, str(imagehash.phash(image))),
+                        )
+                except (OSError, ValueError):
+                    pass
+            if source:
+                _store_source(connection, media_item_id, source)
+                _store_tags(connection, media_item_id, source.tags)
+        except Exception:
+            (settings.media_path / stored_path).unlink(missing_ok=True)
+            connection.rollback()
+            raise
+    connection.execute(
+        "UPDATE import_candidates SET status='accepted', media_item_id=? WHERE id=?",
+        (media_item_id, row["import_candidate_id"]),
+    )
+    connection.execute(
+        "UPDATE review_items SET status='accepted', resolved_at=CURRENT_TIMESTAMP WHERE id=?",
+        (review_id,),
+    )
+    connection.execute(
+        "UPDATE import_source_candidates SET status=CASE WHEN id=? THEN 'selected' ELSE 'rejected' END, resolved_at=CURRENT_TIMESTAMP WHERE review_item_id=?",
+        (candidate_id, review_id),
+    )
+    _history(connection, "review.accepted", review_id, {
+        "media_item_id": media_item_id,
+        "source_candidate_id": candidate_id,
+        "source_url": source.canonical_url if source else None,
+    })
+    connection.commit()
+    _remove_review_staging(connection, settings, review_id, keep=None, primary_path=row["input_path"])
     return media_item_id
 
 
@@ -99,6 +192,10 @@ def reject_review_item(
             "UPDATE review_items SET status='rejected', resolved_at=CURRENT_TIMESTAMP "
             "WHERE id=?", (review_id,)
         )
+        connection.execute(
+            "UPDATE import_source_candidates SET status='rejected', resolved_at=CURRENT_TIMESTAMP WHERE review_item_id=?",
+            (review_id,),
+        )
         _history(connection, "review.rejected", review_id, {})
         connection.commit()
     except Exception:
@@ -107,6 +204,11 @@ def reject_review_item(
             os.replace(rejecting, staged)
         raise
     rejecting.unlink(missing_ok=True)
+    for candidate in connection.execute(
+        "SELECT stored_path FROM import_source_candidates WHERE review_item_id=?", (review_id,)
+    ).fetchall():
+        if candidate[0]:
+            _staged_path(settings, candidate[0]).unlink(missing_ok=True)
 
 
 def create_manual_source_job(
@@ -187,17 +289,37 @@ def _candidate_source(raw_metadata: str | None) -> SourceMedia | None:
     payload = json.loads(raw_metadata)
     return SourceMedia(
         canonical_url=payload["canonical_url"],
-        direct_media_url=payload["direct_media_url"],
+        direct_media_url=payload.get("direct_media_url"),
         provider=payload["provider"],
         remote_id=payload["remote_id"],
         author=payload.get("author"),
-        domain=payload["domain"],
+        domain=payload.get("domain") or urlsplit(payload["canonical_url"]).netloc,
         tags=tuple(payload.get("tags", ())),
-        file_extension=payload["file_extension"],
+        file_extension=payload.get("file_extension") or (os.path.splitext(urlsplit(payload.get("direct_media_url") or payload["canonical_url"]).path)[1] or ".jpg"),
         character_tags=tuple(payload.get("character_tags", ())),
         parent_id=payload.get("parent_id"),
         content_md5=payload.get("content_md5"),
     )
+
+
+def _remove_review_staging(connection, settings: Settings, review_id: int, keep: int | None = None, primary_path: str | None = None) -> None:
+    rows = connection.execute(
+        "SELECT stored_path FROM import_source_candidates WHERE review_item_id=? AND (? IS NULL OR id<>?)",
+        (review_id, keep, keep),
+    ).fetchall()
+    for row in rows:
+        if row[0]:
+            _staged_path(settings, row[0]).unlink(missing_ok=True)
+    if primary_path:
+        _staged_path(settings, primary_path).unlink(missing_ok=True)
+
+
+def _cleanup_source_candidates(connection, settings: Settings, review_id: int) -> None:
+    for row in connection.execute(
+        "SELECT stored_path FROM import_source_candidates WHERE review_item_id=?", (review_id,)
+    ).fetchall():
+        if row[0]:
+            _staged_path(settings, row[0]).unlink(missing_ok=True)
 
 
 def _staged_path(settings: Settings, stored_path: str) -> Path:
@@ -215,6 +337,10 @@ def _complete_review(connection, review_id, candidate_id, media_item_id, source)
     )
     connection.execute(
         "UPDATE review_items SET status='accepted', resolved_at=CURRENT_TIMESTAMP WHERE id=?",
+        (review_id,),
+    )
+    connection.execute(
+        "UPDATE import_source_candidates SET status='rejected', resolved_at=CURRENT_TIMESTAMP WHERE review_item_id=?",
         (review_id,),
     )
     _history(connection, "review.accepted", review_id, {
