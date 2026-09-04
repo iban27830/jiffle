@@ -131,6 +131,13 @@ resized and recompressed copies are handled by the local pHash check described
 above when there is one exact perceptual match; edited copies, lower-confidence
 matches, or ambiguous matches may still appear as Review choices.
 
+Universal import checks the local MD5 first, then performs exact MD5 searches on
+the supported providers. A TBIB sample, resized image, or re-encoded copy has
+different bytes and therefore cannot match the original through exact MD5;
+approximate matching for images is provided by the local perceptual hash and
+the optional IQDB reverse search. TBIB supports exact MD5 lookup, while it does
+not provide a separate visual reverse-search API.
+
 For an e621 or e926 post set, Jiffle first checks the complete set (using the saved e621 username and API key when configured), then imports up to four posts at the same time. The final counters and issue list keep the set's original order. The set itself is not added as a local collection. A private set or a set that cannot be accessed fails before any files are downloaded. If a post is deleted or its file is unavailable, Jiffle first tries its saved MD5 with the other providers, then records an issue only when no usable copy is found. Select **Stop** in the status bar to prevent new posts from starting; posts already running are allowed to finish. The status bar shows the current phase, active posts, and elapsed time, while **Import history** shows the total duration and slowest posts. Provider and download timings help identify a slow external service; a provider or CDN can still delay an individual post. Times in the interface are converted to the computer's local time zone, while the database remains in UTC.
 
 ### Browse and organize
@@ -164,6 +171,19 @@ The attempt appears in Import history immediately with an **Importing** status w
 downloading and resolving continue. Its status changes to Imported, Already
 imported, Waiting for review, or Import failed. Repeated imports of the same file
 do not create another pending Review item.
+
+Open the closed diagnostics disclosure in an Import history entry to see each
+provider stage (metadata, exact search, candidate download, and perceptual
+search), its status, result count, technical code, and a safe error message.
+**Exact source not found** means providers answered successfully without an
+exact match. **TBIB unavailable over the network** or another network status
+means a provider did not answer. **Source requires authorization** means saved
+credentials are missing or rejected. **TBIB returned a post, but the file could
+not be downloaded** means a post matched but its CDN failed (or returned bytes
+with the wrong MD5). A summary such as **Found N candidates, but none passed
+verification** means every returned file was unavailable or failed the exact
+hash check. Older history entries that predate these diagnostics still show
+their recorded provider errors and timings.
 
 When several source pages match at 80% or more, Review shows one card for the
 submitted file and a list of source candidates with provider, remote ID, confidence,
