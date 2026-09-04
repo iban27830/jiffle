@@ -15,6 +15,8 @@ class E621SourceProvider:
     provider_name = "e621"
     domains = {"e621.net", "e926.net"}
     page_limit = 320
+    _transient_statuses = {408, 429, 500, 502, 503, 504}
+    _max_attempts = 3
 
     def __init__(self, login=None, api_key=None, request_interval: float = 0.5):
         self.login = login
@@ -93,9 +95,7 @@ class E621SourceProvider:
             post_id = str(post["id"])
             file_payload = post.get("file") or {}
             sample_payload = post.get("sample") or {}
-            direct_url = file_payload.get("url") or sample_payload.get("url")
-            if isinstance(direct_url, str) and direct_url.startswith("//"):
-                direct_url = "https:" + direct_url
+            direct_url = _media_url(file_payload, sample_payload)
             tags_payload = post.get("tags") or {}
             tags = tuple(
                 tag
@@ -201,26 +201,25 @@ class E621SourceProvider:
     def _post_to_source(self, post: dict, domain: str, post_id: str, allow_missing: bool = False) -> SourceMedia:
         file_payload = post.get("file") or {}
         sample_payload = post.get("sample") or {}
-        direct_url = file_payload.get("url") or sample_payload.get("url")
-        if not isinstance(direct_url, str) or not direct_url:
-            if allow_missing:
-                direct_url = None
-            else:
-                raise ValueError("missing media")
-        if isinstance(direct_url, str) and direct_url.startswith("//"):
-            direct_url = "https:" + direct_url
+        direct_url = _media_url(file_payload, sample_payload)
+        if not direct_url and not allow_missing:
+            raise ValueError("missing media")
         tags_payload = post.get("tags") or {}
         artists = tags_payload.get("artist", [])
         tags = tuple(tag for group in tags_payload.values() if isinstance(group, (list, tuple)) for tag in group)
         character_tags = tuple(str(tag) for tag in tags_payload.get("character", []) if str(tag).strip())
         raw_parent_id = post.get("parent_id")
         parent_id = str(raw_parent_id) if raw_parent_id not in (None, "", 0, "0") else None
+        file_extension = PurePosixPath(urlparse(direct_url or "").path).suffix.lower()
+        if not file_extension:
+            raw_extension = _valid_extension(file_payload.get("ext"))
+            file_extension = f".{raw_extension}" if raw_extension else ".jpg"
         return SourceMedia(
             canonical_url=f"https://{domain}/posts/{post_id}", direct_media_url=direct_url,
             provider=self.provider_name, remote_id=post_id,
             author=", ".join(str(artist) for artist in artists) if artists else None,
             domain=domain, tags=tags,
-            file_extension=PurePosixPath(urlparse(direct_url or "").path).suffix.lower() or ".jpg",
+            file_extension=file_extension,
             character_tags=character_tags, parent_id=parent_id,
             content_md5=_valid_md5(file_payload.get("md5")),
         )
@@ -228,18 +227,31 @@ class E621SourceProvider:
     def _get_json(self, url: str, params: dict | None = None, context: str = "post"):
         headers = {"User-Agent": f"Jiffle/2.0 (by {self.login or 'local-user'})", "Accept": "application/json"}
         auth = (self.login, self.api_key) if self.login and self.api_key else None
-        for attempt in range(2):
+        for attempt in range(self._max_attempts):
             self._wait_for_rate_limit()
             try:
                 response = requests.get(url, params=params, headers=headers, auth=auth, timeout=15)
             except requests.RequestException as error:
-                raise SourceProviderFailure("import.e621_unavailable", "e621 is unavailable.") from error
-            status = getattr(response, "status_code", None)
-            if status == 429:
-                if attempt == 0:
-                    self._sleep_retry_after(response)
+                if _is_transient_request_error(error) and attempt < self._max_attempts - 1:
+                    _sleep_backoff(None, attempt)
                     continue
-                raise SourceProviderFailure("import.e621_rate_limited", "e621 rate limit was reached; try again later.")
+                error_status = getattr(getattr(error, "response", None), "status_code", None)
+                if error_status in self._transient_statuses and attempt < self._max_attempts - 1:
+                    _sleep_backoff(getattr(error, "response", None), attempt)
+                    continue
+                if error_status == 429:
+                    raise SourceProviderFailure("import.e621_rate_limited", "e621 rate limit was reached; try again later.") from error
+                code = "import.e621_timeout" if isinstance(error, requests.Timeout) else "import.e621_unavailable"
+                message = "e621 request timed out." if code.endswith("timeout") else "e621 is unavailable."
+                raise SourceProviderFailure(code, message) from error
+            status = getattr(response, "status_code", None)
+            if status in self._transient_statuses:
+                if attempt < self._max_attempts - 1:
+                    _sleep_backoff(response, attempt)
+                    continue
+                if status == 429:
+                    raise SourceProviderFailure("import.e621_rate_limited", "e621 rate limit was reached; try again later.")
+                raise SourceProviderFailure("import.e621_unavailable", f"e621 returned temporary HTTP {status}.")
             if status == 401:
                 raise SourceProviderFailure("import.e621_authentication_failed", "The saved e621 credentials were rejected.")
             if status == 403:
@@ -268,11 +280,40 @@ class E621SourceProvider:
                 time.sleep(self.request_interval - elapsed)
             self._last_request = time.monotonic()
 
-    @staticmethod
-    def _sleep_retry_after(response) -> None:
-        value = (getattr(response, "headers", None) or {}).get("Retry-After")
-        if not value:
-            return
+
+
+def _media_url(file_payload: dict, sample_payload: dict) -> str | None:
+    """Prefer the original file URL and rebuild old e621 CDN URLs when needed."""
+    explicit = _normalize_url(file_payload.get("url"))
+    if explicit:
+        return explicit
+    digest = _valid_md5(file_payload.get("md5"))
+    extension = _valid_extension(file_payload.get("ext"))
+    if digest and extension:
+        return f"https://static1.e621.net/data/{digest[:2]}/{digest[2:4]}/{digest}.{extension}"
+    return _normalize_url(sample_payload.get("url"))
+
+
+def _normalize_url(value) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    value = value.strip()
+    return "https:" + value if value.startswith("//") else value
+
+
+def _valid_extension(value) -> str | None:
+    value = str(value or "").strip().lower().lstrip(".")
+    return value if value and len(value) <= 12 and all(char.isalnum() for char in value) else None
+
+
+def _is_transient_request_error(error) -> bool:
+    return isinstance(error, (requests.Timeout, requests.ConnectionError))
+
+
+def _sleep_backoff(response, attempt: int) -> None:
+    value = (getattr(response, "headers", None) or {}).get("Retry-After") if response is not None else None
+    delay = 0.0
+    if value:
         try:
             delay = max(0.0, float(value))
         except (TypeError, ValueError):
@@ -283,8 +324,9 @@ class E621SourceProvider:
                 delay = max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
             except (TypeError, ValueError, OverflowError):
                 delay = 0.0
-        if delay:
-            time.sleep(delay)
+    if delay <= 0:
+        delay = min(5.0, 0.5 * (2 ** attempt))
+    time.sleep(delay)
 
 
 def parse_set_url(url: str) -> tuple[str, str] | None:

@@ -9,6 +9,7 @@ from jiffle.features.imports.history import create_import_history, update_import
 from jiffle.features.imports.source_adapters.contracts import SourceMedia, SourceSet
 from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
 from jiffle.features.imports.universal_import import run_universal_import_job
+from jiffle.infrastructure.database.connection import connect_database
 
 
 class ActiveSetImportError(Exception):
@@ -62,10 +63,7 @@ def run_set_import_job(
     downloader,
     providers=None,
 ) -> None:
-    connection = sqlite3.connect(database_path)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
-    connection.execute("PRAGMA busy_timeout = 15000")
+    connection = connect_database(database_path)
     search_providers = tuple(providers or (provider,))
     started_at = time.perf_counter()
     try:

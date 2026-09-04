@@ -1,9 +1,8 @@
 import json
 from hashlib import sha256
-import sqlite3
 from threading import Thread
 from flask import Blueprint, current_app, jsonify, request, send_file
-from jiffle.infrastructure.database.connection import get_database
+from jiffle.infrastructure.database.connection import connect_database, get_database
 from .workflow import CropFailure, activate_revision, analyze_image, apply_crop, list_revisions, media_path, reset_analysis, reset_to_original, resolve_analysis
 from jiffle.infrastructure.media_revisions import active_edit_operations, revision_details
 from .vision import analyze_with_vision
@@ -134,7 +133,7 @@ def _crop_error(error):
     return jsonify({"error":{"code":error.code,"message":error.message,"details":error.details}}),status
 
 def _run_scan(database_path,settings,job_id,parameters):
-    connection=sqlite3.connect(database_path); connection.row_factory=sqlite3.Row; connection.execute("PRAGMA foreign_keys=ON")
+    connection=connect_database(database_path)
     try:
         signature=_scan_signature(parameters)
         total=connection.execute("SELECT COUNT(*) FROM media_items WHERE deleted_at IS NULL AND media_type='image'").fetchone()[0]
@@ -172,7 +171,7 @@ def _scan_signature(parameters):
     return sha256(json.dumps(canonical,sort_keys=True,separators=(",", ":")).encode("utf-8")).hexdigest()
 
 def resume_crop_scans(database_path,settings):
-    connection=sqlite3.connect(database_path); connection.row_factory=sqlite3.Row
+    connection=connect_database(database_path)
     try:
         rows=connection.execute("SELECT b.id,c.parameters_json FROM background_jobs b JOIN crop_scan_jobs c ON c.job_id=b.id WHERE b.status IN ('pending','running') AND c.cancel_requested=0 ORDER BY b.id").fetchall()
     finally:connection.close()

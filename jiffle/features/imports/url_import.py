@@ -1,4 +1,5 @@
 import json
+from hashlib import md5
 from pathlib import Path
 import sqlite3
 from uuid import uuid4
@@ -15,6 +16,7 @@ from jiffle.features.imports.local_import import (
 from jiffle.features.imports.history import create_import_history, update_import_history
 from jiffle.features.imports.source_adapters.contracts import MediaDownloader, SourceProvider
 from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
+from jiffle.infrastructure.database.connection import connect_database
 from jiffle.infrastructure.media_revisions import create_original_revision
 
 
@@ -41,9 +43,7 @@ def run_url_import_job(
     provider: SourceProvider,
     downloader: MediaDownloader,
 ) -> None:
-    connection = sqlite3.connect(database_path)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
+    connection = connect_database(database_path)
     temporary: Path | None = None
     try:
         _running(connection, job_id)
@@ -72,6 +72,12 @@ def run_url_import_job(
             f"download-{uuid4().hex}{source.file_extension}"
         )
         downloader.download(source.direct_media_url, temporary, source.canonical_url)
+        if source.content_md5 and _md5(temporary) != source.content_md5:
+            temporary.unlink(missing_ok=True)
+            raise ImportFailure(
+                "import.candidate_hash_mismatch",
+                "The downloaded source did not match the source hash.",
+            )
         inspection = inspect_media(temporary)
         pending_review = connection.execute(
             "SELECT review.id FROM review_items review "
@@ -166,7 +172,9 @@ def run_url_import_job(
     except (SourceProviderFailure, ImportFailure) as error:
         _failed(connection, job_id, error.code, error.message)
     except requests.RequestException as error:
-        _failed(connection, job_id, "import.download_failed", "The post media could not be downloaded.")
+        code = getattr(error, "code", "import.download_failed")
+        message = getattr(error, "message", "The post media could not be downloaded.")
+        _failed(connection, job_id, code, message)
         raise error
     except ValueError as error:
         _failed(connection, job_id, "import.invalid_media", "The downloaded post media is invalid.")
@@ -282,3 +290,11 @@ def _failed(connection, job_id, code, message):
     )
     update_import_history(connection, job_id, "failed", {"code": code, "message": message})
     connection.commit()
+
+
+def _md5(path: Path) -> str:
+    digest = md5()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()

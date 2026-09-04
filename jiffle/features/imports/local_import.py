@@ -13,6 +13,7 @@ from PIL import Image
 from jiffle.configuration.settings import Settings
 from jiffle.features.imports.domain import ImportOutcome, LocalImportCommand, LocalImportResult
 from jiffle.features.imports.history import create_import_history, update_import_history
+from jiffle.infrastructure.database.connection import connect_database
 from jiffle.infrastructure.media_revisions import create_original_revision
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
@@ -58,9 +59,7 @@ def run_local_import_job(
     job_id: int,
     command: LocalImportCommand,
 ) -> None:
-    connection = sqlite3.connect(database_path)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
+    connection = connect_database(database_path)
     try:
         _mark_running(connection, job_id)
         result = _import_file(connection, settings, job_id, command)
@@ -154,6 +153,7 @@ def _import_file(
         connection.commit()
         return LocalImportResult(ImportOutcome.DUPLICATE, candidate_id, media_item_id)
 
+    connection.commit()
     perceptual_duplicate = find_exact_perceptual_duplicate(
         connection, settings, source, inspection
     )
@@ -295,6 +295,11 @@ def find_exact_perceptual_duplicate(
     except (OSError, ValueError):
         return None
 
+    # Candidate metadata may have been updated immediately before this scan.
+    # Commit it before reading the whole library so the pHash pass never keeps
+    # a write transaction open while image files are being decoded.
+    if connection.in_transaction:
+        connection.commit()
     root = settings.media_path.resolve()
     rows = connection.execute(
         "SELECT media.id, media.file_path, fp.perceptual_hash "
@@ -303,6 +308,7 @@ def find_exact_perceptual_duplicate(
         "WHERE media.media_type='image' AND media.deleted_at IS NULL"
     ).fetchall()
     matches: list[int] = []
+    pending_fingerprints: list[tuple[int, str]] = []
     for row in rows:
         candidate_hash = row[2]
         candidate_path = _safe_media_path(root, row[1])
@@ -311,18 +317,21 @@ def find_exact_perceptual_duplicate(
         if not candidate_hash:
             candidate_hash = _calculate_perceptual_hash(candidate_path)
             if candidate_hash is not None:
-                connection.execute(
-                    "INSERT INTO media_fingerprints (media_item_id, perceptual_hash) "
-                    "VALUES (?, ?) ON CONFLICT(media_item_id) DO UPDATE SET "
-                    "perceptual_hash=excluded.perceptual_hash, updated_at=CURRENT_TIMESTAMP",
-                    (int(row[0]), candidate_hash),
-                )
+                pending_fingerprints.append((int(row[0]), candidate_hash))
         try:
             is_match = candidate_hash is not None and wanted - imagehash.hex_to_hash(str(candidate_hash)) == 0
         except (TypeError, ValueError):
             continue
         if is_match and _is_readable_image(candidate_path):
             matches.append(int(row[0]))
+    if pending_fingerprints:
+        connection.executemany(
+            "INSERT INTO media_fingerprints (media_item_id, perceptual_hash) "
+            "VALUES (?, ?) ON CONFLICT(media_item_id) DO UPDATE SET "
+            "perceptual_hash=excluded.perceptual_hash, updated_at=CURRENT_TIMESTAMP",
+            pending_fingerprints,
+        )
+        connection.commit()
     return matches[0] if len(matches) == 1 else None
 
 

@@ -6,6 +6,7 @@ import imagehash
 from PIL import Image
 
 from jiffle.configuration.settings import Settings
+from jiffle.infrastructure.database.connection import connect_database
 
 
 def create_duplicate_scan_job(connection: sqlite3.Connection, threshold: float) -> int:
@@ -21,9 +22,7 @@ def create_duplicate_scan_job(connection: sqlite3.Connection, threshold: float) 
 def run_duplicate_scan_job(
     database_path: Path, settings: Settings, job_id: int, threshold: float
 ) -> None:
-    connection = sqlite3.connect(database_path)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
+    connection = connect_database(database_path)
     try:
         connection.execute(
             "UPDATE background_jobs SET status='running', progress=5, "

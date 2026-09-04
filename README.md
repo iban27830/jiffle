@@ -131,6 +131,23 @@ resized and recompressed copies are handled by the local pHash check described
 above when there is one exact perceptual match; edited copies, lower-confidence
 matches, or ambiguous matches may still appear as Review choices.
 
+Some older or animated e621/e926 posts return `file.url` as empty even though the
+original still exists on the CDN. When the response includes a valid MD5 and file
+extension, Jiffle reconstructs the standard e621 CDN address and verifies the
+downloaded bytes against that MD5 before accepting the file. A CDN response that is
+missing, forbidden, timed out, or has the wrong hash becomes an issue for that post;
+the remaining posts in the set continue importing. e621 metadata and media requests
+use short, bounded retries for temporary network and server errors, while
+authorization, access-denied, not-found, and HTML responses are reported directly.
+
+Import has no per-file size limit. Original `GIF`, `MP4`, and `WebM` files are stored
+in the library without transcoding, regardless of their size. The image and video
+limits under **Settings → Import and limits** apply only to collection exports;
+export conversion can create a smaller copy while leaving the library original
+unchanged. Large downloads use a 15-second connection timeout and a 120-second
+read timeout, so a file may take longer than two minutes as long as data continues
+arriving.
+
 Universal import checks the local MD5 first, then performs exact MD5 searches on
 the supported providers. A TBIB sample, resized image, or re-encoded copy has
 different bytes and therefore cannot match the original through exact MD5;

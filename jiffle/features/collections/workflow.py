@@ -12,6 +12,7 @@ from uuid import uuid4
 from PIL import Image, ImageSequence
 
 from jiffle.configuration.settings import Settings
+from jiffle.infrastructure.database.connection import connect_database
 
 
 def parse_collection_query(value: object) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -226,8 +227,7 @@ def create_export_job(connection: sqlite3.Connection, collection_id: int) -> int
 def run_export_job(
     database_path: Path, settings: Settings, job_id: int, collection_id: int
 ) -> None:
-    connection = sqlite3.connect(database_path)
-    connection.row_factory = sqlite3.Row
+    connection = connect_database(database_path)
     staging: Path | None = None
     try:
         connection.execute(

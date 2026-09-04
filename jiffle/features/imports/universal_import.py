@@ -29,6 +29,7 @@ from jiffle.features.imports.local_import import (
 from jiffle.features.imports.source_adapters.contracts import SourceMedia, SourceMatch
 from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
 from jiffle.features.imports.url_normalization import normalize_source_url
+from jiffle.infrastructure.database.connection import connect_database
 from jiffle.infrastructure.media_revisions import create_original_revision
 
 
@@ -71,10 +72,7 @@ def run_universal_import_job(
     providers: tuple[object, ...],
     downloader: object,
 ) -> None:
-    connection = sqlite3.connect(database_path)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
-    connection.execute("PRAGMA busy_timeout = 15000")
+    connection = connect_database(database_path)
     temporary: list[Path] = []
     details: dict[str, object] = {
         "submitted_input": submitted_input,
@@ -170,16 +168,17 @@ def run_universal_import_job(
                     original_path.unlink(missing_ok=True)
                     original_path = None
                     details["source_download_failed"] = True
+                    error_code, error_message = _download_failure(error, "The source file was unavailable.")
                     details.setdefault("provider_errors", []).append({
                         "provider": source.provider,
-                        "code": "import.candidate_unavailable",
-                        "message": _safe_error_message(error, "The source file was unavailable."),
+                        "code": error_code,
+                        "message": error_message,
                         "remote_id": source.remote_id,
                     })
                     _record_provider_diagnostic(
                         details["provider_diagnostics"], "exact_download", source.provider, "unavailable", 0,
-                        "import.candidate_unavailable",
-                        _safe_error_message(error, "The source file was unavailable."),
+                        error_code,
+                        error_message,
                         remote_id=source.remote_id,
                     )
                 details["timing"]["phases_ms"]["source_download"] = _elapsed_ms(source_download_started)
@@ -247,15 +246,18 @@ def run_universal_import_job(
                         other.unlink(missing_ok=True)
                     return
                 except Exception as error:
-                    message = _safe_error_message(error, "The exact candidate was unavailable.")
-                    details.setdefault("provider_errors", []).append({"provider": match.provider, "code": "import.candidate_unavailable", "message": message, "remote_id": match.remote_id})
-                    _record_provider_diagnostic(details["provider_diagnostics"], "exact_download", match.provider, "unavailable", 0, "import.candidate_unavailable", message, remote_id=match.remote_id)
+                    code, message = _download_failure(error, "The exact candidate was unavailable.")
+                    details.setdefault("provider_errors", []).append({"provider": match.provider, "code": code, "message": message, "remote_id": match.remote_id})
+                    _record_provider_diagnostic(details["provider_diagnostics"], "exact_download", match.provider, "unavailable", 0, code, message, remote_id=match.remote_id)
                 finally:
                     downloaded.unlink(missing_ok=True)
             if exact and (download_errors or details.get("search_status") == "matched"):
                 _set_search_status(details, "candidate_download_failed")
             elif details.get("search_status") not in {"network_error", "authorization_error"}:
                 _set_search_status(details, _status_from_errors(errors))
+            failure = _first_download_failure(details.get("provider_errors"))
+            if failure:
+                raise ImportFailure(*failure)
             raise ImportFailure("import.source_not_found", "No downloadable exact copy was found for this source.")
 
         inspection = inspect_media(original_path)
@@ -333,9 +335,9 @@ def run_universal_import_job(
                 return
             except Exception as error:
                 downloaded.unlink(missing_ok=True)
-                message = _safe_error_message(error, "The exact candidate was unavailable.")
-                details.setdefault("provider_errors", []).append({"provider": match.provider, "code": "import.candidate_unavailable", "message": message, "remote_id": match.remote_id})
-                _record_provider_diagnostic(details["provider_diagnostics"], "exact_download", match.provider, "unavailable", 0, "import.candidate_unavailable", message, remote_id=match.remote_id)
+                code, message = _download_failure(error, "The exact candidate was unavailable.")
+                details.setdefault("provider_errors", []).append({"provider": match.provider, "code": code, "message": message, "remote_id": match.remote_id})
+                _record_provider_diagnostic(details["provider_diagnostics"], "exact_download", match.provider, "unavailable", 0, code, message, remote_id=match.remote_id)
             finally:
                 if downloaded in temporary:
                     temporary.remove(downloaded)
@@ -616,10 +618,10 @@ def _download_exact_candidates(exact, digest, settings, downloader, diagnostics=
             return index, match, downloaded, None
         except Exception as error:
             downloaded.unlink(missing_ok=True)
-            message = _safe_error_message(error, "The exact candidate was unavailable.")
-            item = {"provider": match.provider, "code": "import.candidate_unavailable", "message": message, "remote_id": match.remote_id}
+            code, message = _download_failure(error, "The exact candidate was unavailable.")
+            item = {"provider": match.provider, "code": code, "message": message, "remote_id": match.remote_id}
             if diagnostics is not None:
-                _record_provider_diagnostic(diagnostics, "exact_download", match.provider, "unavailable", 0, item["code"], message, remote_id=match.remote_id)
+                _record_provider_diagnostic(diagnostics, "exact_download", match.provider, "unavailable", 0, code, message, remote_id=match.remote_id)
             return index, match, None, item
 
     valid = []
@@ -690,6 +692,41 @@ def _safe_error_message(error, fallback: str) -> str:
     # exceptions retain only a short first line so request details cannot leak.
     message = re.sub(r"https?://[^\s)]+", "<redacted-url>", message.splitlines()[0])
     return message[:240]
+
+
+def _download_failure(error, fallback: str) -> tuple[str, str]:
+    """Translate downloader/provider exceptions into stable user diagnostics."""
+    code = getattr(error, "code", None)
+    message = getattr(error, "message", None)
+    if code:
+        return str(code), _safe_error_message(message or error, fallback)
+    status = getattr(getattr(error, "response", None), "status_code", None)
+    if status in {401, 403, 404}:
+        return "import.source_media_unavailable", f"The source media is unavailable (HTTP {status})."
+    if status == 408:
+        return "import.download_timeout", "The media download timed out."
+    if status == 429:
+        return "import.download_rate_limited", "The media source rate limit was reached."
+    if status in {500, 502, 503, 504}:
+        return "import.download_unavailable", f"The media source returned temporary HTTP {status}."
+    name = error.__class__.__name__.lower()
+    if "timeout" in name:
+        return "import.download_timeout", "The media download timed out."
+    if "connection" in name:
+        return "import.download_unavailable", "The media source was unavailable."
+    if isinstance(error, ImportFailure):
+        return error.code, _safe_error_message(error.message, fallback)
+    safe = _safe_error_message(error, fallback)
+    if "html" in safe.lower():
+        return "import.source_media_unavailable", "The source returned HTML instead of media."
+    return "import.candidate_unavailable", safe
+
+
+def _first_download_failure(errors) -> tuple[str, str] | None:
+    for item in errors or ():
+        if isinstance(item, dict) and item.get("code") and item.get("message"):
+            return str(item["code"]), str(item["message"])
+    return None
 
 
 def _status_for_error(code: str | None) -> str:
@@ -1035,4 +1072,4 @@ def _finalize_timing(details):
 
 def _extension(url):
     suffix = Path(urlsplit(str(url)).path).suffix.lower()
-    return suffix if suffix in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".webm"} else ".jpg"
+    return suffix or ".jpg"

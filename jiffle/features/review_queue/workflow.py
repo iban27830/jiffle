@@ -11,6 +11,7 @@ from jiffle.configuration.settings import Settings
 from jiffle.features.imports.local_import import atomic_copy
 from jiffle.features.imports.source_adapters.contracts import SourceMedia, SourceProvider
 from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
+from jiffle.infrastructure.database.connection import connect_database
 from jiffle.infrastructure.media_revisions import create_original_revision
 
 
@@ -232,9 +233,7 @@ def run_manual_source_job(
     source_url: str,
     provider: SourceProvider,
 ) -> None:
-    connection = sqlite3.connect(database_path)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
+    connection = connect_database(database_path)
     try:
         connection.execute(
             "UPDATE background_jobs SET status='running', progress=20, "
@@ -434,9 +433,7 @@ def run_metadata_refresh_job(
     media_item_id: int,
     provider: SourceProvider,
 ) -> None:
-    connection = sqlite3.connect(database_path)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
+    connection = connect_database(database_path)
     try:
         connection.execute(
             "UPDATE background_jobs SET status='running', progress=20, started_at=CURRENT_TIMESTAMP WHERE id=?",
