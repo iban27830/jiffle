@@ -107,13 +107,29 @@ Jiffle first checks the local library and then searches supported providers for 
 exact MD5 copy. A downloaded copy is checked again locally before it is accepted,
 so an unavailable source or an incorrect media response is skipped automatically.
 
+Before creating a Review item, Jiffle also compares downloaded or selected images
+with the live local library by perceptual hash. If exactly one live image has a
+100% perceptual match, the new file is marked **Already imported** and is not
+added to the library or Review. The existing high-resolution file, source URL,
+author, tags, dimensions, and other metadata remain unchanged. This applies to
+resized and recompressed copies after a URL has been downloaded, as well as to
+local files. Select **Open in Library** in the Import history entry to open the
+matched item.
+
+If two or more live library items have the same perceptual hash, Jiffle does not
+choose one automatically. The import continues through the normal Review flow
+so you can resolve the ambiguity. Matches below 100%, deleted items, and missing
+or unreadable library files are also left to the existing Review or blocked-media
+workflow.
+
 For a deleted e621 post, e621 can still return the file's MD5 in its JSON metadata.
 Paste that post URL into the same Import window and Jiffle can use the MD5 to search
 TBIB and other supported sources. If no exact copy is downloadable, Jiffle checks
 local perceptual fingerprints and can query IQDB for an approximate match. Results
 below 80% similarity are ignored. Exact matching requires the same file bytes;
-resized, recompressed, or edited copies may therefore appear as Review choices
-instead of being imported automatically.
+resized and recompressed copies are handled by the local pHash check described
+above when there is one exact perceptual match; edited copies, lower-confidence
+matches, or ambiguous matches may still appear as Review choices.
 
 For an e621 or e926 post set, Jiffle first checks the complete set (using the saved e621 username and API key when configured), then imports up to four posts at the same time. The final counters and issue list keep the set's original order. The set itself is not added as a local collection. A private set or a set that cannot be accessed fails before any files are downloaded. If a post is deleted or its file is unavailable, Jiffle first tries its saved MD5 with the other providers, then records an issue only when no usable copy is found. Select **Stop** in the status bar to prevent new posts from starting; posts already running are allowed to finish. The status bar shows the current phase, active posts, and elapsed time, while **Import history** shows the total duration and slowest posts. Provider and download timings help identify a slow external service; a provider or CDN can still delay an individual post. Times in the interface are converted to the computer's local time zone, while the database remains in UTC.
 

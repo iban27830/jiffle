@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 from uuid import uuid4
 
+import imagehash
 from PIL import Image
 
 from jiffle.configuration.settings import Settings
@@ -75,6 +76,17 @@ def run_local_import_job(
         )
         raise
     finally:
+        if command.source_path.parent.resolve() == settings.resolved_import_staging_path.resolve():
+            row = connection.execute(
+                "SELECT status, stored_path FROM import_candidates WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            is_upload = command.source_path.name.startswith("upload-")
+            if row and (
+                row["status"] in {"accepted", "duplicate", "failed"}
+                or is_upload and row["stored_path"] != command.source_path.name
+            ):
+                command.source_path.unlink(missing_ok=True)
         connection.close()
 
 
@@ -130,7 +142,7 @@ def _import_file(
         ),
     )
     duplicate = connection.execute(
-        "SELECT id FROM media_items WHERE content_hash = ?",
+        "SELECT id FROM media_items WHERE content_hash = ? AND deleted_at IS NULL",
         (inspection.content_hash,),
     ).fetchone()
     if duplicate:
@@ -141,6 +153,22 @@ def _import_file(
         )
         connection.commit()
         return LocalImportResult(ImportOutcome.DUPLICATE, candidate_id, media_item_id)
+
+    perceptual_duplicate = find_exact_perceptual_duplicate(
+        connection, settings, source, inspection
+    )
+    if perceptual_duplicate is not None:
+        connection.execute(
+            "UPDATE import_candidates SET status = 'duplicate', media_item_id = ? WHERE id = ?",
+            (perceptual_duplicate, candidate_id),
+        )
+        connection.commit()
+        return LocalImportResult(
+            ImportOutcome.DUPLICATE,
+            candidate_id,
+            perceptual_duplicate,
+            resolution_method="local_perceptual_duplicate",
+        )
 
     if not command.accept_without_source:
         relative_path = atomic_copy(
@@ -191,7 +219,7 @@ def _import_file(
         (settings.media_path / relative_path).unlink(missing_ok=True)
         connection.rollback()
         duplicate = connection.execute(
-            "SELECT id FROM media_items WHERE content_hash = ?",
+            "SELECT id FROM media_items WHERE content_hash = ? AND deleted_at IS NULL",
             (inspection.content_hash,),
         ).fetchone()
         if duplicate is None:
@@ -245,6 +273,86 @@ def inspect_media(source: Path) -> MediaInspection:
         file_size=source.stat().st_size,
         content_hash=_sha256(source),
     )
+
+
+def find_exact_perceptual_duplicate(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    source: Path,
+    inspection: MediaInspection | None = None,
+) -> int | None:
+    """Return the sole live image with a zero-distance pHash match.
+
+    Older library items may not have a cached fingerprint. In that case the
+    current file is hashed and the cache is populated opportunistically.
+    Missing or unreadable files are ignored so imports remain usable.
+    """
+    if inspection is not None and inspection.media_type != "image":
+        return None
+    try:
+        with Image.open(source) as image:
+            wanted = imagehash.phash(image)
+    except (OSError, ValueError):
+        return None
+
+    root = settings.media_path.resolve()
+    rows = connection.execute(
+        "SELECT media.id, media.file_path, fp.perceptual_hash "
+        "FROM media_items media LEFT JOIN media_fingerprints fp "
+        "ON fp.media_item_id=media.id "
+        "WHERE media.media_type='image' AND media.deleted_at IS NULL"
+    ).fetchall()
+    matches: list[int] = []
+    for row in rows:
+        candidate_hash = row[2]
+        candidate_path = _safe_media_path(root, row[1])
+        if candidate_path is None or not candidate_path.is_file():
+            continue
+        if not candidate_hash:
+            candidate_hash = _calculate_perceptual_hash(candidate_path)
+            if candidate_hash is not None:
+                connection.execute(
+                    "INSERT INTO media_fingerprints (media_item_id, perceptual_hash) "
+                    "VALUES (?, ?) ON CONFLICT(media_item_id) DO UPDATE SET "
+                    "perceptual_hash=excluded.perceptual_hash, updated_at=CURRENT_TIMESTAMP",
+                    (int(row[0]), candidate_hash),
+                )
+        try:
+            is_match = candidate_hash is not None and wanted - imagehash.hex_to_hash(str(candidate_hash)) == 0
+        except (TypeError, ValueError):
+            continue
+        if is_match and _is_readable_image(candidate_path):
+            matches.append(int(row[0]))
+    return matches[0] if len(matches) == 1 else None
+
+
+def _calculate_perceptual_hash(source: Path | None) -> str | None:
+    if source is None or not source.is_file():
+        return None
+    try:
+        with Image.open(source) as image:
+            return str(imagehash.phash(image))
+    except (OSError, ValueError):
+        return None
+
+
+def _is_readable_image(source: Path) -> bool:
+    try:
+        with Image.open(source) as image:
+            image.verify()
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _safe_media_path(root: Path, stored_path: str | None) -> Path | None:
+    if not stored_path:
+        return None
+    try:
+        candidate = (root / stored_path).resolve()
+        return candidate if candidate.is_relative_to(root) else None
+    except (OSError, ValueError, TypeError):
+        return None
 
 
 def _video_dimensions(source: Path) -> tuple[int, int]:
@@ -327,6 +435,8 @@ def _mark_completed(
         "media_item_id": result.media_item_id,
         "review_item_id": result.review_item_id,
     }
+    if result.resolution_method:
+        payload["resolution_method"] = result.resolution_method
     connection.execute(
         "UPDATE background_jobs SET status = 'completed', progress = 100, "
         "result_json = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?",

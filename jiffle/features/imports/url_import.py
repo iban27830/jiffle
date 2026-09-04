@@ -6,7 +6,12 @@ from uuid import uuid4
 import requests
 
 from jiffle.configuration.settings import Settings
-from jiffle.features.imports.local_import import ImportFailure, atomic_copy, inspect_media
+from jiffle.features.imports.local_import import (
+    ImportFailure,
+    atomic_copy,
+    find_exact_perceptual_duplicate,
+    inspect_media,
+)
 from jiffle.features.imports.history import create_import_history, update_import_history
 from jiffle.features.imports.source_adapters.contracts import MediaDownloader, SourceProvider
 from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
@@ -107,13 +112,26 @@ def run_url_import_job(
             temporary = None
             return
         existing_hash = connection.execute(
-            "SELECT id FROM media_items WHERE content_hash = ?",
+            "SELECT id FROM media_items WHERE content_hash = ? AND deleted_at IS NULL",
             (inspection.content_hash,),
         ).fetchone()
         if existing_hash:
             media_item_id = int(existing_hash[0])
             _attach_source(connection, media_item_id, source)
             _duplicate(connection, job_id, source, media_item_id)
+            return
+
+        perceptual_duplicate = find_exact_perceptual_duplicate(
+            connection, settings, temporary, inspection
+        )
+        if perceptual_duplicate is not None:
+            _duplicate(
+                connection,
+                job_id,
+                source,
+                perceptual_duplicate,
+                resolution_method="local_perceptual_duplicate",
+            )
             return
 
         stored_path = atomic_copy(temporary, settings.media_path, "media")
@@ -214,13 +232,13 @@ def _running(connection, job_id):
     connection.commit()
 
 
-def _duplicate(connection, job_id, source, media_item_id):
+def _duplicate(connection, job_id, source, media_item_id, resolution_method=None):
     connection.execute(
         "UPDATE url_import_candidates SET canonical_url=?, provider=?, status='duplicate', "
         "media_item_id=? WHERE job_id=?",
         (source.canonical_url, source.provider, media_item_id, job_id),
     )
-    _completed(connection, job_id, "duplicate", media_item_id)
+    _completed(connection, job_id, "duplicate", media_item_id, resolution_method=resolution_method)
 
 
 def _duplicate_review(connection, job_id, source, review_item_id):
@@ -232,12 +250,18 @@ def _duplicate_review(connection, job_id, source, review_item_id):
     _completed(connection, job_id, "duplicate", None, review_item_id)
 
 
-def _completed(connection, job_id, outcome, media_item_id, review_item_id=None):
-    result = json.dumps({
+def _completed(
+    connection, job_id, outcome, media_item_id, review_item_id=None,
+    resolution_method=None,
+):
+    payload = {
         "outcome": outcome,
         "media_item_id": media_item_id,
         "review_item_id": review_item_id,
-    })
+    }
+    if resolution_method:
+        payload["resolution_method"] = resolution_method
+    result = json.dumps(payload)
     connection.execute(
         "UPDATE background_jobs SET status='completed', progress=100, result_json=?, "
         "finished_at=CURRENT_TIMESTAMP WHERE id=?", (result, job_id)

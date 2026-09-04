@@ -19,7 +19,12 @@ from PIL import Image
 
 from jiffle.configuration.settings import Settings
 from jiffle.features.imports.history import create_import_history, update_import_history
-from jiffle.features.imports.local_import import ImportFailure, atomic_copy, inspect_media
+from jiffle.features.imports.local_import import (
+    ImportFailure,
+    atomic_copy,
+    find_exact_perceptual_duplicate,
+    inspect_media,
+)
 from jiffle.features.imports.source_adapters.contracts import SourceMedia, SourceMatch
 from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
 from jiffle.features.imports.url_normalization import normalize_source_url
@@ -139,7 +144,7 @@ def run_universal_import_job(
                     source_url_override=normalized_input,
                 )
                 details.update({
-                    "resolution_method": "source",
+                    "resolution_method": result.get("resolution_method", "source"),
                     "resolved_source_url": source.canonical_url if source else submitted_input,
                 })
                 _finish(connection, job_id, result, details)
@@ -174,7 +179,10 @@ def run_universal_import_job(
                         connection, settings, job_id, downloaded, source, submitted_input,
                         source_url_override=normalized_input,
                     )
-                    details.update({"resolution_method": "exact", "resolved_source_url": match.canonical_url})
+                    details.update({
+                        "resolution_method": result.get("resolution_method", "exact"),
+                        "resolved_source_url": match.canonical_url,
+                    })
                     _finish(connection, job_id, result, details)
                     for _, other in valid_candidates:
                         other.unlink(missing_ok=True)
@@ -188,6 +196,27 @@ def run_universal_import_job(
         inspection = inspect_media(original_path)
         candidate_id = _candidate_id(connection, job_id)
         _update_candidate(connection, candidate_id, inspection, None, "pending")
+        pending_review = connection.execute(
+            "SELECT review.id FROM review_items review "
+            "JOIN import_candidates candidate ON candidate.id=review.import_candidate_id "
+            "WHERE review.status='pending' AND candidate.content_hash=? LIMIT 1",
+            (inspection.content_hash,),
+        ).fetchone()
+        if pending_review:
+            _set_candidate_result(connection, candidate_id, "duplicate", None)
+            details["resolution_method"] = "pending_review"
+            _finish(
+                connection,
+                job_id,
+                {
+                    "outcome": "duplicate",
+                    "candidate_id": candidate_id,
+                    "media_item_id": None,
+                    "review_item_id": int(pending_review[0]),
+                },
+                details,
+            )
+            return
         duplicate = connection.execute(
             "SELECT id FROM media_items WHERE content_hash=? AND deleted_at IS NULL",
             (inspection.content_hash,),
@@ -222,7 +251,7 @@ def run_universal_import_job(
                 source = _match_to_source(match)
                 result = _accept_downloaded(connection, settings, job_id, downloaded, source, submitted_input)
                 details.update({
-                    "resolution_method": "exact",
+                    "resolution_method": result.get("resolution_method", "exact"),
                     "resolved_source_url": match.canonical_url,
                 })
                 _finish(connection, job_id, result, details)
@@ -239,6 +268,25 @@ def run_universal_import_job(
                     temporary.remove(downloaded)
         for _, downloaded in valid_candidates:
             downloaded.unlink(missing_ok=True)
+
+        perceptual_duplicate = find_exact_perceptual_duplicate(
+            connection, settings, original_path, inspection
+        )
+        if perceptual_duplicate is not None:
+            _set_candidate_result(connection, candidate_id, "duplicate", perceptual_duplicate)
+            details["resolution_method"] = "local_perceptual_duplicate"
+            _finish(
+                connection,
+                job_id,
+                {
+                    "outcome": "duplicate",
+                    "candidate_id": candidate_id,
+                    "media_item_id": perceptual_duplicate,
+                    "resolution_method": "local_perceptual_duplicate",
+                },
+                details,
+            )
+            return
 
         # Keep the original in staging before trying approximate candidates.
         original_staged = atomic_copy(original_path, settings.resolved_import_staging_path, "candidate")
@@ -564,7 +612,10 @@ def _accept_downloaded(
     source_url_override=None,
 ):
     inspection = inspect_media(path)
-    existing = connection.execute("SELECT id FROM media_items WHERE content_hash=?", (inspection.content_hash,)).fetchone()
+    existing = connection.execute(
+        "SELECT id FROM media_items WHERE content_hash=? AND deleted_at IS NULL",
+        (inspection.content_hash,),
+    ).fetchone()
     candidate_id = _candidate_id(connection, job_id)
     if existing:
         if source:
@@ -576,6 +627,18 @@ def _accept_downloaded(
             )
         _set_candidate_result(connection, candidate_id, "duplicate", int(existing[0]))
         return {"outcome": "duplicate", "candidate_id": candidate_id, "media_item_id": int(existing[0])}
+
+    perceptual_duplicate = find_exact_perceptual_duplicate(
+        connection, settings, path, inspection
+    )
+    if perceptual_duplicate is not None:
+        _set_candidate_result(connection, candidate_id, "duplicate", perceptual_duplicate)
+        return {
+            "outcome": "duplicate",
+            "candidate_id": candidate_id,
+            "media_item_id": perceptual_duplicate,
+            "resolution_method": "local_perceptual_duplicate",
+        }
     stored = atomic_copy(path, settings.media_path, "media")
     try:
         cursor = connection.execute(
@@ -683,6 +746,8 @@ def _running(connection, job_id):
 def _finish(connection, job_id, result, details):
     _finalize_timing(details)
     payload = dict(result)
+    if details.get("resolution_method") and "resolution_method" not in payload:
+        payload["resolution_method"] = details["resolution_method"]
     payload["resolution"] = details
     connection.execute("UPDATE background_jobs SET status='completed', progress=100, result_json=?, finished_at=CURRENT_TIMESTAMP WHERE id=?", (json.dumps(payload), job_id))
     update_import_history(connection, job_id, result.get("outcome", "failed"), {**details, **result})

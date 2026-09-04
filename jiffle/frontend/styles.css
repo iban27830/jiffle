@@ -146,6 +146,8 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
 .item-list { display: grid; gap: 10px; }
 .queue-item, .collection-item, .history-row { display: grid; grid-template-columns: 80px minmax(0,1fr) auto; gap: 14px; align-items: center; padding: 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
 .queue-item strong, .collection-item strong, .history-row strong { display: block; line-height: 1.35; }
+.history-meta { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; }
+.history-meta time { white-space: nowrap; }
 .drop-import { min-height: 300px; border: 2px dashed var(--line); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; text-align:center; background:var(--surface); }
 .drop-import.dragging { border-color: var(--accent); background: var(--surface-2); }
 .drop-import > svg { width:42px; height:42px; color:var(--accent); }
@@ -360,6 +362,8 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
   .queue-item { grid-template-columns: 64px minmax(0,1fr); }
   .queue-item img { width: 64px; height: 50px; }
   .queue-item .actions { grid-column: 1/3; justify-content: flex-start; }
+  .history-row { grid-template-columns: 64px minmax(0,1fr); }
+  .history-meta { grid-column: 2; justify-content: space-between; }
   .collection-meta { grid-template-columns: 1fr; align-items: stretch; }
   .editor-version-compare { grid-template-columns: 1fr; }
   .background-scan-toolbar { grid-template-columns: repeat(2,minmax(0,1fr)); }
@@ -383,6 +387,8 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
   .toolbar-count .control { width: 68px; }
   .active-filters { grid-column: 1/-1; }
   .compare { grid-template-columns: 1fr; }
+  .history-row { grid-template-columns: 28px minmax(0,1fr); gap: 8px; padding: 10px; }
+  .history-meta { grid-column: 2; }
   .collection-toolbar { grid-template-columns: 1fr 1fr; }
   .collection-toolbar input { grid-column: 1/-1; }
   .collection-gallery { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 7px; }

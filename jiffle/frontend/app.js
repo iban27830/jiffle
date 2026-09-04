@@ -407,12 +407,15 @@ async function showImport() {
     const set=details.set || {};
     const counters=['accepted','duplicate','review','blocked','failed'].filter(key=>details[key] != null).map(key=>`${key}: ${details[key]}`).join(' · ');
     const issues=Array.isArray(details.issues) && details.issues.length ? `<details class="history-issues"><summary>Issues (${details.issues.length})</summary><ul>${details.issues.map(issue=>`<li><a href="${esc(issue.url || '#')}" target="_blank" rel="noopener">${esc(issue.post_id || issue.remote_id || 'post')}</a>: ${esc(issue.message || issue.code || 'Import failed')}</li>`).join('')}</ul></details>` : '';
-    const label=historyLabels[item.event_type] || item.event_type;
+    const mediaId = Number(details.media_item_id);
+    const hasMedia = item.event_type === 'import.duplicate' && Number.isInteger(mediaId) && mediaId > 0;
+    const label = hasMedia ? 'Already imported' : (historyLabels[item.event_type] || item.event_type);
+    const openAction = hasMedia ? `<button type="button" class="icon-btn open-import-media" data-media-id="${mediaId}" title="Open in Library"><i data-lucide="images"></i></button>` : '';
     const resolved = details.resolved_source_url ? ` · ${esc(details.resolved_source_url)}` : '';
     const duration = details.timing?.duration_ms != null ? ` · ${formatDuration(details.timing.duration_ms)}` : '';
     const slowest = details.timing?.slowest_posts?.[0];
     const slowestLabel = slowest ? ` · slowest #${esc(slowest.post_id)} (${formatDuration(slowest.duration_ms)})` : '';
-    return `<article class="history-row"><i data-lucide="${item.event_type === 'import.pending' ? 'loader-circle' : 'activity'}" class="${item.event_type === 'import.pending' ? 'spin' : ''}"></i><div><strong>${esc(label)}</strong><small>${set.name ? `${esc(set.name)} · ` : ''}Import #${item.entity_id}${counters ? ` · ${esc(counters)}` : ''}${duration}${slowestLabel}${resolved}</small>${issues}</div><time>${esc(formatDateTime(item.created_at))}</time></article>`;
+    return `<article class="history-row"><i data-lucide="${item.event_type === 'import.pending' ? 'loader-circle' : 'activity'}" class="${item.event_type === 'import.pending' ? 'spin' : ''}"></i><div><strong>${esc(label)}</strong><small>${set.name ? `${esc(set.name)} · ` : ''}Import #${item.entity_id}${counters ? ` · ${esc(counters)}` : ''}${duration}${slowestLabel}${resolved}</small>${issues}</div><div class="history-meta"><time>${esc(formatDateTime(item.created_at))}</time>${openAction}</div></article>`;
   }).join('');
   workspace.innerHTML = `<div class="page"><section id="dropImport" class="drop-import" tabindex="0"><i data-lucide="upload-cloud"></i><strong>Drop a file, image link, or post link here</strong><span>Paste an image, video, or URL into this window</span><input id="fileImport" type="file" accept="image/*,video/*" hidden><button id="chooseImport" type="button" class="btn primary"><i data-lucide="file-up"></i>Choose file</button><input id="pasteImport" class="control" type="url" placeholder="https://..." aria-label="Image or post URL"><button id="submitUrlImport" type="button" class="btn"><i data-lucide="link"></i>Resolve and import</button><div id="importResolveStatus" class="muted" aria-live="polite"></div></section><section class="import-history"><div class="page-head"><h2>Import history</h2><span class="badge">${history.page.total}</span></div><div class="item-list">${historyRows || '<div class="empty">History is empty</div>'}</div></section></div>`;
   const drop = document.querySelector('#dropImport'); const fileInput = document.querySelector('#fileImport');
@@ -440,6 +443,7 @@ async function showImport() {
     }
   };
   document.querySelector('#submitUrlImport').onclick = () => submitUrl(document.querySelector('#pasteImport').value.trim());
+  document.querySelectorAll('.open-import-media').forEach(node => node.onclick = () => openMediaInLibrary(Number(node.dataset.mediaId)));
   icons(); restoreSetImportMonitor();
 }
 

@@ -21,3 +21,4 @@ class LocalImportResult:
     candidate_id: int
     media_item_id: int | None = None
     review_item_id: int | None = None
+    resolution_method: str | None = None
