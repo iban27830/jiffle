@@ -6,7 +6,7 @@ from jiffle.configuration.settings import Settings
 from jiffle.features.imports.history import create_import_history, update_import_history
 from jiffle.features.imports.source_adapters.contracts import SourceMedia, SourceSet
 from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
-from jiffle.features.imports.url_import import run_url_import_job
+from jiffle.features.imports.universal_import import run_universal_import_job
 
 
 class ActiveSetImportError(Exception):
@@ -22,6 +22,12 @@ class _StaticProvider:
 
     def fetch(self, _url: str) -> SourceMedia:
         return self.source
+
+    def fetch_metadata(self, _url: str) -> SourceMedia:
+        return self.source
+
+    def can_handle(self, url: str) -> bool:
+        return url == self.source.canonical_url
 
 
 def create_set_import_job(connection: sqlite3.Connection, submitted_url: str, provider) -> int:
@@ -52,10 +58,12 @@ def run_set_import_job(
     submitted_url: str,
     provider,
     downloader,
+    providers=None,
 ) -> None:
     connection = sqlite3.connect(database_path)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
+    search_providers = tuple(providers or (provider,))
     try:
         _mark_running(connection, job_id)
         source_set = provider.fetch_set(submitted_url)
@@ -92,9 +100,9 @@ def run_set_import_job(
             child_id = _create_child_job(connection, job_id, source.canonical_url)
             connection.commit()
             try:
-                run_url_import_job(
+                run_universal_import_job(
                     database_path, settings, child_id, source.canonical_url,
-                    _StaticProvider(source), downloader,
+                    "url", (_StaticProvider(source), *search_providers), downloader,
                 )
             except (sqlite3.Error, OSError) as error:
                 _fail_parent(
@@ -217,6 +225,10 @@ def _create_child_job(connection, parent_id: int, submitted_url: str) -> int:
     connection.execute(
         "INSERT INTO url_import_candidates (job_id, submitted_url, status) VALUES (?, ?, 'pending')",
         (child_id, submitted_url),
+    )
+    connection.execute(
+        "INSERT INTO import_candidates (job_id, source_path, original_name, status) VALUES (?, ?, ?, 'pending')",
+        (child_id, submitted_url, Path(submitted_url).name or "import"),
     )
     return child_id
 

@@ -87,8 +87,10 @@ For an older installation whose updater still reports that Git is missing, downl
 
 Open **Import**. It has one window for every import type: drag a local image/video,
 drag a browser link, paste an image from the clipboard, or enter a URL and select
-**Resolve and import**. Jiffle detects whether the input is a local file, a post
-link, or a direct media URL and keeps the progress entry in **Import history**.
+**Resolve and import**. Pasting a URL fills the field without starting an import;
+press **Enter** or select **Resolve and import** when you are ready. Jiffle detects
+whether the input is a local file, a post link, or a direct media URL and keeps the
+progress entry in **Import history**.
 
 Supported online sources include:
 
@@ -113,7 +115,7 @@ below 80% similarity are ignored. Exact matching requires the same file bytes;
 resized, recompressed, or edited copies may therefore appear as Review choices
 instead of being imported automatically.
 
-For an e621 or e926 post set, Jiffle first checks the complete set (using the saved e621 username and API key when configured), then downloads the posts one at a time in the set's order. The set itself is not added as a local collection. A private set or a set that cannot be accessed fails before any files are downloaded. A set that contains an unavailable post can finish partially; the Import history entry lists that post and the reason.
+For an e621 or e926 post set, Jiffle first checks the complete set (using the saved e621 username and API key when configured), then downloads the posts one at a time in the set's order. The set itself is not added as a local collection. A private set or a set that cannot be accessed fails before any files are downloaded. If a post is deleted or its file is unavailable, Jiffle first tries its saved MD5 with the other providers, then records an issue only when no usable copy is found. The remaining posts continue, and the Import history entry lists any unresolved post and the reason.
 
 ### Browse and organize
 

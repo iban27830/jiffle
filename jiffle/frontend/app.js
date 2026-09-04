@@ -413,7 +413,22 @@ async function showImport() {
   drop.ondragover = event => { event.preventDefault(); drop.classList.add('dragging'); };
   drop.ondragleave = () => drop.classList.remove('dragging');
   drop.ondrop = event => { event.preventDefault(); drop.classList.remove('dragging'); const file=event.dataTransfer.files[0]; if (file) submitFile(file); else submitUrl(droppedUrl(event.dataTransfer)); };
-  drop.onpaste = event => { const file = [...(event.clipboardData?.files || [])].find(item => item.type?.startsWith('image/')); if (file) { event.preventDefault(); submitFile(file); return; } const url = droppedUrl(event.clipboardData); if (url) { event.preventDefault(); submitUrl(url); } };
+  drop.onpaste = event => {
+    const file = [...(event.clipboardData?.files || [])].find(item => item.type?.startsWith('image/'));
+    if (file) { event.preventDefault(); submitFile(file); return; }
+    const url = droppedUrl(event.clipboardData);
+    if (url) {
+      event.preventDefault();
+      const input = document.querySelector('#pasteImport');
+      if (input) { input.value = url; input.focus(); }
+    }
+  };
+  document.querySelector('#pasteImport').onkeydown = event => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      submitUrl(event.currentTarget.value.trim());
+    }
+  };
   document.querySelector('#submitUrlImport').onclick = () => submitUrl(document.querySelector('#pasteImport').value.trim());
   icons(); restoreSetImportMonitor();
 }

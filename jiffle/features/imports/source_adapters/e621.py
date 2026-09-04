@@ -163,12 +163,28 @@ class E621SourceProvider:
         issues: list[SetPostIssue] = []
         for post_id in post_ids:
             post = posts_by_id.get(post_id)
+            if post is None:
+                # Deleted posts are omitted from the set listing, but their
+                # individual metadata can still include the original MD5.
+                try:
+                    payload = self._get_json(
+                        f"https://{domain}/posts/{post_id}.json", context="post"
+                    )
+                    post = payload.get("post", payload) if isinstance(payload, dict) else payload
+                    if isinstance(post, list):
+                        post = post[0] if post else None
+                except SourceProviderFailure:
+                    post = None
             canonical = f"https://{domain}/posts/{post_id}"
             if post is None:
                 issues.append(SetPostIssue(post_id, canonical, "import.source_post_unavailable", "The post was not returned by e621 while loading the set."))
                 continue
             try:
-                posts.append(self._post_to_source(post, domain, post_id))
+                source = self._post_to_source(post, domain, post_id, allow_missing=True)
+                if source.direct_media_url or source.content_md5:
+                    posts.append(source)
+                else:
+                    issues.append(SetPostIssue(post_id, canonical, "import.source_media_missing", "The post has no downloadable media."))
             except (KeyError, TypeError, ValueError):
                 issues.append(SetPostIssue(post_id, canonical, "import.source_media_missing", "The post has no downloadable media."))
         return SourceSet(

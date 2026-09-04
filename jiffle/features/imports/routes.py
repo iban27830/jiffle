@@ -65,7 +65,11 @@ def create_import_resolve_job():
                 job_id = create_set_import_job(get_database(), submitted_input, provider)
             except ActiveSetImportError as error:
                 return jsonify({"error": {"code": "import.set_already_active", "message": "A set import is already running.", "details": {"job_id": error.job_id}}}), 409
-            arguments = (settings.database_path, settings, job_id, submitted_input, provider, current_app.config["JIFFLE_MEDIA_DOWNLOADER"])
+            arguments = (
+                settings.database_path, settings, job_id, submitted_input, provider,
+                current_app.config["JIFFLE_MEDIA_DOWNLOADER"],
+                current_app.config["JIFFLE_SOURCE_PROVIDERS"],
+            )
             if settings.run_jobs_inline:
                 run_set_import_job(*arguments)
             else:
@@ -164,7 +168,8 @@ def create_url_job():
                 }
             }), 409
         arguments = (
-            settings.database_path, settings, job_id, normalized_url, provider, downloader
+            settings.database_path, settings, job_id, normalized_url, provider, downloader,
+            providers,
         )
         if settings.run_jobs_inline:
             run_set_import_job(*arguments)
