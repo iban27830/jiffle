@@ -96,6 +96,8 @@ def run_universal_import_job(
         _running(connection, job_id)
         source_path = Path(submitted_input)
         original_path: Path
+        metadata_source: SourceMedia | None = None
+        file_source: SourceMedia | None = None
         if input_kind == "url":
             normalized_input = normalize_source_url(submitted_input)
             candidate_id = _candidate_id(connection, job_id)
@@ -184,9 +186,12 @@ def run_universal_import_job(
                 details["timing"]["phases_ms"]["source_download"] = _elapsed_ms(source_download_started)
             if original_path is not None:
                 temporary.append(original_path)
+                metadata_source = source
+                file_source = source
                 result = _accept_downloaded(
                     connection, settings, job_id, original_path, source, submitted_input,
-                    source_url_override=normalized_input,
+                    source_url_override=source.canonical_url if source else normalized_input,
+                    metadata_source=metadata_source, file_source=file_source,
                 )
                 details.update({
                     "resolution_method": result.get("resolution_method", "source"),
@@ -197,10 +202,12 @@ def run_universal_import_job(
                 return
             digest = source.content_md5 if source else None
             source_hint = source
+            metadata_source = source_hint
         else:
             if not source_path.is_file():
                 raise ImportFailure("import.file_not_found", "The selected file does not exist.")
             source_hint = None
+            metadata_source = None
             digest = _md5(source_path)
             original_path = source_path
 
@@ -231,10 +238,12 @@ def run_universal_import_job(
             details.setdefault("provider_errors", []).extend(download_errors)
             for match, downloaded in valid_candidates:
                 try:
-                    source = _match_to_source(match)
+                    file_source = _match_to_source(match)
                     result = _accept_downloaded(
-                        connection, settings, job_id, downloaded, source, submitted_input,
-                        source_url_override=normalized_input,
+                        connection, settings, job_id, downloaded, file_source, submitted_input,
+                        source_url_override=metadata_source.canonical_url if metadata_source else normalized_input,
+                        metadata_source=metadata_source or file_source,
+                        file_source=file_source,
                     )
                     details.update({
                         "resolution_method": result.get("resolution_method", "exact"),
@@ -310,6 +319,8 @@ def run_universal_import_job(
         details["timing"]["phases_ms"]["exact_search"] = _elapsed_ms(exact_started)
         details["exact_candidates_checked"] = len(exact)
         details["provider_errors"] = list(details.get("provider_errors", [])) + errors
+        if metadata_source is None and exact:
+            metadata_source = _match_to_source(exact[0])
         _set_search_status(details, "matched" if exact else _status_from_errors(errors))
         download_started = time.perf_counter()
         valid_candidates, download_errors = _download_exact_candidates(
@@ -320,8 +331,12 @@ def run_universal_import_job(
         for match, downloaded in valid_candidates:
             try:
                 temporary.append(downloaded)
-                source = _match_to_source(match)
-                result = _accept_downloaded(connection, settings, job_id, downloaded, source, submitted_input)
+                file_source = _match_to_source(match)
+                result = _accept_downloaded(
+                    connection, settings, job_id, downloaded, file_source, submitted_input,
+                    metadata_source=metadata_source or file_source,
+                    file_source=file_source,
+                )
                 details.update({
                     "resolution_method": result.get("resolution_method", "exact"),
                     "resolved_source_url": match.canonical_url,
@@ -409,9 +424,10 @@ def run_universal_import_job(
         if candidate_paths:
             cursor = connection.execute(
                 "UPDATE import_candidates SET status='review', stored_path=?, media_type=?, "
-                "content_hash=?, width=?, height=?, file_size=? WHERE id=?",
+                "content_hash=?, width=?, height=?, file_size=?, source_metadata_json=? WHERE id=?",
                 (original_staged, inspection.media_type, inspection.content_hash,
-                 inspection.width, inspection.height, inspection.file_size, candidate_id),
+                 inspection.width, inspection.height, inspection.file_size,
+                 _serialize_source(metadata_source) if metadata_source else None, candidate_id),
             )
             review_cursor = connection.execute(
                 "INSERT INTO review_items (import_candidate_id, reason) VALUES (?, 'source_candidates')",
@@ -439,9 +455,10 @@ def run_universal_import_job(
         # No usable source: retain the uploaded file for the existing manual Source action.
         connection.execute(
             "UPDATE import_candidates SET status='review', stored_path=?, media_type=?, "
-            "content_hash=?, width=?, height=?, file_size=? WHERE id=?",
+            "content_hash=?, width=?, height=?, file_size=?, source_metadata_json=? WHERE id=?",
             (original_staged, inspection.media_type, inspection.content_hash,
-             inspection.width, inspection.height, inspection.file_size, candidate_id),
+             inspection.width, inspection.height, inspection.file_size,
+             _serialize_source(metadata_source) if metadata_source else None, candidate_id),
         )
         review_cursor = connection.execute(
             "INSERT INTO review_items (import_candidate_id, reason) VALUES (?, 'source_required')",
@@ -764,8 +781,8 @@ def _local_similar(connection, settings, original_path, inspection):
         return []
     rows = connection.execute(
         "SELECT fp.media_item_id, fp.perceptual_hash, source.provider, source.canonical_url, "
-        "source.direct_media_url, source.remote_id, source.author, source.domain, media.file_path, "
-        "media.width, media.height FROM media_fingerprints fp "
+        "source.direct_media_url, source.remote_id, source.author, source.domain, source.parent_id, "
+        "source.character_tags_json, media.file_path, media.width, media.height FROM media_fingerprints fp "
         "JOIN media_items media ON media.id=fp.media_item_id "
         "LEFT JOIN media_sources source ON source.media_item_id=media.id "
         "WHERE media.deleted_at IS NULL"
@@ -783,6 +800,8 @@ def _local_similar(connection, settings, original_path, inspection):
             provider=row["provider"], canonical_url=row["canonical_url"],
             direct_media_url=str(path) if path.is_file() else row["direct_media_url"],
             remote_id=row["remote_id"], author=row["author"], domain=row["domain"],
+            character_tags=_decode_json_tags(row["character_tags_json"]),
+            parent_id=row["parent_id"],
             match_method="perceptual", confidence=round(confidence, 2),
             width=row["width"], height=row["height"],
         ))
@@ -847,6 +866,8 @@ def _coerce_match(raw, method):
         author=raw.get("author"), domain=raw.get("domain"), tags=tuple(raw.get("tags") or ()),
         content_md5=raw.get("content_md5"), match_method=str(raw.get("match_method") or method),
         confidence=confidence, preview_url=raw.get("preview_url"), width=raw.get("width"), height=raw.get("height"),
+        character_tags=tuple(raw.get("character_tags") or raw.get("characters") or ()),
+        parent_id=str(raw.get("parent_id")) if raw.get("parent_id") not in (None, "", 0, "0") else None,
     )
 
 
@@ -888,14 +909,22 @@ def _match_to_source(match: SourceMatch) -> SourceMedia:
         provider=match.provider, remote_id=match.remote_id or "", author=match.author,
         domain=match.domain or urlsplit(match.canonical_url).netloc, tags=match.tags,
         file_extension=_extension(match.direct_media_url or match.canonical_url),
+        character_tags=match.character_tags, parent_id=match.parent_id,
         content_md5=match.content_md5,
     )
 
 
 def _accept_downloaded(
     connection, settings, job_id, path, source, submitted_input,
-    source_url_override=None,
+    source_url_override=None, metadata_source=None, file_source=None,
 ):
+    metadata_source = metadata_source or source
+    file_source = file_source or source
+    source_url = source_url_override or (
+        metadata_source.canonical_url if metadata_source else (
+            file_source.canonical_url if file_source else None
+        )
+    )
     inspection = inspect_media(path)
     existing = connection.execute(
         "SELECT id FROM media_items WHERE content_hash=? AND deleted_at IS NULL",
@@ -903,12 +932,22 @@ def _accept_downloaded(
     ).fetchone()
     candidate_id = _candidate_id(connection, job_id)
     if existing:
-        if source:
-            _store_source(connection, int(existing[0]), source)
-        if source_url_override:
+        if metadata_source:
+            _store_source(connection, int(existing[0]), metadata_source)
+        if source_url:
             connection.execute(
                 "UPDATE media_items SET source_url=? WHERE id=?",
-                (source_url_override, int(existing[0])),
+                (source_url, int(existing[0])),
+            )
+        if file_source:
+            connection.execute(
+                "UPDATE media_items SET file_source_url=? WHERE id=?",
+                (file_source.canonical_url, int(existing[0])),
+            )
+        if metadata_source:
+            connection.execute(
+                "UPDATE import_candidates SET source_metadata_json=? WHERE id=?",
+                (_serialize_source(metadata_source), candidate_id),
             )
         _set_candidate_result(connection, candidate_id, "duplicate", int(existing[0]))
         return {"outcome": "duplicate", "candidate_id": candidate_id, "media_item_id": int(existing[0])}
@@ -927,11 +966,15 @@ def _accept_downloaded(
     stored = atomic_copy(path, settings.media_path, "media")
     try:
         cursor = connection.execute(
-            "INSERT INTO media_items (file_path, media_type, source_url, author, domain, width, height, file_size, content_hash) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (stored, inspection.media_type, source_url_override or (source.canonical_url if source else None),
-             source.author if source else None, source.domain if source else None,
-             inspection.width, inspection.height, inspection.file_size, inspection.content_hash),
+            "INSERT INTO media_items (file_path, media_type, source_url, file_source_url, author, domain, width, height, file_size, content_hash, parent_id, character_tags_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (stored, inspection.media_type, source_url,
+             file_source.canonical_url if file_source else None,
+             metadata_source.author if metadata_source else None,
+             metadata_source.domain if metadata_source else None,
+             inspection.width, inspection.height, inspection.file_size, inspection.content_hash,
+             metadata_source.parent_id if metadata_source else None,
+             json.dumps(list(metadata_source.character_tags)) if metadata_source else "[]"),
         )
         media_id = int(cursor.lastrowid)
         create_original_revision(connection, media_id)
@@ -945,16 +988,12 @@ def _accept_downloaded(
                 )
             except (OSError, ValueError):
                 pass
-        if source:
-            _store_source(connection, media_id, source)
-            connection.executemany("INSERT OR IGNORE INTO media_tags (media_item_id, tag) VALUES (?, ?)", ((media_id, tag) for tag in source.tags))
+        if metadata_source:
+            _store_source(connection, media_id, metadata_source)
+            connection.executemany("INSERT OR IGNORE INTO media_tags (media_item_id, tag) VALUES (?, ?)", ((media_id, tag) for tag in metadata_source.tags))
             connection.execute(
                 "UPDATE import_candidates SET source_metadata_json=? WHERE id=?",
-                (json.dumps({"canonical_url": source.canonical_url, "direct_media_url": source.direct_media_url,
-                             "provider": source.provider, "remote_id": source.remote_id,
-                             "author": source.author, "domain": source.domain, "tags": list(source.tags),
-                             "character_tags": list(source.character_tags), "parent_id": source.parent_id,
-                             "file_extension": source.file_extension, "content_md5": source.content_md5}), candidate_id),
+                (_serialize_source(metadata_source), candidate_id),
             )
         _set_candidate_result(connection, candidate_id, "accepted", media_id, stored)
         return {"outcome": "accepted", "candidate_id": candidate_id, "media_item_id": media_id}
@@ -970,12 +1009,22 @@ def _accept_downloaded(
         ).fetchone()
         if existing:
             (settings.media_path / stored).unlink(missing_ok=True)
-            if source:
-                _store_source(connection, int(existing[0]), source)
-            if source_url_override:
+            if metadata_source:
+                _store_source(connection, int(existing[0]), metadata_source)
+            if source_url:
                 connection.execute(
                     "UPDATE media_items SET source_url=? WHERE id=?",
-                    (source_url_override, int(existing[0])),
+                    (source_url, int(existing[0])),
+                )
+            if file_source:
+                connection.execute(
+                    "UPDATE media_items SET file_source_url=? WHERE id=?",
+                    (file_source.canonical_url, int(existing[0])),
+                )
+            if metadata_source:
+                connection.execute(
+                    "UPDATE import_candidates SET source_metadata_json=? WHERE id=?",
+                    (_serialize_source(metadata_source), candidate_id),
                 )
             _set_candidate_result(connection, candidate_id, "duplicate", int(existing[0]))
             return {"outcome": "duplicate", "candidate_id": candidate_id, "media_item_id": int(existing[0])}
@@ -988,11 +1037,70 @@ def _accept_downloaded(
 
 
 def _store_source(connection, media_id, source):
+    values = (media_id, source.canonical_url, source.direct_media_url, source.provider,
+              source.remote_id, source.author, source.domain, source.parent_id,
+              json.dumps(list(source.character_tags)))
+    try:
+        connection.execute(
+            "INSERT INTO media_sources (media_item_id, canonical_url, direct_media_url, provider, remote_id, author, domain, parent_id, character_tags_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(media_item_id) DO UPDATE SET canonical_url=excluded.canonical_url, direct_media_url=excluded.direct_media_url, provider=excluded.provider, remote_id=excluded.remote_id, author=excluded.author, domain=excluded.domain, parent_id=excluded.parent_id, character_tags_json=excluded.character_tags_json",
+            values,
+        )
+    except sqlite3.IntegrityError:
+        owner = connection.execute(
+            "SELECT media_item_id FROM media_sources WHERE canonical_url=?",
+            (source.canonical_url,),
+        ).fetchone()
+        if owner is None or int(owner[0]) == int(media_id):
+            raise
+        deleted = connection.execute(
+            "SELECT deleted_at FROM media_items WHERE id=?", (owner[0],)
+        ).fetchone()
+        if deleted is None or deleted[0] is None:
+            raise
+        target = connection.execute(
+            "SELECT 1 FROM media_sources WHERE media_item_id=?", (media_id,)
+        ).fetchone()
+        if target:
+            raise
+        connection.execute(
+            "UPDATE media_sources SET media_item_id=? WHERE media_item_id=?",
+            (media_id, owner[0]),
+        )
+        connection.execute(
+            "UPDATE media_sources SET direct_media_url=?, provider=?, remote_id=?, author=?, domain=?, parent_id=?, character_tags_json=? WHERE media_item_id=?",
+            (source.direct_media_url, source.provider, source.remote_id, source.author,
+             source.domain, source.parent_id, json.dumps(list(source.character_tags)), media_id),
+        )
     connection.execute(
-        "INSERT INTO media_sources (media_item_id, canonical_url, direct_media_url, provider, remote_id, author, domain, parent_id, character_tags_json) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(media_item_id) DO UPDATE SET canonical_url=excluded.canonical_url, direct_media_url=excluded.direct_media_url, provider=excluded.provider, remote_id=excluded.remote_id, author=excluded.author, domain=excluded.domain, parent_id=excluded.parent_id, character_tags_json=excluded.character_tags_json",
-        (media_id, source.canonical_url, source.direct_media_url, source.provider, source.remote_id, source.author, source.domain, source.parent_id, json.dumps(list(source.character_tags))),
+        "UPDATE media_items SET source_url=?, author=?, domain=?, parent_id=?, character_tags_json=? WHERE id=?",
+        (source.canonical_url, source.author, source.domain, source.parent_id,
+         json.dumps(list(source.character_tags)), media_id),
     )
+
+
+def _serialize_source(source: SourceMedia) -> str:
+    return json.dumps({
+        "canonical_url": source.canonical_url,
+        "direct_media_url": source.direct_media_url,
+        "provider": source.provider,
+        "remote_id": source.remote_id,
+        "author": source.author,
+        "domain": source.domain,
+        "tags": list(source.tags),
+        "character_tags": list(source.character_tags),
+        "parent_id": source.parent_id,
+        "file_extension": source.file_extension,
+        "content_md5": source.content_md5,
+    })
+
+
+def _decode_json_tags(raw) -> tuple[str, ...]:
+    try:
+        values = json.loads(raw or "[]")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return ()
+    return tuple(str(value) for value in values if str(value).strip()) if isinstance(values, (list, tuple)) else ()
 
 
 def _existing_source(connection, canonical_url):
@@ -1000,8 +1108,8 @@ def _existing_source(connection, canonical_url):
         "SELECT item.id FROM media_items item "
         "LEFT JOIN media_sources source ON source.media_item_id=item.id "
         "WHERE item.deleted_at IS NULL "
-        "AND (item.source_url=? OR source.canonical_url=?) LIMIT 1",
-        (canonical_url, canonical_url),
+        "AND (item.source_url=? OR item.file_source_url=? OR source.canonical_url=?) LIMIT 1",
+        (canonical_url, canonical_url, canonical_url),
     ).fetchone()
     return int(row[0]) if row else None
 

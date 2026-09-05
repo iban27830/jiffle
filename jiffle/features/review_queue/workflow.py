@@ -27,9 +27,11 @@ def accept_review_item(
     settings: Settings,
     review_id: int,
     source: SourceMedia | None = None,
+    file_source: SourceMedia | None = None,
 ) -> int:
     row = _pending_review(connection, review_id)
     source = source or _candidate_source(row["source_metadata_json"])
+    file_source = file_source or source
     staged = _staged_path(settings, row["stored_path"])
     if not staged.is_file():
         raise ReviewFailure("review.file_missing", "The staged file is unavailable.")
@@ -41,8 +43,13 @@ def accept_review_item(
         ).fetchone()
         if existing_source:
             media_item_id = int(existing_source[0])
+            if file_source:
+                connection.execute(
+                    "UPDATE media_items SET file_source_url=? WHERE id=?",
+                    (file_source.canonical_url, media_item_id),
+                )
             _complete_review(
-                connection, review_id, row["candidate_id"], media_item_id, source
+                connection, review_id, row["candidate_id"], media_item_id, source, file_source
             )
             staged.unlink(missing_ok=True)
             _cleanup_source_candidates(connection, settings, review_id)
@@ -56,7 +63,12 @@ def accept_review_item(
         if source:
             _store_source(connection, media_item_id, source)
             _store_tags(connection, media_item_id, source.tags)
-        _complete_review(connection, review_id, row["candidate_id"], media_item_id, source)
+        if file_source:
+            connection.execute(
+                "UPDATE media_items SET file_source_url=? WHERE id=?",
+                (file_source.canonical_url, media_item_id),
+            )
+        _complete_review(connection, review_id, row["candidate_id"], media_item_id, source, file_source)
         staged.unlink(missing_ok=True)
         _cleanup_source_candidates(connection, settings, review_id)
         return media_item_id
@@ -65,18 +77,21 @@ def accept_review_item(
     try:
         cursor = connection.execute(
             "INSERT INTO media_items "
-            "(file_path, media_type, source_url, author, domain, width, height, "
-            "file_size, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(file_path, media_type, source_url, file_source_url, author, domain, width, height, "
+            "file_size, content_hash, parent_id, character_tags_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 stored_path,
                 row["media_type"],
                 source.canonical_url if source else None,
+                file_source.canonical_url if file_source else None,
                 source.author if source else None,
                 source.domain if source else None,
                 row["width"],
                 row["height"],
                 row["file_size"],
                 row["content_hash"],
+                source.parent_id if source else None,
+                json.dumps(list(source.character_tags)) if source else "[]",
             ),
         )
         media_item_id = int(cursor.lastrowid)
@@ -84,7 +99,7 @@ def accept_review_item(
         if source:
             _store_source(connection, media_item_id, source)
             _store_tags(connection, media_item_id, source.tags)
-        _complete_review(connection, review_id, row["candidate_id"], media_item_id, source)
+        _complete_review(connection, review_id, row["candidate_id"], media_item_id, source, file_source)
     except Exception:
         (settings.media_path / stored_path).unlink(missing_ok=True)
         connection.rollback()
@@ -104,7 +119,8 @@ def accept_source_candidate(
     row = connection.execute(
         "SELECT review.status, review.import_candidate_id, candidate.content_hash AS input_hash, "
         "candidate.stored_path AS input_path, source.id, source.stored_path, source.media_type, "
-        "source.content_hash, source.width, source.height, source.file_size, source.source_metadata_json "
+        "source.content_hash, source.width, source.height, source.file_size, source.source_metadata_json, "
+        "candidate.source_metadata_json AS candidate_source_metadata_json "
         "FROM review_items review JOIN import_candidates candidate ON candidate.id=review.import_candidate_id "
         "JOIN import_source_candidates source ON source.review_item_id=review.id "
         "WHERE review.id=? AND source.id=? AND source.status='pending'",
@@ -119,7 +135,9 @@ def accept_source_candidate(
     selected_path = _staged_path(settings, row["stored_path"])
     if not selected_path.is_file():
         raise ReviewFailure("review.file_missing", "The source candidate is unavailable.")
-    source = _candidate_source(row["source_metadata_json"])
+    file_source = _candidate_source(row["source_metadata_json"])
+    candidate_metadata = _candidate_source(row["candidate_source_metadata_json"])
+    source = candidate_metadata or file_source
     duplicate = connection.execute(
         "SELECT id FROM media_items WHERE content_hash=? AND deleted_at IS NULL",
         (row["content_hash"],),
@@ -130,15 +148,23 @@ def accept_source_candidate(
         if source:
             _store_source(connection, media_item_id, source)
             _store_tags(connection, media_item_id, source.tags)
+        if file_source:
+            connection.execute(
+                "UPDATE media_items SET file_source_url=? WHERE id=?",
+                (file_source.canonical_url, media_item_id),
+            )
     else:
         stored_path = atomic_copy(selected_path, settings.media_path, "media")
         try:
             cursor = connection.execute(
-                "INSERT INTO media_items (file_path, media_type, source_url, author, domain, width, height, file_size, content_hash) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO media_items (file_path, media_type, source_url, file_source_url, author, domain, width, height, file_size, content_hash, parent_id, character_tags_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (stored_path, row["media_type"], source.canonical_url if source else None,
+                 file_source.canonical_url if file_source else None,
                  source.author if source else None, source.domain if source else None,
-                 row["width"], row["height"], row["file_size"], row["content_hash"]),
+                 row["width"], row["height"], row["file_size"], row["content_hash"],
+                 source.parent_id if source else None,
+                 json.dumps(list(source.character_tags)) if source else "[]"),
             )
             media_item_id = int(cursor.lastrowid)
             create_original_revision(connection, media_item_id)
@@ -174,6 +200,7 @@ def accept_source_candidate(
         "media_item_id": media_item_id,
         "source_candidate_id": candidate_id,
         "source_url": source.canonical_url if source else None,
+        "file_source_url": file_source.canonical_url if file_source else None,
     })
     connection.commit()
     _remove_review_staging(connection, settings, review_id, keep=None, primary_path=row["input_path"])
@@ -241,7 +268,7 @@ def run_manual_source_job(
         )
         connection.commit()
         source = provider.fetch(source_url)
-        media_item_id = accept_review_item(connection, settings, review_id, source)
+        media_item_id = accept_review_item(connection, settings, review_id, source, source)
         result = json.dumps({
             "outcome": "accepted", "review_item_id": review_id,
             "media_item_id": media_item_id,
@@ -329,7 +356,7 @@ def _staged_path(settings: Settings, stored_path: str) -> Path:
     return candidate
 
 
-def _complete_review(connection, review_id, candidate_id, media_item_id, source):
+def _complete_review(connection, review_id, candidate_id, media_item_id, source, file_source=None):
     connection.execute(
         "UPDATE import_candidates SET status='accepted', media_item_id=? WHERE id=?",
         (media_item_id, candidate_id),
@@ -345,26 +372,55 @@ def _complete_review(connection, review_id, candidate_id, media_item_id, source)
     _history(connection, "review.accepted", review_id, {
         "media_item_id": media_item_id,
         "source_url": source.canonical_url if source else None,
+        "file_source_url": file_source.canonical_url if file_source else None,
     })
     connection.commit()
 
 
 def _store_source(connection, media_item_id, source):
-    connection.execute(
-        "INSERT INTO media_sources "
-        "(media_item_id, canonical_url, direct_media_url, provider, remote_id, author, domain, parent_id, character_tags_json) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
-        "ON CONFLICT(media_item_id) DO UPDATE SET "
-        "canonical_url=excluded.canonical_url, direct_media_url=excluded.direct_media_url, "
-        "provider=excluded.provider, remote_id=excluded.remote_id, "
-        "author=excluded.author, domain=excluded.domain, parent_id=excluded.parent_id, "
-        "character_tags_json=excluded.character_tags_json",
-        (
-            media_item_id, source.canonical_url, source.direct_media_url,
-            source.provider, source.remote_id, source.author, source.domain,
-            source.parent_id, json.dumps(list(source.character_tags)),
-        ),
+    values = (
+        media_item_id, source.canonical_url, source.direct_media_url,
+        source.provider, source.remote_id, source.author, source.domain,
+        source.parent_id, json.dumps(list(source.character_tags)),
     )
+    try:
+        connection.execute(
+            "INSERT INTO media_sources "
+            "(media_item_id, canonical_url, direct_media_url, provider, remote_id, author, domain, parent_id, character_tags_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(media_item_id) DO UPDATE SET "
+            "canonical_url=excluded.canonical_url, direct_media_url=excluded.direct_media_url, "
+            "provider=excluded.provider, remote_id=excluded.remote_id, "
+            "author=excluded.author, domain=excluded.domain, parent_id=excluded.parent_id, "
+            "character_tags_json=excluded.character_tags_json",
+            values,
+        )
+    except sqlite3.IntegrityError:
+        owner = connection.execute(
+            "SELECT media_item_id FROM media_sources WHERE canonical_url=?",
+            (source.canonical_url,),
+        ).fetchone()
+        if owner is None or int(owner[0]) == int(media_item_id):
+            raise
+        deleted = connection.execute(
+            "SELECT deleted_at FROM media_items WHERE id=?", (owner[0],)
+        ).fetchone()
+        if deleted is None or deleted[0] is None:
+            raise
+        target = connection.execute(
+            "SELECT 1 FROM media_sources WHERE media_item_id=?", (media_item_id,)
+        ).fetchone()
+        if target:
+            raise
+        connection.execute(
+            "UPDATE media_sources SET media_item_id=? WHERE media_item_id=?",
+            (media_item_id, owner[0]),
+        )
+        connection.execute(
+            "UPDATE media_sources SET direct_media_url=?, provider=?, remote_id=?, author=?, domain=?, parent_id=?, character_tags_json=? WHERE media_item_id=?",
+            (source.direct_media_url, source.provider, source.remote_id, source.author,
+             source.domain, source.parent_id, json.dumps(list(source.character_tags)), media_item_id),
+        )
     connection.execute(
         "UPDATE media_items SET source_url=?, author=?, domain=? WHERE id=?",
         (source.canonical_url, source.author, source.domain, media_item_id),
@@ -401,12 +457,14 @@ def _fail_job(connection, job_id, code, message):
 
 def create_metadata_refresh_job(connection: sqlite3.Connection, media_item_id: int) -> int:
     row = connection.execute(
-        "SELECT source.provider, source.canonical_url FROM media_sources source "
-        "JOIN media_items item ON item.id=source.media_item_id "
+        "SELECT item.source_url, COALESCE(source.provider, '') AS provider FROM media_items item "
+        "LEFT JOIN media_sources source ON source.media_item_id=item.id "
         "WHERE item.id=? AND item.deleted_at IS NULL",
         (media_item_id,),
     ).fetchone()
     if row is None:
+        raise ReviewFailure("metadata.source_missing", "This media has no supported source metadata.")
+    if not row["source_url"]:
         raise ReviewFailure("metadata.source_missing", "This media has no supported source metadata.")
     pending = connection.execute(
         "SELECT id FROM metadata_suggestions WHERE media_item_id=? AND status='pending'",
@@ -441,11 +499,11 @@ def run_metadata_refresh_job(
         )
         connection.commit()
         row = connection.execute(
-            "SELECT canonical_url FROM media_sources WHERE media_item_id=?", (media_item_id,)
+            "SELECT source_url FROM media_items WHERE id=? AND deleted_at IS NULL", (media_item_id,)
         ).fetchone()
         if row is None:
             raise ReviewFailure("metadata.source_missing", "This media has no source URL to refresh.")
-        source = provider.fetch(row["canonical_url"])
+        source = provider.fetch(row["source_url"])
         payload = _source_payload(source)
         connection.execute(
             "UPDATE metadata_suggestions SET source_metadata_json=? WHERE job_id=?",

@@ -647,6 +647,19 @@ def migration_27(connection: sqlite3.Connection) -> None:
     )
 
 
+def migration_28(connection: sqlite3.Connection) -> None:
+    """Keep the post that supplied file bytes separate from metadata source."""
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(media_items)")}
+    if "file_source_url" not in columns:
+        connection.execute("ALTER TABLE media_items ADD COLUMN file_source_url TEXT")
+    connection.execute(
+        "UPDATE media_items SET file_source_url=("
+        "SELECT canonical_url FROM media_sources "
+        "WHERE media_sources.media_item_id=media_items.id"
+        ") WHERE file_source_url IS NULL"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -675,6 +688,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (25, migration_25),
     (26, migration_26),
     (27, migration_27),
+    (28, migration_28),
 )
 
 

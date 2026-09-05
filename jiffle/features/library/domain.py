@@ -30,6 +30,7 @@ class MediaItem:
     parent_url: str | None = None
     family_id: int | None = None
     relatives: tuple[int, ...] = ()
+    file_source_url: str | None = None
 
     @property
     def characters(self) -> tuple[str, ...]:

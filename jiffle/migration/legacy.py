@@ -175,10 +175,11 @@ def _copy_data(source, source_media, settings, report, legacy_export_root):
                 media_type = "video" if source_path.suffix.lower() in {".mp4", ".webm"} else "image"
                 cursor = target.execute(
                     "INSERT INTO media_items "
-                    "(file_path, media_type, source_url, author, domain, width, height, "
-                    "file_size, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "(file_path, media_type, source_url, file_source_url, author, domain, width, height, "
+                    "file_size, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         relative_path, media_type, _row_value(row, "source_url"),
+                        _row_value(row, "source_url"),
                         _row_value(row, "author"), _row_value(row, "domain"),
                         _positive_int(_row_value(row, "width")),
                         _positive_int(_row_value(row, "height")),

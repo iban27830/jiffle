@@ -144,12 +144,14 @@ def run_url_import_job(
         try:
             cursor = connection.execute(
                 "INSERT INTO media_items "
-                "(file_path, media_type, source_url, author, domain, width, height, "
-                "file_size, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "(file_path, media_type, source_url, file_source_url, author, domain, width, height, "
+                "file_size, content_hash, parent_id, character_tags_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     stored_path, inspection.media_type, source.canonical_url,
+                    source.canonical_url,
                     source.author, source.domain, inspection.width, inspection.height,
-                    inspection.file_size, inspection.content_hash,
+                    inspection.file_size, inspection.content_hash, source.parent_id,
+                    json.dumps(list(source.character_tags)),
                 ),
             )
             media_item_id = int(cursor.lastrowid)
@@ -208,11 +210,29 @@ def _attach_source(connection, media_item_id, source) -> None:
             ),
         )
     except sqlite3.IntegrityError:
-        # A canonical URL may already belong to another library item.
-        pass
+        owner = connection.execute(
+            "SELECT media_item_id FROM media_sources WHERE canonical_url=?",
+            (source.canonical_url,),
+        ).fetchone()
+        if owner is None or int(owner[0]) == int(media_item_id):
+            raise
+        deleted = connection.execute(
+            "SELECT deleted_at FROM media_items WHERE id=?", (owner[0],)
+        ).fetchone()
+        if deleted is None or deleted[0] is None:
+            raise
+        target = connection.execute(
+            "SELECT 1 FROM media_sources WHERE media_item_id=?", (media_item_id,)
+        ).fetchone()
+        if target:
+            raise
+        connection.execute(
+            "UPDATE media_sources SET media_item_id=? WHERE media_item_id=?",
+            (media_item_id, owner[0]),
+        )
     connection.execute(
-        "UPDATE media_items SET parent_id=?, character_tags_json=? WHERE id=?",
-        (source.parent_id, json.dumps(list(source.character_tags)), media_item_id),
+        "UPDATE media_items SET file_source_url=COALESCE(file_source_url, ?), parent_id=?, character_tags_json=? WHERE id=?",
+        (source.canonical_url, source.parent_id, json.dumps(list(source.character_tags)), media_item_id),
     )
 
 

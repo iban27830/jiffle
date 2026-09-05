@@ -49,10 +49,12 @@ def delete_media(media_id: int):
     target = quarantine / f"{media_id}-{source.name}"
     try:
         shutil.move(str(source), str(target))
-        if row["source_url"]:
+        for source_url in (row["source_url"], row["file_source_url"] if "file_source_url" in row.keys() else None):
+            if not source_url:
+                continue
             connection.execute(
                 "INSERT OR IGNORE INTO blocked_media_signatures "
-                "(source_url, reason) VALUES (?, 'deleted')", (row["source_url"],)
+                "(source_url, reason) VALUES (?, 'deleted')", (source_url,)
             )
         if row["content_hash"]:
             connection.execute(
@@ -168,6 +170,7 @@ def _serialize(item: MediaItem) -> dict[str, object]:
         "id": item.id,
         "type": item.media_type.value,
         "source_url": item.source_url,
+        "file_source_url": item.file_source_url,
         "author": item.author,
         "domain": item.domain,
         "width": item.width,

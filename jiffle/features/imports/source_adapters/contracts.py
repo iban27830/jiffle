@@ -39,6 +39,8 @@ class SourceMatch:
     preview_url: str | None = None
     width: int | None = None
     height: int | None = None
+    character_tags: tuple[str, ...] = ()
+    parent_id: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -55,6 +57,8 @@ class SourceMatch:
             "preview_url": self.preview_url,
             "width": self.width,
             "height": self.height,
+            "character_tags": list(self.character_tags),
+            "parent_id": self.parent_id,
         }
 
 

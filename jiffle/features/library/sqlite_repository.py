@@ -102,6 +102,7 @@ class SqliteLibraryRepository:
             file_path=row["file_path"],
             media_type=MediaType(row["media_type"]),
             source_url=row["source_url"],
+            file_source_url=row["file_source_url"] if "file_source_url" in row.keys() else None,
             author=author,
             domain=row["domain"],
             width=row["width"],

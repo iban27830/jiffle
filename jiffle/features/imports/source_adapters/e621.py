@@ -104,6 +104,9 @@ class E621SourceProvider:
                 for tag in group
             )
             artists = tags_payload.get("artist", [])
+            character_tags = tuple(str(tag) for tag in tags_payload.get("character", []) if str(tag).strip())
+            raw_parent_id = post.get("parent_id")
+            parent_id = str(raw_parent_id) if raw_parent_id not in (None, "", 0, "0") else None
             matches.append({
                 "provider": self.provider_name,
                 "domain": "e621.net",
@@ -115,6 +118,8 @@ class E621SourceProvider:
                 "content_md5": _valid_md5((file_payload or {}).get("md5")),
                 "width": file_payload.get("width"),
                 "height": file_payload.get("height"),
+                "character_tags": list(character_tags),
+                "parent_id": parent_id,
                 "deleted": bool((post.get("flags") or {}).get("deleted")),
             })
         return matches

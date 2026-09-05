@@ -124,7 +124,9 @@ workflow.
 
 For a deleted e621 post, e621 can still return the file's MD5 in its JSON metadata.
 Paste that post URL into the same Import window and Jiffle can use the MD5 to search
-TBIB and other supported sources. If no exact copy is downloadable, Jiffle checks
+TBIB and other supported sources. The e621 post remains **Source** for its tags,
+characters, parent, and author even when TBIB supplies the downloadable file; in
+that case the TBIB post is shown separately as **File source**. If no exact copy is downloadable, Jiffle checks
 local perceptual fingerprints and can query IQDB for an approximate match. Results
 below 80% similarity are ignored. Exact matching requires the same file bytes;
 resized and recompressed copies are handled by the local pHash check described
@@ -166,7 +168,7 @@ For an e621 or e926 post set, Jiffle first checks the complete set (using the sa
 - To fill in parent or character data for an older imported item, open its details and select **Refresh metadata**. The fetched result appears in **Review**; select **Apply** to add the new metadata and tags, or use the trash button to ignore it. The original file is not downloaded again.
 - In the item details, use the full-size button to open the current file by itself in a new browser tab. **Open in Editor** opens the current version beside the original and shows the complete version history. Select **Analyze current** when you want a new crop proposal.
 - Select an author in the item details to add an `author:name` filter without clearing the current search. The active author and selected media card remain highlighted while results update. Items with multiple authors show each author separately.
-- Select an item to inspect its source, dimensions, tags, edits, and available actions. Images whose active version was changed in Editor have an edit icon on the library thumbnail; restoring the original removes the icon while keeping version history.
+- Select an item to inspect its source, dimensions, tags, edits, and available actions. **Source** is the post whose metadata supplies tags, characters, parent, and author. When an exact copy had to be downloaded from another provider, the inspector also shows **File source** for the post that supplied the stored bytes; it is hidden when both URLs are the same. Images whose active version was changed in Editor have an edit icon on the library thumbnail; restoring the original removes the icon while keeping version history.
 - Images assigned to a family show a relatives marker in the Library. Open an item to see its relatives and select any relative to open it; the family can contain two or more images.
 - Open **Duplicates**, choose a similarity threshold from 70% to 100%, and select **Scan** to find similar files. Lower values find more approximate matches; higher values restrict results to nearly identical images. Scan progress remains visible in the status bar while fingerprints and image pairs are processed.
 - When two similar images are related variations rather than a duplicate to remove, select **Family**. Both files remain in the library and are linked as relatives. Repeating this action with another match adds that image to the same family when the pairs overlap.

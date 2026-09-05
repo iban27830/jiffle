@@ -96,7 +96,7 @@ def get_review_thumbnail(review_id: int):
     settings: Settings = current_app.config["JIFFLE_SETTINGS"]
     item = MediaItem(
         id=-review_id, file_path=row["stored_path"],
-        media_type=MediaType(row["media_type"]), source_url=None, author=None,
+        media_type=MediaType(row["media_type"]), source_url=None, file_source_url=None, author=None,
         domain=None, width=row["width"], height=row["height"],
         file_size=row["file_size"], content_hash=row["content_hash"],
         active_revision_id=None, edit_operations=(),
@@ -151,7 +151,7 @@ def get_source_candidate_thumbnail(review_id: int, candidate_id: int):
         return _error("review.file_missing", "The source candidate is unavailable.", 404)
     item = MediaItem(
         id=-candidate_id, file_path=row["stored_path"], media_type=MediaType(row["media_type"]),
-        source_url=None, author=None, domain=None, width=row["width"], height=row["height"],
+        source_url=None, file_source_url=None, author=None, domain=None, width=row["width"], height=row["height"],
         file_size=row["file_size"], content_hash=row["content_hash"], active_revision_id=None,
         edit_operations=(), created_at="", tags=(),
     )
@@ -212,11 +212,14 @@ def refresh_metadata(media_id: int | None = None):
         return _error("metadata.invalid_media", "A valid media ID is required.", 400)
     connection = get_database()
     source = connection.execute(
-        "SELECT provider FROM media_sources WHERE media_item_id=?", (media_id,)
+        "SELECT item.source_url, source.provider FROM media_items item "
+        "LEFT JOIN media_sources source ON source.media_item_id=item.id "
+        "WHERE item.id=? AND item.deleted_at IS NULL", (media_id,)
     ).fetchone()
+    source_url = source["source_url"] if source else None
     provider = next(
-        (item for item in current_app.config["JIFFLE_SOURCE_PROVIDERS"]
-         if source is not None and getattr(item, "provider_name", None) == source["provider"]),
+         (item for item in current_app.config["JIFFLE_SOURCE_PROVIDERS"]
+          if source_url and item.can_handle(source_url)),
         None,
     )
     if provider is None:
@@ -226,6 +229,11 @@ def refresh_metadata(media_id: int | None = None):
     except ReviewFailure as error:
         return _review_error(error)
     settings: Settings = current_app.config["JIFFLE_SETTINGS"]
+    connection.execute(
+        "UPDATE metadata_suggestions SET provider=? WHERE job_id=?",
+        (getattr(provider, "provider_name", source["provider"]), job_id),
+    )
+    connection.commit()
     args = (settings.database_path, job_id, media_id, provider)
     if settings.run_jobs_inline:
         run_metadata_refresh_job(*args)

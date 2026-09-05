@@ -55,6 +55,12 @@ def resolve_match(
     try:
         if merge_metadata:
             _merge_metadata(connection, keep, remove)
+        for source_url in (remove["source_url"], remove["file_source_url"] if "file_source_url" in remove.keys() else None):
+            if source_url:
+                connection.execute(
+                    "INSERT OR IGNORE INTO blocked_media_signatures (source_url, reason) VALUES (?, 'deleted')",
+                    (source_url,),
+                )
         connection.execute(
             "UPDATE media_items SET deleted_at=CURRENT_TIMESTAMP, content_hash=NULL WHERE id=?",
             (remove_id,),
@@ -130,7 +136,7 @@ def _merge_metadata(connection, keep, remove):
     )
     updates = {}
     available = set(keep.keys())
-    for field in ("source_url", "author", "domain", "parent_id"):
+    for field in ("source_url", "file_source_url", "author", "domain", "parent_id"):
         if field not in available:
             continue
         if not keep[field] and remove[field]:
