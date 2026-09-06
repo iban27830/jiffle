@@ -463,16 +463,17 @@ def _export_media(source, media_type, settings, staging, index):
     target_format = rules.get(source_format, source_format)
     prefix = f"{index:04d}-{source.stem}"
     destination = staging / f"{prefix}.{target_format}"
+    source_size = source.stat().st_size
     output_type = "video" if target_format == "mp4" else media_type
     limit = (
         settings.max_video_export_size_bytes
         if output_type == "video"
         else settings.max_image_export_size_bytes
     )
-    if target_format == source_format and source.stat().st_size <= limit:
+    if target_format == source_format and source_size <= limit:
         shutil.copy2(source, destination)
     elif output_type == "video":
-        _transcode_video(source, destination, limit)
+        _transcode_video(source, destination, limit, source_size)
     else:
         _compress_image(source, destination, target_format, limit)
     size = destination.stat().st_size if destination.is_file() else 0
@@ -485,7 +486,14 @@ def _export_media(source, media_type, settings, staging, index):
     return destination
 
 
-def _transcode_video(source, destination, limit):
+def _video_export_budget(source_size, limit):
+    """Return a per-file budget that avoids inflating small converted videos."""
+    if source_size >= limit:
+        return limit
+    return min(limit, max(source_size + 256 * 1024, int(source_size * 1.10)))
+
+
+def _transcode_video(source, destination, limit, source_size=None):
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise CollectionFailure(
@@ -505,13 +513,20 @@ def _transcode_video(source, destination, limit):
         raise CollectionFailure(
             "exports.media_invalid", f"Could not read {source.name} for conversion."
         ) from error
-    total_bitrate = min(max(int(limit * 8 * 0.90 / duration), 160000), 50_000_000)
+    if source_size is None:
+        source_size = source.stat().st_size
+    budget = _video_export_budget(source_size, limit)
+    total_bitrate = min(max(int(budget * 8 * 0.90 / duration), 16_000), 50_000_000)
     has_audio = source.suffix.lower() != ".gif"
-    audio_bitrate = 128000 if has_audio and total_bitrate > 320000 else 0
-    video_bitrate = max(total_bitrate - audio_bitrate, 120000)
+    audio_bitrate = (
+        min(128_000, max(32_000, int(total_bitrate * 0.20)))
+        if has_audio and total_bitrate >= 160_000
+        else 0
+    )
+    video_bitrate = max(total_bitrate - audio_bitrate, 16_000)
     temporary = destination.with_name(f".{destination.stem}-{uuid4().hex}.mp4")
     try:
-        for _ in range(4):
+        for _ in range(8):
             command = [
                 ffmpeg, "-y", "-i", str(source), "-map", "0:v:0",
                 "-c:v", "libx264", "-pix_fmt", "yuv420p",
@@ -519,7 +534,7 @@ def _transcode_video(source, destination, limit):
                 "-b:v", str(video_bitrate), "-maxrate", str(video_bitrate),
                 "-bufsize", str(video_bitrate * 2), "-movflags", "+faststart",
             ]
-            if has_audio:
+            if has_audio and audio_bitrate:
                 command += ["-map", "0:a?", "-c:a", "aac", "-b:a", str(audio_bitrate)]
             else:
                 command += ["-an"]
@@ -530,14 +545,15 @@ def _transcode_video(source, destination, limit):
                 raise CollectionFailure(
                     "exports.transcode_failed", f"Could not convert {source.name}."
                 ) from error
-            if temporary.stat().st_size <= limit:
+            if temporary.stat().st_size <= budget:
                 os.replace(temporary, destination)
                 return
             temporary.unlink(missing_ok=True)
-            video_bitrate = max(int(video_bitrate * 0.72), 80000)
+            video_bitrate = max(int(video_bitrate * 0.72), 16_000)
         raise CollectionFailure(
             "exports.file_size_exceeded",
-            f"{source.name} could not be reduced below {limit / 1048576:.0f} MB.",
+            f"{source.name} could not be converted within its "
+            f"{budget / 1048576:.1f} MB export budget.",
         )
     finally:
         temporary.unlink(missing_ok=True)
