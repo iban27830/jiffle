@@ -209,7 +209,7 @@ def get_collection(collection_id: int):
     if collection is None:
         return _error("collections.not_found", "Collection was not found.", 404)
     rows = connection.execute(
-        "SELECT member.position, item.id, item.media_type, item.source_url, item.author, item.domain, "
+        "SELECT member.position, item.id, item.media_type, item.source_url, item.file_source_url, item.author, item.domain, "
         "item.width, item.height, item.file_size FROM collection_items member "
         "JOIN media_items item ON item.id=member.media_item_id "
         "WHERE member.collection_id=? ORDER BY member.position", (collection_id,)

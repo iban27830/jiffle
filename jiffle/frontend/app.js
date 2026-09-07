@@ -148,6 +148,28 @@ function toast(message, error = false) {
   toast.timer = setTimeout(() => node.className = 'toast', 2600);
 }
 
+async function copyTextToClipboard(value) {
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(value);
+      return;
+    } catch {}
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  let copied = false;
+  try {
+    textarea.select();
+    copied = document.execCommand('copy');
+  } catch {}
+  textarea.remove();
+  if (!copied) throw new Error('Clipboard access is unavailable.');
+}
+
 function setHeader(name, detail = '', controls = '') {
   title.textContent = name;
   meta.textContent = detail;
@@ -781,15 +803,25 @@ async function showCollections() {
   document.querySelector('#collectionSearch').oninput=()=>{page=1;render()}; document.querySelector('#collectionPageSize').onchange=event=>{prefs.pageSize=Number(event.target.value);localStorage.setItem('jiffle.collection-prefs',JSON.stringify(prefs));page=1;render()}; document.querySelector('#collectionView').onchange=event=>{prefs.view=event.target.value;localStorage.setItem('jiffle.collection-prefs',JSON.stringify(prefs));render()};
   await render();
   const collectionMedia = item => `<figure class="collection-media">${item.media_type === 'video' ? `<video class="collection-preview" src="${item.content_url}" poster="${item.thumbnail_url}" controls preload="metadata"></video>` : `<a href="${item.content_url}" target="_blank" rel="noopener"><img class="collection-preview" src="${item.thumbnail_url}" loading="lazy" alt=""></a>`}<figcaption>${item.source_url ? `<a href="${esc(item.source_url)}" target="_blank" rel="noopener">Source</a>` : '<span>Unknown source</span>'} <button class="icon-btn collection-library" data-media-id="${item.id}" title="Open in Library"><i data-lucide="images"></i></button></figcaption></figure>`;
+  const collectionSourceUrl = item => item.file_source_url || item.source_url || '';
+  const copyCollectionSources = async collection => {
+    const links = collection.items.map(collectionSourceUrl);
+    if (!links.some(Boolean)) { toast('No source links are available.', true); return; }
+    try {
+      await copyTextToClipboard(links.join('\n'));
+      const missing = links.filter(link => !link).length;
+      toast(missing ? `Copied ${links.length} lines; ${missing} have no source link.` : `Copied ${links.length} source links.`);
+    } catch (error) { toast(error.message, true); }
+  };
   document.querySelectorAll('.open').forEach(node => node.onclick = async () => {
     const c=await api(`/api/v1/collections/${node.dataset.id}`);
-    workspace.innerHTML=`<div class="page collection-page"><div class="page-head"><button class="btn" id="backCollections"><i data-lucide="chevron-left"></i>Collections</button><h2>${esc(c.name)}</h2><span class="badge">${c.items.length}</span></div><div class="collection-meta"><span>Created: ${esc(formatDateTime(c.created_at))}</span><form id="jiggieForm"><label for="jiggieUrl">URL Jiggie</label><div class="jiggie-control"><input id="jiggieUrl" class="control" type="url" value="${esc(c.jiggie_url||'')}" placeholder="https://jiggie.fun/..."><button class="btn primary"><i data-lucide="save"></i>Save</button>${c.jiggie_url ? `<a class="icon-btn" href="${esc(c.jiggie_url)}" target="_blank" rel="noopener" title="Open Jiggie"><i data-lucide="external-link"></i></a>` : ''}</div></form></div><div class="collection-gallery">${c.items.map(collectionMedia).join('')}</div></div>`;
-    document.querySelectorAll('.collection-library').forEach(n=>n.onclick=()=>openMediaInLibrary(Number(n.dataset.mediaId))); document.querySelector('#backCollections').onclick=showCollections;
+    workspace.innerHTML=`<div class="page collection-page"><div class="page-head"><button class="btn" id="backCollections"><i data-lucide="chevron-left"></i>Collections</button><h2>${esc(c.name)}</h2><span class="badge">${c.items.length}</span><button id="copyCollectionSources" class="icon-btn" title="Copy image source links" aria-label="Copy image source links"><i data-lucide="copy"></i></button></div><div class="collection-meta"><span>Created: ${esc(formatDateTime(c.created_at))}</span><form id="jiggieForm"><label for="jiggieUrl">URL Jiggie</label><div class="jiggie-control"><input id="jiggieUrl" class="control" type="url" value="${esc(c.jiggie_url||'')}" placeholder="https://jiggie.fun/..."><button class="btn primary"><i data-lucide="save"></i>Save</button>${c.jiggie_url ? `<a class="icon-btn" href="${esc(c.jiggie_url)}" target="_blank" rel="noopener" title="Open Jiggie"><i data-lucide="external-link"></i></a>` : ''}</div></form></div><div class="collection-gallery">${c.items.map(collectionMedia).join('')}</div></div>`;
+    document.querySelectorAll('.collection-library').forEach(n=>n.onclick=()=>openMediaInLibrary(Number(n.dataset.mediaId))); document.querySelector('#backCollections').onclick=showCollections; document.querySelector('#copyCollectionSources').onclick=()=>copyCollectionSources(c);
     document.querySelector('#jiggieForm').onsubmit=async event=>{event.preventDefault();try{await api(`/api/v1/collections/${c.id}`,{method:'PATCH',body:JSON.stringify({jiggie_url:document.querySelector('#jiggieUrl').value})});toast('URL saved');showCollections();}catch(error){toast(error.message,true);}};
     icons();
   });
   function bindCollectionActions(){ document.querySelectorAll('.export').forEach(node => node.onclick = async () => { try{const job=await runJob(()=>api(`/api/v1/collections/${node.dataset.id}/export-jobs`,{method:'POST'}));toast(`Exported: ${job.result.item_count}`);}catch(error){toast(error.message,true);} }); document.querySelectorAll('.delete').forEach(node => node.onclick = async () => { await api(`/api/v1/collections/${node.dataset.id}`,{method:'DELETE'});showCollections(); }); document.querySelectorAll('.open').forEach(node => node.onclick = openCollection); }
-  async function openCollection(event){ const c=await api(`/api/v1/collections/${event.currentTarget.dataset.id}`); workspace.innerHTML=`<div class="page collection-page"><div class="page-head"><button class="btn" id="backCollections"><i data-lucide="chevron-left"></i>Collections</button><h2>${esc(c.name)}</h2><span class="badge">${c.items.length}</span></div><div class="collection-meta"><span>Created: ${esc(formatDateTime(c.created_at))}</span><form id="jiggieForm"><label for="jiggieUrl">URL Jiggie</label><div class="jiggie-control"><input id="jiggieUrl" class="control" type="url" value="${esc(c.jiggie_url||'')}" placeholder="https://jiggie.fun/..."><button class="btn primary"><i data-lucide="save"></i>Save</button></div></form></div><div class="collection-gallery">${c.items.map(collectionMedia).join('')}</div></div>`; document.querySelector('#backCollections').onclick=showCollections; document.querySelector('#jiggieForm').onsubmit=async e=>{e.preventDefault();try{await api(`/api/v1/collections/${c.id}`,{method:'PATCH',body:JSON.stringify({jiggie_url:document.querySelector('#jiggieUrl').value})});toast('URL saved');}catch(error){toast(error.message,true);}}; icons(); }
+  async function openCollection(event){ const c=await api(`/api/v1/collections/${event.currentTarget.dataset.id}`); workspace.innerHTML=`<div class="page collection-page"><div class="page-head"><button class="btn" id="backCollections"><i data-lucide="chevron-left"></i>Collections</button><h2>${esc(c.name)}</h2><span class="badge">${c.items.length}</span><button id="copyCollectionSources" class="icon-btn" title="Copy image source links" aria-label="Copy image source links"><i data-lucide="copy"></i></button></div><div class="collection-meta"><span>Created: ${esc(formatDateTime(c.created_at))}</span><form id="jiggieForm"><label for="jiggieUrl">URL Jiggie</label><div class="jiggie-control"><input id="jiggieUrl" class="control" type="url" value="${esc(c.jiggie_url||'')}" placeholder="https://jiggie.fun/..."><button class="btn primary"><i data-lucide="save"></i>Save</button></div></form></div><div class="collection-gallery">${c.items.map(collectionMedia).join('')}</div></div>`; document.querySelector('#backCollections').onclick=showCollections; document.querySelector('#copyCollectionSources').onclick=()=>copyCollectionSources(c); document.querySelector('#jiggieForm').onsubmit=async e=>{e.preventDefault();try{await api(`/api/v1/collections/${c.id}`,{method:'PATCH',body:JSON.stringify({jiggie_url:document.querySelector('#jiggieUrl').value})});toast('URL saved');}catch(error){toast(error.message,true);}}; icons(); }
 }
 
 async function showCollectionBuilder() {
