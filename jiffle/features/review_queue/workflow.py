@@ -1,18 +1,24 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import sqlite3
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 import imagehash
 from PIL import Image
 
 from jiffle.configuration.settings import Settings
-from jiffle.features.imports.local_import import atomic_copy
+from jiffle.features.imports.local_import import atomic_copy, inspect_media
 from jiffle.features.imports.source_adapters.contracts import SourceMedia, SourceProvider
 from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
 from jiffle.features.imports.universal_import import (
+    _extension,
     _match_to_source,
+    _record_provider_diagnostic,
+    _reverse_similar,
+    _safe_error_message,
     _select_metadata_source,
     resolve_exact_downloads,
 )
@@ -396,6 +402,7 @@ def run_review_reimport_job(
             "outcome": "completed",
             "items": results,
             "accepted": sum(1 for item in results if item["status"] == "accepted"),
+            "candidates": sum(1 for item in results if item["status"] == "candidates"),
             "no_source": sum(1 for item in results if item["status"] == "no_source"),
             "unavailable": sum(1 for item in results if item["status"] == "unavailable"),
         }
@@ -431,13 +438,6 @@ def _reimport_review_item(
         staged, providers, downloader, settings, diagnostics
     )
     try:
-        if not matches:
-            return {
-                "review_item_id": review_id,
-                "status": "no_source",
-                "provider_errors": errors,
-                "provider_diagnostics": diagnostics,
-            }
         if verified:
             file_match = verified[0][0]
             # The richest tags are not always on the provider whose bytes are
@@ -456,6 +456,26 @@ def _reimport_review_item(
                 "provider": source.provider,
                 "file_provider": file_source.provider,
                 "source_url": source.canonical_url,
+            }
+        if not matches:
+            # No byte-identical copy exists, so look for an approximate match
+            # and offer it for confirmation instead of giving up silently.
+            similar = _reverse_similar(staged, providers, diagnostics)
+            stored_candidates = _stage_reverse_candidates(
+                connection, settings, review_id, similar, downloader, diagnostics
+            ) if similar else 0
+            if stored_candidates:
+                return {
+                    "review_item_id": review_id,
+                    "status": "candidates",
+                    "candidate_count": stored_candidates,
+                    "provider_diagnostics": diagnostics,
+                }
+            return {
+                "review_item_id": review_id,
+                "status": "no_source",
+                "provider_errors": errors,
+                "provider_diagnostics": diagnostics,
             }
         # The providers know the exact source but no copy is downloadable.
         # The user's own staged file already has the right bytes, so keep it
@@ -483,6 +503,88 @@ def _reimport_review_item(
     finally:
         for _match, path in verified:
             path.unlink(missing_ok=True)
+
+
+def _stage_reverse_candidates(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    review_id: int,
+    matches,
+    downloader,
+    diagnostics: list[dict[str, object]],
+) -> int:
+    """Store downloadable perceptual matches as confirmable review candidates.
+
+    Returns the number of newly stored candidates.  Matches that are already
+    attached to the review item are skipped, and a match whose media cannot be
+    downloaded is reported in the diagnostics.
+    """
+    settings.resolved_import_staging_path.mkdir(parents=True, exist_ok=True)
+    existing = set()
+    for row in connection.execute(
+        "SELECT provider, source_metadata_json FROM import_source_candidates "
+        "WHERE review_item_id=?",
+        (review_id,),
+    ):
+        try:
+            metadata = json.loads(row["source_metadata_json"] or "{}")
+        except (TypeError, ValueError):
+            metadata = {}
+        existing.add((row["provider"], str(metadata.get("remote_id") or "")))
+
+    stored: list[tuple[object, str, object]] = []
+    for match in matches:
+        key = (match.provider, str(match.remote_id or ""))
+        if key in existing:
+            continue
+        media_url = match.direct_media_url or match.preview_url
+        if not media_url:
+            _record_provider_diagnostic(
+                diagnostics, "perceptual_search", match.provider, "unavailable", 0,
+                "import.candidate_unavailable",
+                "The similar candidate has no media URL.", remote_id=match.remote_id,
+            )
+            continue
+        name = f"candidate-{uuid4().hex}{_extension(media_url)}"
+        path = settings.resolved_import_staging_path / name
+        try:
+            local_candidate = Path(str(media_url))
+            if local_candidate.is_file():
+                shutil.copy2(local_candidate, path)
+            else:
+                downloader.download(media_url, path, match.canonical_url)
+            inspection = inspect_media(path)
+        except Exception as error:
+            path.unlink(missing_ok=True)
+            _record_provider_diagnostic(
+                diagnostics, "perceptual_search", match.provider, "unavailable", 0,
+                "import.candidate_unavailable",
+                _safe_error_message(error, "The similar candidate was unavailable."),
+                remote_id=match.remote_id,
+            )
+            continue
+        stored.append((match, name, inspection))
+        existing.add(key)
+    if not stored:
+        return 0
+    connection.execute(
+        "UPDATE review_items SET reason='source_candidates' WHERE id=?", (review_id,)
+    )
+    for rank, (match, name, inspection) in enumerate(stored):
+        connection.execute(
+            "INSERT INTO import_source_candidates "
+            "(review_item_id, rank, match_method, confidence, provider, source_metadata_json, "
+            "stored_path, media_type, content_hash, width, height, file_size) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                review_id, rank, match.match_method, match.confidence, match.provider,
+                json.dumps(match.as_dict()), name, inspection.media_type,
+                inspection.content_hash, inspection.width, inspection.height,
+                inspection.file_size,
+            ),
+        )
+    connection.commit()
+    return len(stored)
 
 
 def _pending_review(connection: sqlite3.Connection, review_id: int) -> sqlite3.Row:

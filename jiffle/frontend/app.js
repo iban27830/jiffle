@@ -660,7 +660,8 @@ async function recheckReviewItems(ids) {
     const result = job.result || {};
     unique.forEach(id => reviewSelection.delete(id));
     const unavailable = Number(result.unavailable || 0);
-    toast(`Recheck complete: ${Number(result.accepted || 0)} resolved, ${Number(result.no_source || 0)} still without a source${unavailable ? `, ${unavailable} unavailable` : ''}`);
+    const candidates = Number(result.candidates || 0);
+    toast(`Recheck complete: ${Number(result.accepted || 0)} resolved${candidates ? `, ${candidates} source${candidates === 1 ? '' : 's'} to confirm` : ''}, ${Number(result.no_source || 0)} still without a source${unavailable ? `, ${unavailable} unavailable` : ''}`);
     await refreshCounts();
     showReview();
   } catch (error) { toast(error.message,true); }

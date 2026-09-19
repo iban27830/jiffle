@@ -34,18 +34,26 @@ class IqdbReverseSearch:
     endpoint = "https://iqdb.org/"
     timeout = 15
 
+    def _request(self, files, timeout):
+        """Send the preview to IQDB.
+
+        Kept as a small seam so the reverse search can be stubbed in tests
+        without touching the shared ``requests`` module.
+        """
+        return requests.post(
+            self.endpoint,
+            files=files,
+            headers={"User-Agent": REVERSE_SEARCH_USER_AGENT, "Accept": "text/html"},
+            timeout=timeout,
+        )
+
     def search_similar(self, image_path: Path) -> list[dict[str, object]]:
         preview = reverse_preview_bytes(image_path)
         if preview is None:
             return []
         try:
-            response = requests.post(
-                self.endpoint,
+            response = self._request(
                 files={"file": ("jiffle-preview.jpg", preview, "image/jpeg")},
-                headers={
-                    "User-Agent": REVERSE_SEARCH_USER_AGENT,
-                    "Accept": "text/html",
-                },
                 timeout=self.timeout,
             )
             response.raise_for_status()
