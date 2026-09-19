@@ -104,10 +104,18 @@ Supported online sources include:
 - e621 and e926 (post links such as `https://e621.net/posts/12345`, including query parameters)
 - e621 and e926 post sets such as `https://e621.net/post_sets/12345` or `https://e926.net/post_sets/12345.json`
 - Gelbooru
+- Rule34.xxx (requires a free account User ID and API key)
 - FurAffinity
 - TBIB (The Big ImageBoard)
 
-Some sources require account credentials configured under **Settings**. A direct image URL is also accepted; Jiffle downloads it, calculates its hash, and checks it for duplicates before placing it in the library or Review.
+Some sources require account credentials configured under **Settings → Sources**.
+Rule34.xxx requires the User ID and API key shown on its account options page;
+FurAffinity requires cookies from an active browser session. Use **Test** beside a
+source to confirm that the saved credentials work. A source without credentials is
+shown as **not configured** in the import diagnostics and is skipped for that
+import instead of blocking it. A direct image URL is also accepted; Jiffle downloads
+it, calculates its hash, and checks it for duplicates before placing it in the
+library or Review.
 
 Jiffle first checks the local library and then searches supported providers for an
 exact MD5 copy. A downloaded copy is checked again locally before it is accepted,
@@ -251,7 +259,7 @@ Set access uses the `e621_login` and `e621_api_key` values saved under **Setting
 
 ### Configure sources
 
-Open **Settings** to configure source accounts, library display options, storage folders, and tag rules.
+Open **Settings** to configure source accounts, library display options, storage folders, and tag rules. Under **Sources**, add a Danbooru login and API key, an e621/e926 username and API key, a Gelbooru or Rule34.xxx User ID and API key, or FurAffinity session cookies, then use **Test** to check the connection.
 
 ### Background replacement
 
