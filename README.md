@@ -212,13 +212,25 @@ verification** means every returned file was unavailable or failed the exact
 hash check. Older history entries that predate these diagnostics still show
 their recorded provider errors and timings.
 
-When several source pages match at 80% or more, Review shows one card for the
-submitted file and a list of source candidates with provider, remote ID, confidence,
-dimensions, and a preview. Select **Use this source** to keep one candidate and its
-metadata; the other staged files are removed. **Reject** removes the whole group.
-When no usable source is found, the existing **Source** action remains available as
-a manual fallback. The history entry records the submitted input, resolution method,
-providers checked, and the URL that supplied the accepted file.
+Review shows its waiting items as a card grid like **Library**. Each card keeps only
+the preview and a row of actions: **Open full size**, **Run import again**, **Accept**,
+and **Reject**. **Open full size** opens the original in a full-screen viewer. When
+several source pages matched at 80% or more, that viewer also lists the source
+candidates with provider, remote ID, confidence, dimensions, and a preview. Select
+**Use this source** to keep one candidate and its metadata; the other staged files
+are removed. The viewer also offers **Add source URL** as a manual fallback when no
+usable source was found. **Accept** keeps the file with its current source (or without
+one) and **Reject** removes the whole group. The history entry records the submitted
+input, resolution method, providers checked, and the URL that supplied the accepted
+file.
+
+To look for a source again after you add or reconfigure providers, tick the checkbox
+on the cards you want to retry and select **Recheck selected** at the top. **Select all
+on screen** ticks every card on the current page. Rechecking runs the normal import
+resolution again, so a file that only had a metadata match can now combine tags from
+one provider with the file bytes from another. Review shows 60 items per page by
+default; use **Per page** to change the count, and **Previous** / **Next** to move
+between pages.
 
 Metadata refreshes for existing source-backed items also appear in **Review** as **Metadata update** entries. They are suggestions until you apply them, so a refresh cannot silently replace your current tags or parent relationship.
 
