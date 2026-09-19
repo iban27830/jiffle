@@ -4,6 +4,11 @@ from urllib.parse import urlparse
 import requests
 
 from jiffle.features.imports.source_adapters.contracts import SourceMedia
+from jiffle.features.imports.source_adapters.reverse_search import (
+    REVERSE_SEARCH_USER_AGENT,
+    iqdb_query_matches,
+    reverse_preview_bytes,
+)
 
 
 class SourceProviderFailure(Exception):
@@ -134,7 +139,46 @@ class DanbooruSourceProvider:
         ]
 
     def search_similar(self, image_path):
-        return []
+        """Reverse-search Danbooru through its IQDB endpoint.
+
+        Danbooru requires an authenticated account for this endpoint, so the
+        lookup only runs when a login and API key are configured.
+        """
+        if not (self.login and self.api_key):
+            return []
+        preview = reverse_preview_bytes(image_path)
+        if preview is None:
+            return []
+        try:
+            response = requests.post(
+                "https://danbooru.donmai.us/iqdb_queries.json",
+                params={"login": self.login, "api_key": self.api_key},
+                files={"search[file]": ("jiffle-preview.jpg", preview, "image/jpeg")},
+                headers={
+                    "User-Agent": REVERSE_SEARCH_USER_AGENT,
+                    "Accept": "application/json",
+                },
+                timeout=15,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except requests.HTTPError as error:
+            failure = _http_auth_failure(error, "Danbooru")
+            if failure:
+                raise failure from error
+            raise SourceProviderFailure(
+                "import.provider_unavailable",
+                "The Danbooru reverse search could not be loaded.",
+            ) from error
+        except (requests.RequestException, ValueError) as error:
+            raise SourceProviderFailure(
+                "import.provider_unavailable",
+                "The Danbooru reverse search could not be loaded.",
+            ) from error
+        return iqdb_query_matches(
+            payload, self.provider_name, "danbooru.donmai.us",
+            "https://danbooru.donmai.us/posts",
+        )
 
     def check_connection(self) -> None:
         parameters = {}

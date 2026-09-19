@@ -8,12 +8,13 @@ import hashlib
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
+from dataclasses import replace
 from pathlib import Path
 import shutil
 import sqlite3
 from threading import Lock
 import time
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
 import imagehash
@@ -35,6 +36,11 @@ from jiffle.infrastructure.media_revisions import create_original_revision
 
 
 MIN_SIMILAR_CONFIDENCE = 80.0
+
+# Perceptual lookups contact remote services that can be slow or unreachable.
+# They run in parallel under one deadline, like the exact-search phase.
+REVERSE_SEARCH_TIMEOUT_SECONDS = 20.0
+MAX_REVERSE_CANDIDATES = 5
 
 # A provider that is blocked or black-holed must not park an import: search
 # calls run in parallel and any provider still running after this deadline is
@@ -1012,47 +1018,228 @@ def _local_similar(connection, settings, original_path, inspection):
 
 
 def _reverse_similar(image_path, providers, diagnostics=None):
-    results = []
-    reverse_providers = list(providers)
-    try:
-        from jiffle.features.imports.source_adapters.iqdb import IqdbReverseSearch
-        reverse_providers.append(IqdbReverseSearch())
-    except Exception:
-        pass
-    for provider in reverse_providers:
-        method = getattr(provider, "search_similar", None)
-        if not callable(method):
+    """Run every available reverse search and return confirmable candidates.
+
+    Providers are queried at the same time under one deadline so a slow service
+    cannot park the import.  A result that points at a supported post is loaded
+    through the matching provider first, so the candidate carries real tags and
+    the original file instead of only a similarity thumbnail.
+    """
+    reverse_providers = []
+    for provider in list(providers) + [_iqdb_reverse_search()]:
+        if provider is None or not callable(getattr(provider, "search_similar", None)):
             continue
         if _provider_needs_configuration(provider):
             continue
-        provider_name = getattr(provider, "provider_name", None) or provider.__class__.__name__.lower()
-        started = time.perf_counter()
+        reverse_providers.append(provider)
+    if not reverse_providers:
+        return []
+
+    raw_results: list[dict[str, object]] = []
+    executor = ThreadPoolExecutor(
+        max_workers=len(reverse_providers), thread_name_prefix="jiffle-reverse"
+    )
+    futures = {
+        executor.submit(_run_reverse_search, provider, image_path): provider
+        for provider in reverse_providers
+    }
+    pending = set(futures)
+    deadline = time.monotonic() + REVERSE_SEARCH_TIMEOUT_SECONDS
+    while pending:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        done, pending = wait(pending, timeout=min(remaining, 1.0))
+        for future in done:
+            raw_results.append(future.result())
+    for future in pending:
+        future.cancel()
+        provider = futures[future]
+        name = getattr(provider, "provider_name", None) or provider.__class__.__name__.lower()
+        raw_results.append({
+            "provider": name,
+            "matches": [],
+            "duration_ms": int(REVERSE_SEARCH_TIMEOUT_SECONDS * 1000),
+            "error": {
+                "status": "timeout",
+                "code": "import.provider_timeout",
+                "message": (
+                    f"{name} did not answer within "
+                    f"{REVERSE_SEARCH_TIMEOUT_SECONDS:.0f} seconds."
+                ),
+            },
+        })
+    # Abandoned searches keep running in the background; their results are
+    # discarded, so the caller must not wait for their threads either.
+    executor.shutdown(wait=False)
+
+    resolved: list[object] = []
+    for result in raw_results:
+        provider_name = str(result["provider"])
+        error = result.get("error")
+        raw_matches = list(result.get("matches") or [])
+        if diagnostics is not None:
+            if error:
+                _record_provider_diagnostic(
+                    diagnostics, "perceptual_search", provider_name,
+                    error["status"], 0, error["code"], error["message"],
+                    result["duration_ms"],
+                )
+            else:
+                _record_provider_diagnostic(
+                    diagnostics, "perceptual_search", provider_name,
+                    "matched" if raw_matches else "no_result", len(raw_matches),
+                    duration_ms=result["duration_ms"],
+                )
+        for raw in raw_matches:
+            confidence = _reverse_confidence(raw)
+            if confidence is None or confidence < MIN_SIMILAR_CONFIDENCE:
+                continue
+            resolved.append(_resolve_reverse_candidate(raw, providers))
+    matches = [
+        match
+        for match in (_coerce_match(item, "perceptual") for item in resolved)
+        if match is not None
+    ]
+    return _unique_similar(matches)[:MAX_REVERSE_CANDIDATES]
+
+
+def _iqdb_reverse_search():
+    try:
+        from jiffle.features.imports.source_adapters.iqdb import IqdbReverseSearch
+        return IqdbReverseSearch()
+    except Exception:
+        return None
+
+
+def _run_reverse_search(provider, image_path) -> dict[str, object]:
+    name = getattr(provider, "provider_name", None) or provider.__class__.__name__.lower()
+    started = time.perf_counter()
+    try:
+        matches = list(getattr(provider, "search_similar")(image_path) or [])
+        return {
+            "provider": name, "matches": matches, "error": None,
+            "duration_ms": _elapsed_ms(started),
+        }
+    except SourceProviderFailure as error:
+        return {
+            "provider": name, "matches": [], "duration_ms": _elapsed_ms(started),
+            "error": {
+                "status": _status_for_error(error.code),
+                "code": error.code,
+                "message": _safe_error_message(error.message, "The reverse search failed."),
+            },
+        }
+    except Exception as error:
+        return {
+            "provider": name, "matches": [], "duration_ms": _elapsed_ms(started),
+            "error": {
+                "status": "network_error",
+                "code": "import.source_search_failed",
+                "message": _safe_error_message(error, "The reverse search failed."),
+            },
+        }
+
+
+def _reverse_confidence(raw) -> float | None:
+    value = raw.get("confidence") if isinstance(raw, dict) else getattr(raw, "confidence", None)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _reverse_links(raw) -> list[str]:
+    values: list[str] = []
+    if isinstance(raw, dict):
+        links = raw.get("links")
+        if isinstance(links, (list, tuple)):
+            values.extend(str(link) for link in links if link)
+        if raw.get("canonical_url"):
+            values.append(str(raw["canonical_url"]))
+    else:
+        canonical = getattr(raw, "canonical_url", None)
+        if canonical:
+            values.append(str(canonical))
+    return list(dict.fromkeys(values))
+
+
+def _reverse_md5(url: str) -> str | None:
+    """Read a 32-character MD5 from a booru search link, when present."""
+    query = parse_qs(urlsplit(url).query)
+    value = str((query.get("md5") or [""])[0]).strip().lower()
+    if len(value) == 32 and all(character in "0123456789abcdef" for character in value):
+        return value
+    return None
+
+
+def _reverse_candidate_from_url(url: str, providers):
+    """Load full metadata for a reverse-search link through a matching provider."""
+    for provider in providers:
+        can_handle = getattr(provider, "can_handle", None)
+        if not callable(can_handle):
+            continue
         try:
-            matches = [_coerce_match(item, "perceptual") for item in method(image_path) or []]
-            matches = [item for item in matches if item is not None]
-            results.extend(matches)
-            if diagnostics is not None:
-                _record_provider_diagnostic(
-                    diagnostics, "perceptual_search", provider_name,
-                    "matched" if matches else "no_result", len(matches),
-                    duration_ms=_elapsed_ms(started),
-                )
-        except SourceProviderFailure as error:
-            if diagnostics is not None:
-                _record_provider_diagnostic(
-                    diagnostics, "perceptual_search", provider_name,
-                    _status_for_error(error.code), 0, error.code,
-                    _safe_error_message(error.message, "The reverse search failed."),
-                    _elapsed_ms(started),
-                )
-        except Exception as error:
-            if diagnostics is not None:
-                _record_provider_diagnostic(
-                    diagnostics, "perceptual_search", provider_name, "network_error", 0,
-                    "import.source_search_failed", _safe_error_message(error, "The reverse search failed."),
-                    _elapsed_ms(started),
-                )
-    return [item for item in results if item is not None and item.confidence >= MIN_SIMILAR_CONFIDENCE]
+            if not can_handle(url):
+                continue
+        except Exception:
+            continue
+        digest = _reverse_md5(url)
+        if digest:
+            search = getattr(provider, "search_by_md5", None)
+            if not callable(search):
+                continue
+            try:
+                for raw in search(digest) or []:
+                    match = _coerce_match(raw, "perceptual")
+                    if match is not None and (match.direct_media_url or match.preview_url):
+                        return match
+            except Exception:
+                continue
+            continue
+        fetch = getattr(provider, "fetch", None)
+        if not callable(fetch):
+            continue
+        try:
+            source = _coerce_source(
+                fetch(url), url, getattr(provider, "provider_name", "unknown")
+            )
+        except Exception:
+            continue
+        if isinstance(source, SourceMedia):
+            return SourceMatch(
+                provider=source.provider,
+                canonical_url=source.canonical_url or url,
+                direct_media_url=source.direct_media_url,
+                remote_id=source.remote_id,
+                author=source.author,
+                domain=source.domain,
+                tags=tuple(source.tags),
+                content_md5=source.content_md5,
+                match_method="perceptual",
+                confidence=100.0,
+                character_tags=tuple(source.character_tags),
+                parent_id=source.parent_id,
+            )
+    return None
+
+
+def _resolve_reverse_candidate(raw, providers):
+    if isinstance(raw, SourceMatch) and raw.direct_media_url:
+        return raw
+    confidence = _reverse_confidence(raw)
+    preview = raw.get("preview_url") if isinstance(raw, dict) else getattr(raw, "preview_url", None)
+    for url in _reverse_links(raw):
+        resolved = _reverse_candidate_from_url(url, providers)
+        if resolved is None:
+            continue
+        return replace(
+            resolved,
+            match_method="perceptual",
+            confidence=confidence if confidence is not None else resolved.confidence,
+            preview_url=resolved.preview_url or preview,
+        )
+    return raw
 
 
 def _coerce_match(raw, method):

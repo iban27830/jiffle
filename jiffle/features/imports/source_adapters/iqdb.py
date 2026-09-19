@@ -1,55 +1,90 @@
-"""Optional IQDB reverse-search adapter used after exact lookup fails."""
+"""IQDB reverse-search adapter used after exact lookup fails.
 
-from pathlib import Path
+IQDB answers with an HTML page that lists the best match plus additional
+results, each with a similarity percentage and a link to the matched post.
+Only a small preview is uploaded: the service resets or times out on large
+uploads, and the original bytes are not needed for a perceptual match.
+"""
+
 import re
+from html import unescape
+from pathlib import Path
 from urllib.parse import urljoin
 
 import requests
 
+from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
+from jiffle.features.imports.source_adapters.reverse_search import (
+    REVERSE_SEARCH_USER_AGENT,
+    reverse_preview_bytes,
+)
+
+RESULT_TABLE = re.compile(r"<table\b.*?</table>", re.I | re.S)
+SIMILARITY = re.compile(r"(\d+(?:\.\d+)?)\s*%\s*similarity", re.I)
+HREF = re.compile(r"<a[^>]+href=['\"]([^'\"]+)", re.I)
+IMAGE = re.compile(r"<img[^>]+src=['\"]([^'\"]+)", re.I)
+# Links that belong to the search service itself, not to a matched media post.
+IGNORED_LINK_PARTS = (
+    "iqdb.org", "saucenao.com", "ascii2d.net", "google.", "tineye.com",
+)
+
 
 class IqdbReverseSearch:
+    provider_name = "iqdb"
     endpoint = "https://iqdb.org/"
+    timeout = 15
 
     def search_similar(self, image_path: Path) -> list[dict[str, object]]:
-        handle = None
+        preview = reverse_preview_bytes(image_path)
+        if preview is None:
+            return []
         try:
-            handle = Path(image_path).open("rb")
             response = requests.post(
                 self.endpoint,
-                files={"file": (Path(image_path).name, handle, "application/octet-stream")},
-                headers={"User-Agent": "Jiffle/2.0"}, timeout=5,
+                files={"file": ("jiffle-preview.jpg", preview, "image/jpeg")},
+                headers={
+                    "User-Agent": REVERSE_SEARCH_USER_AGENT,
+                    "Accept": "text/html",
+                },
+                timeout=self.timeout,
             )
             response.raise_for_status()
-            html = response.text
-        except (OSError, requests.RequestException):
-            return []
-        finally:
-            if handle is not None:
-                handle.close()
-        results = []
-        patterns = [
-            r"(?:data-similarity|similarity)[^>]*[=:]\s*['\"]?(\d+(?:\.\d+)?)",
-            r"class=['\"][^'\"]*similarity[^'\"]*['\"][^>]*>\s*(\d+(?:\.\d+)?)%?",
-        ]
-        matches = []
-        for pattern in patterns:
-            matches.extend(re.finditer(pattern, html, re.I))
-        for match in matches:
-            try:
-                confidence = float(match.group(1))
-            except ValueError:
+        except requests.RequestException as error:
+            raise SourceProviderFailure(
+                "import.provider_unavailable", "IQDB reverse search is unavailable."
+            ) from error
+        return _parse_results(response.text)
+
+
+def _parse_results(html: str) -> list[dict[str, object]]:
+    results: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for block in RESULT_TABLE.findall(html):
+        similarity = SIMILARITY.search(block)
+        if similarity is None:
+            continue
+        links = []
+        for href in HREF.findall(block):
+            value = unescape(href).strip()
+            if not value or value.startswith("#"):
                 continue
-            if confidence <= 1:
-                confidence *= 100
-            anchor = html[max(0, match.start() - 500):match.end() + 500]
-            href = re.search(r"href=['\"]([^'\"]+)", anchor, re.I)
-            if not href:
+            if any(part in value for part in IGNORED_LINK_PARTS):
                 continue
-            canonical = urljoin(self.endpoint, href.group(1))
-            image = re.search(r"<img[^>]+src=['\"]([^'\"]+)", anchor, re.I)
-            results.append({
-                "provider": "iqdb", "canonical_url": canonical,
-                "preview_url": urljoin(self.endpoint, image.group(1)) if image else None,
-                "match_method": "perceptual",
-            })
-        return results
+            links.append(urljoin(IqdbReverseSearch.endpoint, value))
+        links = list(dict.fromkeys(links))
+        if not links or links[0] in seen:
+            continue
+        seen.add(links[0])
+        image = IMAGE.search(block)
+        results.append({
+            "provider": IqdbReverseSearch.provider_name,
+            "canonical_url": links[0],
+            "preview_url": (
+                urljoin(IqdbReverseSearch.endpoint, unescape(image.group(1)))
+                if image else None
+            ),
+            "links": links,
+            "confidence": float(similarity.group(1)),
+            "match_method": "perceptual",
+        })
+    return results

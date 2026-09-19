@@ -9,6 +9,11 @@ import requests
 
 from jiffle.features.imports.source_adapters.contracts import SetPostIssue, SourceMedia, SourceSet
 from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
+from jiffle.features.imports.source_adapters.reverse_search import (
+    REVERSE_SEARCH_USER_AGENT,
+    iqdb_query_matches,
+    reverse_preview_bytes,
+)
 
 
 # Cap server-provided Retry-After values so a rate-limited response cannot park
@@ -130,7 +135,42 @@ class E621SourceProvider:
         return matches
 
     def search_similar(self, image_path):
-        return []
+        """Reverse-search e621 through its IQDB endpoint.
+
+        Anonymous requests are heavily throttled, so the lookup only runs when
+        a save username and API key are configured.
+        """
+        if not (self.login and self.api_key):
+            return []
+        preview = reverse_preview_bytes(image_path)
+        if preview is None:
+            return []
+        try:
+            response = requests.post(
+                "https://e621.net/iqdb_queries.json",
+                files={"search[file]": ("jiffle-preview.jpg", preview, "image/jpeg")},
+                headers={
+                    "User-Agent": f"{REVERSE_SEARCH_USER_AGENT} (by {self.login})",
+                    "Accept": "application/json",
+                },
+                auth=(self.login, self.api_key),
+                timeout=15,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except requests.HTTPError as error:
+            status = getattr(getattr(error, "response", None), "status_code", None)
+            code = "import.rate_limited" if status == 429 else "import.provider_unavailable"
+            raise SourceProviderFailure(
+                code, "The e621 reverse search could not be loaded."
+            ) from error
+        except (requests.RequestException, ValueError) as error:
+            raise SourceProviderFailure(
+                "import.provider_unavailable", "The e621 reverse search could not be loaded."
+            ) from error
+        return iqdb_query_matches(
+            payload, self.provider_name, "e621.net", "https://e621.net/posts"
+        )
 
     def fetch_set(self, url: str) -> SourceSet:
         parsed = parse_set_url(url)
