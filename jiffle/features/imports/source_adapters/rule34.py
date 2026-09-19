@@ -107,7 +107,9 @@ class Rule34SourceProvider:
                 timeout=15,
             )
             response.raise_for_status()
-            payload = response.json()
+            # Rule34 answers a tag search that matches nothing with an empty
+            # body instead of an empty JSON array.
+            payload = response.json() if response.text.strip() else []
         except requests.HTTPError as error:
             failure = _http_auth_failure(error)
             if failure:
