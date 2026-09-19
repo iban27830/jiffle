@@ -150,11 +150,16 @@ Paste that post URL into the same Import window and Jiffle can use the MD5 to se
 TBIB and other supported sources. The e621 post remains **Source** for its tags,
 characters, parent, and author even when TBIB supplies the downloadable file; in
 that case the TBIB post is shown separately as **File source**. If no exact copy is downloadable, Jiffle checks
-local perceptual fingerprints and can query IQDB for an approximate match. Results
-below 80% similarity are ignored. Exact matching requires the same file bytes;
-resized and recompressed copies are handled by the local pHash check described
-above when there is one exact perceptual match; edited copies, lower-confidence
-matches, or ambiguous matches may still appear as Review choices.
+local perceptual fingerprints and then performs an image reverse search: IQDB plus
+the Danbooru and e621 reverse-search endpoints when those accounts are configured.
+Only a small preview of the image is uploaded, so a re-encoded or lower-resolution
+copy can still be matched. Matches from 80% similarity are shown in **Review** as
+source candidates with their similarity percentage; when a match points at a
+supported post, Jiffle loads that post's tags and original file, so selecting
+**Use this source** stores the original rather than a preview. Exact matching still
+requires the same file bytes; resized and recompressed copies are handled by the
+local pHash check described above when there is one exact perceptual match; edited
+copies and ambiguous matches may still appear as Review choices.
 
 Some older or animated e621/e926 posts return `file.url` as empty even though the
 original still exists on the CDN. When the response includes a valid MD5 and file
@@ -177,9 +182,11 @@ asks Jiffle to wait before retrying, the wait is capped at 30 seconds.
 Universal import checks the local MD5 first, then performs exact MD5 searches on
 the supported providers. A TBIB sample, resized image, or re-encoded copy has
 different bytes and therefore cannot match the original through exact MD5;
-approximate matching for images is provided by the local perceptual hash and
-the optional IQDB reverse search. TBIB supports exact MD5 lookup, while it does
-not provide a separate visual reverse-search API.
+approximate matching for images is provided by the local perceptual fingerprint,
+IQDB, and the Danbooru and e621 reverse-search endpoints (the last two need the
+saved account credentials). Each reverse search runs in parallel under a
+20-second deadline, and its slowest service cannot park the import. TBIB supports
+exact MD5 lookup, while it does not provide a separate visual reverse-search API.
 
 For an e621 or e926 post set, Jiffle first checks the complete set (using the saved e621 username and API key when configured), then imports up to four posts at the same time. The final counters and issue list keep the set's original order. The set itself is not added as a local collection. A private set or a set that cannot be accessed fails before any files are downloaded. If a post is deleted or its file is unavailable, Jiffle first tries its saved MD5 with the other providers, then records an issue only when no usable copy is found. Select **Stop** in the status bar to prevent new posts from starting; posts already running are allowed to finish. The status bar shows the current phase, active posts, and elapsed time, while **Import history** shows the total duration and slowest posts. Provider and download timings help identify a slow external service; a provider or CDN can still delay an individual post. Times in the interface are converted to the computer's local time zone, while the database remains in UTC.
 
