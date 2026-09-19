@@ -92,6 +92,12 @@ press **Enter** or select **Resolve and import** when you are ready. Jiffle dete
 whether the input is a local file, a post link, or a direct media URL and keeps the
 progress entry in **Import history**.
 
+Dropping a local file stores it in Jiffle's import folder immediately, so you can
+delete your own copy from the Downloads folder right away. The temporary copy is
+removed once the original has been downloaded and added to the library, and it is
+kept in **Review** for manual validation when no usable source is found or the
+import fails.
+
 Supported online sources include:
 
 - Danbooru
@@ -146,9 +152,10 @@ Import has no per-file size limit. Original `GIF`, `MP4`, and `WebM` files are s
 in the library without transcoding, regardless of their size. The image and video
 limits under **Settings → Import and limits** apply only to collection exports;
 export conversion can create a smaller copy while leaving the library original
-unchanged. Large downloads use a 15-second connection timeout and a 120-second
-read timeout, so a file may take longer than two minutes as long as data continues
-arriving.
+unchanged. Large downloads use a 15-second connection timeout and a 45-second
+stall timeout: a download can take as long as it needs while data keeps arriving,
+but a source that stops sending data is abandoned after 45 seconds. If a server
+asks Jiffle to wait before retrying, the wait is capped at 30 seconds.
 
 Universal import checks the local MD5 first, then performs exact MD5 searches on
 the supported providers. A TBIB sample, resized image, or re-encoded copy has
