@@ -112,6 +112,15 @@ Some sources require account credentials configured under **Settings**. A direct
 Jiffle first checks the local library and then searches supported providers for an
 exact MD5 copy. A downloaded copy is checked again locally before it is accepted,
 so an unavailable source or an incorrect media response is skipped automatically.
+A dropped local file is compared with the library before any provider is contacted,
+so a file that is already in the library is reported as **Already imported** within
+a moment even when a source is unreachable.
+
+Provider lookups run at the same time and wait at most 10 seconds for an answer.
+A source that does not respond is abandoned for that import and skipped for the
+next few minutes, then retried automatically. The status bar shows the current
+stage while an import runs (for example `Waiting for sources: tbib`), so a slow or
+unreachable source is visible instead of looking like a frozen import.
 
 Before creating a Review item, Jiffle also compares downloaded or selected images
 with the live local library by perceptual hash. If exactly one live image has a
@@ -119,8 +128,8 @@ with the live local library by perceptual hash. If exactly one live image has a
 added to the library or Review. The existing high-resolution file, source URL,
 author, tags, dimensions, and other metadata remain unchanged. This applies to
 resized and recompressed copies after a URL has been downloaded, as well as to
-local files. Select **Open in Library** in the Import history entry to open the
-matched item.
+local files, whose library comparison runs before the provider search. Select
+**Open in Library** in the Import history entry to open the matched item.
 
 If two or more live library items have the same perceptual hash, Jiffle does not
 choose one automatically. The import continues through the normal Review flow
