@@ -443,6 +443,7 @@ def _legacy_runtime_settings(settings, config_path):
     danbooru = auth.get("danbooru.donmai.us", {})
     e621 = auth.get("e621.net / e926.net", {})
     gelbooru = auth.get("gelbooru.com", {})
+    rule34 = auth.get("rule34.xxx", {})
     furaffinity = auth.get("furaffinity.net", {})
     values = {
         "max_items_per_author": _positive_int(payload.get("max_per_author")) or settings.max_items_per_author,
@@ -455,6 +456,8 @@ def _legacy_runtime_settings(settings, config_path):
         "e621_api_key": _auth_value(e621, "api_key"),
         "gelbooru_user_id": _auth_value(gelbooru, "login"),
         "gelbooru_api_key": _auth_value(gelbooru, "api_key"),
+        "rule34_user_id": _auth_value(rule34, "login"),
+        "rule34_api_key": _auth_value(rule34, "api_key"),
         "furaffinity_cookie_a": _auth_value(furaffinity, "login"),
         "furaffinity_cookie_b": _auth_value(furaffinity, "api_key"),
     }

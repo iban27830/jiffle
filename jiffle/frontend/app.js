@@ -113,7 +113,7 @@ const diagnosticStageLabels = {
 const diagnosticStatusLabels = {
   matched: 'matched', no_result: 'no result', network_error: 'network error',
   authorization_error: 'authorization required', unavailable: 'unavailable',
-  timeout: 'timed out', skipped: 'skipped',
+  timeout: 'timed out', skipped: 'skipped', not_configured: 'not configured',
 };
 function historyDiagnostics(details) {
   const diagnostics = Array.isArray(details.provider_diagnostics) ? details.provider_diagnostics.map(item => ({...item})) : [];
@@ -1058,6 +1058,7 @@ async function showSettingsPage() {
       ${provider('danbooru','Danbooru','Login and API key',[field('danbooru_login','Login'),field('danbooru_api_key','API key',{type:'password',secret:true})])}
       ${provider('e621','e621 / e926','Username and API key',[field('e621_login','Username'),field('e621_api_key','API key',{type:'password',secret:true})])}
       ${provider('gelbooru','Gelbooru','User ID and API key',[field('gelbooru_user_id','User ID'),field('gelbooru_api_key','API key',{type:'password',secret:true})])}
+      ${provider('rule34','Rule34.xxx','User ID and API key (required)',[field('rule34_user_id','User ID'),field('rule34_api_key','API key',{type:'password',secret:true})],'<a class="btn" href="https://rule34.xxx/index.php?page=account&s=options" target="_blank" rel="noopener"><i data-lucide="external-link"></i>Open account options</a>')}
       ${provider('furaffinity','FurAffinity','Cookie a and b from an active session',[field('furaffinity_cookie_a','Cookie a',{type:'password',secret:true}),field('furaffinity_cookie_b','Cookie b',{type:'password',secret:true})],'<a class="btn" href="https://www.furaffinity.net/login/" target="_blank" rel="noopener"><i data-lucide="external-link"></i>Open login</a>')}
     </div></details>
     <details class="settings-section"><summary><span class="section-icon"><i data-lucide="eraser"></i></span><span><strong>Background removal</strong><small>Automatic subject isolation and model access</small></span><i data-lucide="chevron-down"></i></summary><div class="settings-section-body">
@@ -1113,7 +1114,7 @@ async function showSettingsPage() {
     const form = new FormData(event.currentTarget);
     const export_format_rules={};document.querySelectorAll('.format-rule').forEach(row=>export_format_rules[row.querySelector('.rule-source').value]=row.querySelector('.rule-target').value);
     const payload = {media_path:form.get('media_path'),export_path:form.get('export_path'),thumbnail_path:form.get('thumbnail_path'),import_staging_path:form.get('import_staging_path'),max_items_per_author:Number(form.get('max_items_per_author')),max_image_export_size_bytes:Number(form.get('max_image_export_size_mb'))*1048576,max_video_export_size_bytes:Number(form.get('max_video_export_size_mb'))*1048576,export_format_rules,block_previously_deleted:form.has('block_previously_deleted'),crop_vision_format:form.get('crop_vision_format'),crop_vision_url:form.get('crop_vision_url')||null,crop_vision_model:form.get('crop_vision_model')||null,crop_min_area_percent:Number(form.get('crop_min_area_percent')),crop_padding_percent:Number(form.get('crop_padding_percent')),crop_background_tolerance:Number(form.get('crop_background_tolerance')),crop_selected_analysis:form.get('crop_selected_analysis'),background_model:form.get('background_model')||'auto',background_device:form.get('background_device')||'auto'};
-    ['huggingface_token','crop_vision_key','danbooru_login','danbooru_api_key','e621_login','e621_api_key','gelbooru_user_id','gelbooru_api_key','furaffinity_cookie_a','furaffinity_cookie_b'].forEach(key => { if (form.get(key)) payload[key]=form.get(key); });
+    ['huggingface_token','crop_vision_key','danbooru_login','danbooru_api_key','e621_login','e621_api_key','gelbooru_user_id','gelbooru_api_key','rule34_user_id','rule34_api_key','furaffinity_cookie_a','furaffinity_cookie_b'].forEach(key => { if (form.get(key)) payload[key]=form.get(key); });
     const lines = name => String(form.get(name) || '').split(/\r?\n/).map(value => value.trim()).filter(Boolean);
     const aliases = {};
     for (const line of lines('tag_aliases')) {

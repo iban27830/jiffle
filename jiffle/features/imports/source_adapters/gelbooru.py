@@ -9,7 +9,7 @@ from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailu
 
 class GelbooruSourceProvider:
     provider_name = "gelbooru"
-    domains = {"gelbooru.com", "rule34.xxx", "safebooru.org"}
+    domains = {"gelbooru.com", "safebooru.org"}
 
     def __init__(self, user_id=None, api_key=None):
         self.user_id = user_id

@@ -44,8 +44,8 @@ def update_settings():
         "background_model", "background_device",
         "huggingface_token",
         "danbooru_login", "danbooru_api_key", "e621_login", "e621_api_key",
-        "gelbooru_user_id", "gelbooru_api_key", "furaffinity_cookie_a",
-        "furaffinity_cookie_b",
+        "gelbooru_user_id", "gelbooru_api_key", "rule34_user_id", "rule34_api_key",
+        "furaffinity_cookie_a", "furaffinity_cookie_b",
     }
     if any(key not in allowed for key in payload):
         return _error("settings.unknown_field", "The request contains an unknown field.", 400)
@@ -313,7 +313,8 @@ def _validated_update(settings, payload):
     for field in (
         "crop_vision_url", "crop_vision_key", "crop_vision_model", "danbooru_login",
         "danbooru_api_key", "e621_login", "e621_api_key", "gelbooru_user_id",
-        "gelbooru_api_key", "furaffinity_cookie_a", "furaffinity_cookie_b",
+        "gelbooru_api_key", "rule34_user_id", "rule34_api_key",
+        "furaffinity_cookie_a", "furaffinity_cookie_b",
     ):
         if field in values and values[field] is not None and not isinstance(values[field], str):
             raise ValueError(f"{field} must be a string or null.")
@@ -352,6 +353,8 @@ def _public_settings(settings):
         "e621_api_key_configured": bool(settings.e621_api_key),
         "gelbooru_user_id": settings.gelbooru_user_id,
         "gelbooru_api_key_configured": bool(settings.gelbooru_api_key),
+        "rule34_user_id": settings.rule34_user_id,
+        "rule34_api_key_configured": bool(settings.rule34_api_key),
         "furaffinity_cookie_a_configured": bool(settings.furaffinity_cookie_a),
         "furaffinity_cookie_b_configured": bool(settings.furaffinity_cookie_b),
     }

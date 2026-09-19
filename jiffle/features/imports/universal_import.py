@@ -71,6 +71,14 @@ def _clear_provider_cooldown(name: str) -> None:
         _provider_cooldowns.pop(name, None)
 
 
+def _provider_needs_configuration(provider) -> bool:
+    """True when a provider declares that it has no usable credentials yet."""
+    configured = getattr(provider, "is_configured", True)
+    if callable(configured):
+        configured = configured()
+    return not configured
+
+
 # Failures that leave nothing useful to validate manually.  For these the job
 # stays failed (the uploaded bytes are still kept on disk by the import worker).
 _RETAIN_EXCLUDED_CODES = {
@@ -704,6 +712,11 @@ def _search_exact(
                 0,
                 "skipped",
             ))
+        elif _provider_needs_configuration(provider):
+            # A provider without credentials (for example Rule34) is reported in
+            # the diagnostics but is not treated as a failed source, so it cannot
+            # change the outcome of an import that simply found no exact copy.
+            results.append((position, [], [], 0, "not_configured"))
         else:
             active.append((position, provider))
 
@@ -765,7 +778,7 @@ def _search_exact(
                 _status_for_error(error["code"])
                 if error else ("matched" if provider_matches else "no_result")
             )
-            if status in {"timeout", "skipped"}:
+            if status in {"timeout", "skipped", "not_configured"}:
                 diagnostic_status = status
             _record_provider_diagnostic(
                 diagnostics,
@@ -1009,6 +1022,8 @@ def _reverse_similar(image_path, providers, diagnostics=None):
     for provider in reverse_providers:
         method = getattr(provider, "search_similar", None)
         if not callable(method):
+            continue
+        if _provider_needs_configuration(provider):
             continue
         provider_name = getattr(provider, "provider_name", None) or provider.__class__.__name__.lower()
         started = time.perf_counter()

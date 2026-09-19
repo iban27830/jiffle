@@ -47,6 +47,8 @@ class Settings:
     e621_api_key: str | None = None
     gelbooru_user_id: str | None = None
     gelbooru_api_key: str | None = None
+    rule34_user_id: str | None = None
+    rule34_api_key: str | None = None
     furaffinity_cookie_a: str | None = None
     furaffinity_cookie_b: str | None = None
 
@@ -108,8 +110,9 @@ class Settings:
                 "background_model", "background_device",
                 "huggingface_token",
                 "danbooru_login", "danbooru_api_key", "e621_login", "e621_api_key",
-                "gelbooru_user_id", "gelbooru_api_key", "furaffinity_cookie_a",
-                "furaffinity_cookie_b",
+                "gelbooru_user_id", "gelbooru_api_key",
+                "rule34_user_id", "rule34_api_key",
+                "furaffinity_cookie_a", "furaffinity_cookie_b",
             }
             values = {key: value for key, value in payload.items() if key in allowed}
             if "background_model" in values:
@@ -168,6 +171,8 @@ def persist_settings(settings: Settings) -> None:
         "e621_api_key": settings.e621_api_key,
         "gelbooru_user_id": settings.gelbooru_user_id,
         "gelbooru_api_key": settings.gelbooru_api_key,
+        "rule34_user_id": settings.rule34_user_id,
+        "rule34_api_key": settings.rule34_api_key,
         "furaffinity_cookie_a": settings.furaffinity_cookie_a,
         "furaffinity_cookie_b": settings.furaffinity_cookie_b,
     }
