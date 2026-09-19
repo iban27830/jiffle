@@ -11,9 +11,11 @@ from jiffle.features.review_queue.workflow import (
     ReviewFailure,
     accept_review_item,
     accept_source_candidate,
+    create_review_reimport_job,
     create_manual_source_job,
     reject_review_item,
     run_manual_source_job,
+    run_review_reimport_job,
     create_metadata_refresh_job,
     run_metadata_refresh_job,
     accept_metadata_suggestion,
@@ -27,7 +29,7 @@ review_blueprint = Blueprint("review_queue", __name__)
 @review_blueprint.get("/api/v1/review-items")
 def list_review_items():
     try:
-        limit = int(request.args.get("limit", 20))
+        limit = int(request.args.get("limit", 60))
         offset = int(request.args.get("offset", 0))
     except ValueError:
         return _error("review.invalid_query", "Pagination values must be integers.", 400)
@@ -35,28 +37,35 @@ def list_review_items():
         return _error("review.invalid_query", "Pagination is outside its valid range.", 400)
     connection = get_database()
     total = connection.execute(
-        "SELECT COUNT(*) FROM review_items WHERE status='pending'"
+        "SELECT COUNT(*) FROM ("
+        "SELECT id, created_at FROM review_items WHERE status='pending' "
+        "UNION ALL "
+        "SELECT id, created_at FROM metadata_suggestions WHERE status='pending'"
+        ")"
     ).fetchone()[0]
     counts = {row["reason"]: row["count"] for row in connection.execute(
         "SELECT reason, COUNT(*) AS count FROM review_items WHERE status='pending' GROUP BY reason"
     ).fetchall()}
-    rows = connection.execute(
-        "SELECT review.id, review.reason, review.status, review.created_at, candidate.original_name, "
-        "candidate.media_type, candidate.width, candidate.height, candidate.file_size "
-        "FROM review_items review JOIN import_candidates candidate "
-        "ON candidate.id=review.import_candidate_id WHERE review.status='pending' "
-        "ORDER BY review.id LIMIT ? OFFSET ?", (limit, offset)
-    ).fetchall()
-    items = [_serialize(row) for row in rows]
-    metadata_rows = connection.execute(
-        "SELECT suggestion.id, suggestion.media_item_id, suggestion.provider, suggestion.created_at, "
-        "suggestion.source_metadata_json, media.file_path, media.media_type, media.width, media.height, media.file_size "
-        "FROM metadata_suggestions suggestion JOIN media_items media ON media.id=suggestion.media_item_id "
-        "WHERE suggestion.status='pending' ORDER BY suggestion.id LIMIT ? OFFSET ?",
+    # Paginate the combined queue so Review items and metadata suggestions share
+    # one scrollable list instead of paging each table independently.
+    page = connection.execute(
+        "SELECT kind, item_id FROM ("
+        "SELECT 'candidate' AS kind, id AS item_id, created_at FROM review_items WHERE status='pending' "
+        "UNION ALL "
+        "SELECT 'metadata' AS kind, id AS item_id, created_at FROM metadata_suggestions WHERE status='pending'"
+        ") ORDER BY created_at ASC, kind ASC, item_id ASC LIMIT ? OFFSET ?",
         (limit, offset),
     ).fetchall()
-    metadata_items = [_serialize_metadata(row) for row in metadata_rows]
-    items.extend(metadata_items)
+    items = []
+    for entry in page:
+        if entry["kind"] == "candidate":
+            row = _review_row(entry["item_id"])
+            if row is not None:
+                items.append(_serialize(row))
+        else:
+            row = _metadata_row(entry["item_id"])
+            if row is not None:
+                items.append(_serialize_metadata(row))
     metadata_count = connection.execute(
         "SELECT COUNT(*) FROM metadata_suggestions WHERE status='pending'"
     ).fetchone()[0]
@@ -64,7 +73,7 @@ def list_review_items():
         counts["metadata_update"] = int(metadata_count)
     return jsonify({
         "items": items,
-        "page": {"total": int(total) + int(metadata_count), "limit": limit, "offset": offset, "by_reason": counts},
+        "page": {"total": int(total), "limit": limit, "offset": offset, "by_reason": counts},
     })
 
 
@@ -199,6 +208,35 @@ def apply_manual_source(review_id: int):
     return jsonify({"job_id": job_id, "status_url": f"/api/v1/jobs/{job_id}"}), 202
 
 
+@review_blueprint.post("/api/v1/review-items/reimport")
+def reimport_review_items():
+    """Re-run source resolution for selected pending review items."""
+    payload = request.get_json(silent=True) or {}
+    raw_ids = payload.get("review_item_ids", payload.get("ids"))
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return _error("review.invalid_request", "A list of review item IDs is required.", 400)
+    try:
+        review_ids = [int(value) for value in raw_ids]
+    except (TypeError, ValueError):
+        return _error("review.invalid_request", "Review item IDs must be integers.", 400)
+    connection = get_database()
+    try:
+        job_id = create_review_reimport_job(connection, review_ids)
+    except ReviewFailure as error:
+        return _review_error(error)
+    settings: Settings = current_app.config["JIFFLE_SETTINGS"]
+    arguments = (
+        settings.database_path, settings, job_id, review_ids,
+        current_app.config["JIFFLE_SOURCE_PROVIDERS"],
+        current_app.config["JIFFLE_MEDIA_DOWNLOADER"],
+    )
+    if settings.run_jobs_inline:
+        run_review_reimport_job(*arguments)
+    else:
+        Thread(target=run_review_reimport_job, args=arguments, daemon=True).start()
+    return jsonify({"job_id": job_id, "status_url": f"/api/v1/jobs/{job_id}"}), 202
+
+
 @review_blueprint.post("/api/v1/media/<int:media_id>/metadata-refresh")
 @review_blueprint.post("/api/v1/metadata-refresh-jobs")
 def refresh_metadata(media_id: int | None = None):
@@ -281,6 +319,15 @@ def _review_row(review_id):
     ).fetchone()
 
 
+def _metadata_row(suggestion_id):
+    return get_database().execute(
+        "SELECT suggestion.id, suggestion.media_item_id, suggestion.provider, suggestion.created_at, "
+        "suggestion.source_metadata_json, media.file_path, media.media_type, media.width, media.height, media.file_size "
+        "FROM metadata_suggestions suggestion JOIN media_items media ON media.id=suggestion.media_item_id "
+        "WHERE suggestion.status='pending' AND suggestion.id=?", (suggestion_id,)
+    ).fetchone()
+
+
 def _source_candidates(review_id):
     rows = get_database().execute(
         "SELECT id, rank, match_method, confidence, provider, source_metadata_json, stored_path, "
@@ -316,7 +363,8 @@ def _review_path(row) -> Path | None:
 def _serialize(row):
     review_id = row["id"]
     return {
-        "id": review_id, "reason": row["reason"], "status": row["status"],
+        "id": review_id, "kind": "candidate",
+        "reason": row["reason"], "status": row["status"],
         "original_name": row["original_name"], "type": row["media_type"],
         "width": row["width"], "height": row["height"],
         "file_size": row["file_size"], "created_at": row["created_at"],

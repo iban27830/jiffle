@@ -11,8 +11,16 @@ from jiffle.configuration.settings import Settings
 from jiffle.features.imports.local_import import atomic_copy
 from jiffle.features.imports.source_adapters.contracts import SourceMedia, SourceProvider
 from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
+from jiffle.features.imports.universal_import import (
+    _match_to_source,
+    _select_metadata_source,
+    resolve_exact_downloads,
+)
 from jiffle.infrastructure.database.connection import connect_database
 from jiffle.infrastructure.media_revisions import create_original_revision
+
+
+_UNSET = object()
 
 
 class ReviewFailure(Exception):
@@ -27,11 +35,15 @@ def accept_review_item(
     settings: Settings,
     review_id: int,
     source: SourceMedia | None = None,
-    file_source: SourceMedia | None = None,
+    file_source: SourceMedia | None | object = _UNSET,
 ) -> int:
     row = _pending_review(connection, review_id)
     source = source or _candidate_source(row["source_metadata_json"])
-    file_source = file_source or source
+    if file_source is _UNSET:
+        # By default the metadata source is also where the bytes come from.
+        # Passing an explicit ``None`` records a source without a file source,
+        # for example when the user's own upload supplied the bytes.
+        file_source = source
     staged = _staged_path(settings, row["stored_path"])
     if not staged.is_file():
         raise ReviewFailure("review.file_missing", "The staged file is unavailable.")
@@ -288,6 +300,189 @@ def run_manual_source_job(
         raise
     finally:
         connection.close()
+
+
+def create_review_reimport_job(connection: sqlite3.Connection, review_ids) -> int:
+    """Queue a recheck of pending review items against the current providers."""
+    unique_ids = list(dict.fromkeys(int(value) for value in review_ids))
+    if not unique_ids:
+        raise ReviewFailure("review.invalid_request", "At least one review item is required.")
+    placeholders = ",".join("?" for _ in unique_ids)
+    pending = [
+        int(row[0])
+        for row in connection.execute(
+            f"SELECT id FROM review_items WHERE status='pending' AND id IN ({placeholders})",
+            unique_ids,
+        ).fetchall()
+    ]
+    if not pending:
+        raise ReviewFailure("review.not_found", "The selected review items are no longer pending.")
+    pending.sort(key=unique_ids.index)
+    cursor = connection.execute(
+        "INSERT INTO background_jobs (job_type, status, result_json) "
+        "VALUES ('review_reimport', 'pending', ?)",
+        (json.dumps({"review_item_ids": pending}),),
+    )
+    connection.commit()
+    return int(cursor.lastrowid)
+
+
+def run_review_reimport_job(
+    database_path: Path,
+    settings: Settings,
+    job_id: int,
+    review_ids,
+    providers: tuple[SourceProvider, ...],
+    downloader: object,
+) -> None:
+    """Re-run source resolution for staged review items.
+
+    Rechecking is useful after the user adds or reconfigures a source provider:
+    a photo that had no source may now be found.  When a verified source is
+    found the item is accepted with the richest metadata available, keeping the
+    metadata source and the file source separate when they differ.
+    """
+    connection = connect_database(database_path)
+    try:
+        stored = connection.execute(
+            "SELECT result_json FROM background_jobs WHERE id=?", (job_id,)
+        ).fetchone()
+        if stored is not None and stored["result_json"]:
+            try:
+                queued = json.loads(stored["result_json"]).get("review_item_ids")
+            except (TypeError, ValueError):
+                queued = None
+            if isinstance(queued, list) and queued:
+                review_ids = [int(value) for value in queued]
+        connection.execute(
+            "UPDATE background_jobs SET status='running', progress=5, "
+            "started_at=CURRENT_TIMESTAMP WHERE id=?",
+            (job_id,),
+        )
+        connection.commit()
+        results: list[dict[str, object]] = []
+        total = max(1, len(review_ids))
+        for index, review_id in enumerate(review_ids, start=1):
+            try:
+                result = _reimport_review_item(
+                    connection, settings, int(review_id), providers, downloader
+                )
+            except ReviewFailure as error:
+                result = {
+                    "review_item_id": int(review_id),
+                    "status": "unavailable",
+                    "code": error.code,
+                    "message": error.message,
+                }
+            except Exception:
+                connection.rollback()
+                result = {
+                    "review_item_id": int(review_id),
+                    "status": "unavailable",
+                    "code": "review.reimport_failed",
+                    "message": "The source could not be rechecked.",
+                }
+            results.append(result)
+            connection.execute(
+                "UPDATE background_jobs SET progress=?, result_json=? WHERE id=?",
+                (
+                    5 + int(90 * index / total),
+                    json.dumps({"outcome": "running", "items": results}),
+                    job_id,
+                ),
+            )
+            connection.commit()
+        summary = {
+            "outcome": "completed",
+            "items": results,
+            "accepted": sum(1 for item in results if item["status"] == "accepted"),
+            "no_source": sum(1 for item in results if item["status"] == "no_source"),
+            "unavailable": sum(1 for item in results if item["status"] == "unavailable"),
+        }
+        connection.execute(
+            "UPDATE background_jobs SET status='completed', progress=100, result_json=?, "
+            "finished_at=CURRENT_TIMESTAMP WHERE id=?",
+            (json.dumps(summary), job_id),
+        )
+        connection.commit()
+    except Exception:
+        _fail_job(
+            connection, job_id, "review.reimport_failed",
+            "The selected items could not be rechecked.",
+        )
+        raise
+    finally:
+        connection.close()
+
+
+def _reimport_review_item(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    review_id: int,
+    providers,
+    downloader,
+) -> dict[str, object]:
+    row = _pending_review(connection, review_id)
+    staged = _staged_path(settings, row["stored_path"])
+    if not staged.is_file():
+        raise ReviewFailure("review.file_missing", "The staged file is unavailable.")
+    diagnostics: list[dict[str, object]] = []
+    matches, verified, errors = resolve_exact_downloads(
+        staged, providers, downloader, settings, diagnostics
+    )
+    try:
+        if not matches:
+            return {
+                "review_item_id": review_id,
+                "status": "no_source",
+                "provider_errors": errors,
+                "provider_diagnostics": diagnostics,
+            }
+        if verified:
+            file_match = verified[0][0]
+            # The richest tags are not always on the provider whose bytes are
+            # downloadable, so rank every exact match for metadata and take the
+            # file from the copy that verified.
+            metadata_match = _select_metadata_source(matches) or file_match
+            source = _match_to_source(metadata_match)
+            file_source = _match_to_source(file_match)
+            media_item_id = accept_review_item(
+                connection, settings, review_id, source, file_source
+            )
+            return {
+                "review_item_id": review_id,
+                "status": "accepted",
+                "media_item_id": media_item_id,
+                "provider": source.provider,
+                "file_provider": file_source.provider,
+                "source_url": source.canonical_url,
+            }
+        # The providers know the exact source but no copy is downloadable.
+        # The user's own staged file already has the right bytes, so keep it
+        # and apply the richest metadata without a file source.
+        metadata_match = _select_metadata_source(matches)
+        if metadata_match is None:
+            return {
+                "review_item_id": review_id,
+                "status": "no_source",
+                "provider_errors": errors,
+                "provider_diagnostics": diagnostics,
+            }
+        source = _match_to_source(metadata_match)
+        media_item_id = accept_review_item(
+            connection, settings, review_id, source, None
+        )
+        return {
+            "review_item_id": review_id,
+            "status": "accepted",
+            "media_item_id": media_item_id,
+            "provider": source.provider,
+            "metadata_only": True,
+            "source_url": source.canonical_url,
+        }
+    finally:
+        for _match, path in verified:
+            path.unlink(missing_ok=True)
 
 
 def _pending_review(connection: sqlite3.Connection, review_id: int) -> sqlite3.Row:

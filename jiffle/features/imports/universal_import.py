@@ -703,6 +703,23 @@ def _download_exact_candidates(exact, digest, settings, downloader, diagnostics=
     return valid, errors
 
 
+def resolve_exact_downloads(path, providers, downloader, settings, diagnostics=None):
+    """Find exact copies of a local file and download the bytes that verify.
+
+    Returns ``(matches, verified, errors)``.  ``matches`` are every exact source
+    the providers reported for the file hash, ``verified`` is a list of
+    ``(SourceMatch, Path)`` pairs whose downloaded bytes matched the hash, and
+    ``errors`` summarises provider and download failures.  Callers own the
+    returned paths and must remove them.
+    """
+    digest = _md5(path)
+    matches, search_errors = _search_exact(providers, digest, None, None, diagnostics)
+    verified, download_errors = _download_exact_candidates(
+        matches, digest, settings, downloader, diagnostics
+    )
+    return matches, verified, search_errors + download_errors
+
+
 def _record_provider_timing(target, provider, duration_ms, status):
     if target is not None:
         target.append({

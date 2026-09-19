@@ -13,6 +13,8 @@ const statusText = document.querySelector('#statusText');
 const jobStatus = document.querySelector('#jobStatus');
 let currentView = 'library';
 let libraryOffset = 0;
+let reviewOffset = 0;
+let reviewSelection = new Set();
 let selectedMedia = null;
 let includeTag = ''; let excludeTag = '';
 let librarySearch = '';
@@ -67,6 +69,21 @@ function applyLibraryPrefs() {
   document.documentElement.style.setProperty('--inspector-width', `${prefs.inspectorWidth}px`);
   document.documentElement.classList.toggle('hide-card-info', !prefs.showCardInfo);
   return prefs;
+}
+const REVIEW_PREFS_KEY = 'jiffle-review-preferences';
+const REVIEW_PAGE_SIZES = [20, 40, 60, 100];
+const defaultReviewPrefs = {pageSize: 60};
+function reviewPrefs() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(REVIEW_PREFS_KEY) || '{}');
+    const pageSize = REVIEW_PAGE_SIZES.includes(Number(saved.pageSize)) ? Number(saved.pageSize) : defaultReviewPrefs.pageSize;
+    return {...defaultReviewPrefs, ...saved, pageSize};
+  } catch { return {...defaultReviewPrefs}; }
+}
+function saveReviewPrefs(changes) {
+  const next = {...reviewPrefs(), ...changes};
+  try { localStorage.setItem(REVIEW_PREFS_KEY, JSON.stringify(next)); } catch {}
+  return next;
 }
 function applyFontSize(value) {
   const size = allowedFontSizes.includes(Number(value)) ? Number(value) : 16;
@@ -521,32 +538,138 @@ async function showImport() {
   icons(); restoreSetImportMonitor();
 }
 
-async function showReview() {
-  setHeader('Review');
-  const data = await api('/api/v1/review-items?limit=100');
-  const sourceItems = data.items.map(item => item.kind === 'metadata'
-    ? `<article class="queue-item"><img src="${item.thumbnail_url}" alt=""><div><strong>Media #${item.media_id}</strong><small class="ellipsis">Metadata update · ${item.source_metadata?.parent_id ? `parent #${esc(item.source_metadata.parent_id)}` : 'no parent'} · ${Number(item.source_metadata?.tag_count || 0)} tags</small></div><div class="actions"><button class="icon-btn open-review-media" data-media-id="${item.media_id}" title="Open in Library"><i data-lucide="images"></i></button><button class="btn accept-metadata" data-id="${item.suggestion_id}"><i data-lucide="check"></i>Apply</button><button class="icon-btn danger reject-metadata" data-id="${item.suggestion_id}" title="Ignore"><i data-lucide="trash-2"></i></button></div></article>`
-    : `<article class="queue-item review-source-item"><img src="${item.thumbnail_url}" alt=""><div><strong>${esc(item.original_name)}</strong><small class="ellipsis">${esc(item.reason)} · ${item.width || '?'}×${item.height || '?'}</small>${(item.source_candidates || []).length ? `<div class="source-candidate-list">${item.source_candidates.map(candidate => { const source=candidate.source_metadata || {}; return `<div class="source-candidate"><img src="${candidate.thumbnail_url}" alt=""><div><strong>${esc(candidate.provider)} · ${esc(source.remote_id || 'post')}</strong><small>${esc(candidate.match_method)} · ${Number(candidate.confidence).toFixed(2)}% · ${candidate.width || '?'}×${candidate.height || '?'}</small></div><button class="btn primary accept-source-candidate" data-review-id="${item.id}" data-candidate-id="${candidate.id}"><i data-lucide="check"></i>Use this source</button></div>`; }).join('')}</div>` : ''}</div><div class="actions"><button class="btn accept" data-id="${item.id}"><i data-lucide="check"></i>Accept</button><button class="btn source" data-id="${item.id}"><i data-lucide="link"></i>Source</button><button class="icon-btn danger reject" data-id="${item.id}" title="Reject"><i data-lucide="trash-2"></i></button></div></article>`).join('');
-  const groups = data.items.reduce((acc,item)=>(acc[item.reason]=(acc[item.reason]||0)+1,acc),{});
-  const summary = Object.entries(groups).map(([reason,count])=>`<span class="badge">${esc(reason)}: ${count}</span>`).join('');
-  workspace.innerHTML = `<div class="page"><div class="page-head"><h2>Needs attention</h2><span class="badge">${data.page.total}</span></div><div class="review-summary">${summary}</div><div class="item-list">${sourceItems || '<div class="empty">Nothing needs review</div>'}</div></div>`;
-  document.querySelectorAll('.accept').forEach(node => node.onclick = () => reviewAction(node.dataset.id, 'accept'));
-  document.querySelectorAll('.reject').forEach(node => node.onclick = () => reviewAction(node.dataset.id, 'reject'));
-  document.querySelectorAll('.accept-source-candidate').forEach(node => node.onclick = async () => { try { await api(`/api/v1/review-items/${node.dataset.reviewId}/source-candidates/${node.dataset.candidateId}/accept`,{method:'POST'}); toast('Source selected'); showReview(); } catch(error) { toast(error.message,true); } });
-  document.querySelectorAll('.source').forEach(node => node.onclick = async () => {
-    const url = prompt('Source URL'); if (!url) return;
-    try { await runJob(() => api(`/api/v1/review-items/${node.dataset.id}/source`,{method:'POST',body:JSON.stringify({url})})); toast('Source applied'); showReview(); }
-    catch (error) { toast(error.message,true); }
+const reviewReasonLabels = {
+  source_required: 'Needs a source', source_candidates: 'Choose a source',
+  metadata_update: 'Metadata update', previously_deleted: 'Previously deleted',
+};
+function reviewReasonLabel(reason) {
+  return reviewReasonLabels[reason] || String(reason || 'Review').replaceAll('_', ' ').replace(/^./, character => character.toUpperCase());
+}
+
+function reviewCardHtml(item) {
+  const reason = `<span class="review-card-reason">${esc(reviewReasonLabel(item.reason))}</span>`;
+  if (item.kind === 'metadata') {
+    return `<article class="media-card review-card" data-review-kind="metadata"><div class="review-card-preview" data-open-review-content="${esc(item.content_url)}" data-review-type="${esc(item.type || 'image')}" title="Open full size"><img loading="lazy" src="${esc(item.thumbnail_url)}" alt="">${reason}</div><div class="review-card-actions"><button type="button" class="icon-btn" data-open-review-content="${esc(item.content_url)}" data-review-type="${esc(item.type || 'image')}" data-review-title="Media #${item.media_id}" title="Open full size"><i data-lucide="maximize-2"></i></button><button type="button" class="icon-btn good" data-accept-metadata="${item.suggestion_id}" title="Apply metadata"><i data-lucide="check"></i></button><button type="button" class="icon-btn danger" data-reject-metadata="${item.suggestion_id}" title="Ignore"><i data-lucide="trash-2"></i></button></div></article>`;
+  }
+  const selected = reviewSelection.has(item.id) ? ' checked' : '';
+  const candidateCount = (item.source_candidates || []).length;
+  const candidates = candidateCount ? `<span class="review-card-candidates">${candidateCount} source${candidateCount === 1 ? '' : 's'}</span>` : '';
+  return `<article class="media-card review-card" data-review-kind="candidate" data-review-id="${item.id}"><div class="review-card-preview" data-open-review="${item.id}" title="Open full size"><img loading="lazy" src="${esc(item.thumbnail_url)}" alt="">${reason}${candidates}<label class="review-card-select" title="Select for recheck"><input type="checkbox" data-review-select="${item.id}"${selected}></label></div><div class="review-card-actions"><button type="button" class="icon-btn" data-open-review="${item.id}" title="Open full size"><i data-lucide="maximize-2"></i></button><button type="button" class="icon-btn" data-review-reimport="${item.id}" title="Run import again"><i data-lucide="refresh-cw"></i></button><button type="button" class="icon-btn good" data-review-accept="${item.id}" title="Accept"><i data-lucide="check"></i></button><button type="button" class="icon-btn danger" data-review-reject="${item.id}" title="Reject"><i data-lucide="trash-2"></i></button></div></article>`;
+}
+
+function openMediaLightbox({contentUrl, type = 'image', title = '', candidates = [], reviewId = null}) {
+  document.querySelector('.media-lightbox')?.remove();
+  const media = type === 'video'
+    ? `<video src="${esc(contentUrl)}" controls autoplay playsinline></video>`
+    : `<img src="${esc(contentUrl)}" alt="">`;
+  const sourceRows = (candidates || []).map(candidate => {
+    const metadata = candidate.source_metadata || {};
+    return `<div class="media-lightbox-source"><img src="${esc(candidate.thumbnail_url)}" alt=""><div><strong>${esc(candidate.provider)} · #${esc(metadata.remote_id || 'post')}</strong><small>${esc(candidate.match_method)} · ${Number(candidate.confidence).toFixed(0)}% · ${candidate.width || '?'}×${candidate.height || '?'}</small></div><button type="button" class="btn primary use-lightbox-candidate" data-review-id="${reviewId}" data-candidate-id="${candidate.id}"><i data-lucide="check"></i>Use this source</button></div>`;
+  }).join('');
+  const sources = candidates.length ? `<div class="media-lightbox-sources"><h3>Source candidates</h3><div class="media-lightbox-source-list">${sourceRows}</div></div>` : '';
+  const manual = reviewId ? `<button type="button" class="btn manual-lightbox-source"><i data-lucide="link"></i>Add source URL</button>` : '';
+  const node = document.createElement('div');
+  node.className = 'media-lightbox';
+  node.innerHTML = `<div class="media-lightbox-backdrop" data-close></div><figure class="media-lightbox-window"><div class="media-lightbox-head"><strong>${esc(title)}</strong>${manual}<a class="icon-btn" href="${esc(contentUrl)}" target="_blank" rel="noopener" title="Open in a new tab"><i data-lucide="external-link"></i></a><button type="button" class="icon-btn" data-close title="Close"><i data-lucide="x"></i></button></div><div class="media-lightbox-body">${media}</div>${sources}</figure>`;
+  document.body.appendChild(node);
+  const close = () => { node.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = event => { if (event.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  node.querySelectorAll('[data-close]').forEach(element => element.onclick = close);
+  node.querySelectorAll('.use-lightbox-candidate').forEach(element => element.onclick = async () => {
+    try {
+      await api(`/api/v1/review-items/${element.dataset.reviewId}/source-candidates/${element.dataset.candidateId}/accept`,{method:'POST'});
+      reviewSelection.delete(Number(element.dataset.reviewId));
+      close(); toast('Source selected'); showReview();
+    } catch(error) { toast(error.message,true); }
   });
-  document.querySelectorAll('.accept-metadata').forEach(node => node.onclick = async () => { try { await api(`/api/v1/metadata-suggestions/${node.dataset.id}/accept`,{method:'POST'}); toast('Metadata applied'); showReview(); } catch(error) { toast(error.message,true); } });
-  document.querySelectorAll('.reject-metadata').forEach(node => node.onclick = async () => { try { await api(`/api/v1/metadata-suggestions/${node.dataset.id}/reject`,{method:'POST'}); toast('Metadata ignored'); showReview(); } catch(error) { toast(error.message,true); } });
-  document.querySelectorAll('.open-review-media').forEach(node => node.onclick = () => openMediaInLibrary(Number(node.dataset.mediaId)));
-  meta.textContent = `${data.page.total} awaiting review`; icons(); await refreshCounts();
+  node.querySelectorAll('.manual-lightbox-source').forEach(element => element.onclick = async () => {
+    const url = prompt('Source URL'); if (!url) return;
+    try {
+      await runJob(() => api(`/api/v1/review-items/${reviewId}/source`,{method:'POST',body:JSON.stringify({url})}));
+      reviewSelection.delete(Number(reviewId));
+      close(); toast('Source applied'); showReview();
+    } catch(error) { toast(error.message,true); }
+  });
+  icons();
+}
+
+async function showReview() {
+  const state = viewState('review');
+  reviewOffset = Math.max(0, Number(state.offset ?? reviewOffset) || 0);
+  const prefs = reviewPrefs();
+  setHeader('Review', '',
+    '<button id="reviewSelectAll" class="btn" type="button"><i data-lucide="check-square"></i>Select all on screen</button>' +
+    '<button id="reviewRecheck" class="btn primary" type="button" disabled><i data-lucide="refresh-cw"></i>Recheck selected</button>');
+  const data = await api(`/api/v1/review-items?limit=${prefs.pageSize}&offset=${reviewOffset}`);
+  saveViewState('review', {offset: reviewOffset});
+  const items = data.items;
+  const byId = new Map(items.map(item => [item.id, item]));
+  const candidateIds = items.filter(item => item.kind !== 'metadata').map(item => item.id);
+  const summary = Object.entries(data.page.by_reason || {}).map(([reason, count]) => `<span class="badge">${esc(reviewReasonLabel(reason))}: ${count}</span>`).join('');
+  workspace.innerHTML = `<div class="page review-page"><div class="review-toolbar">${summary ? `<div class="review-summary">${summary}</div>` : '<span class="muted-value">Nothing needs review</span>'}<label class="toolbar-count" title="Items per page"><span>Per page</span><select id="reviewPageSize" class="control">${REVIEW_PAGE_SIZES.map(size => `<option value="${size}" ${size === prefs.pageSize ? 'selected' : ''}>${size}</option>`).join('')}</select></label></div><div class="gallery review-gallery">${items.length ? items.map(reviewCardHtml).join('') : '<div class="empty">Nothing needs review</div>'}</div><div id="reviewPager" class="pager"></div></div>`;
+  const from = data.page.total ? reviewOffset + 1 : 0;
+  const to = Math.min(reviewOffset + items.length, data.page.total);
+  document.querySelector('#reviewPager').innerHTML = `<span class="page-range">${from}-${to} of ${data.page.total}</span><button class="btn" id="reviewPrev" ${reviewOffset === 0 ? 'disabled' : ''}><i data-lucide="chevron-left"></i>Previous</button><button class="btn" id="reviewNext" ${reviewOffset + prefs.pageSize >= data.page.total ? 'disabled' : ''}>Next<i data-lucide="chevron-right"></i></button>`;
+  document.querySelector('#reviewPageSize').onchange = event => { saveReviewPrefs({pageSize:Number(event.target.value)}); reviewOffset = 0; showReview(); };
+  document.querySelector('#reviewPrev').onclick = () => { reviewOffset = Math.max(0, reviewOffset - prefs.pageSize); showReview(); };
+  document.querySelector('#reviewNext').onclick = () => { reviewOffset += prefs.pageSize; showReview(); };
+  const updateSelectionUi = () => {
+    document.querySelectorAll('[data-review-select]').forEach(node => node.checked = reviewSelection.has(Number(node.dataset.reviewSelect)));
+    const selectedCount = candidateIds.filter(id => reviewSelection.has(id)).length;
+    const recheck = document.querySelector('#reviewRecheck');
+    if (recheck) { recheck.disabled = selectedCount === 0; recheck.innerHTML = `<i data-lucide="refresh-cw"></i>Recheck selected${selectedCount ? ` (${selectedCount})` : ''}`; }
+    const selectAll = document.querySelector('#reviewSelectAll');
+    if (selectAll) {
+      const allSelected = candidateIds.length > 0 && candidateIds.every(id => reviewSelection.has(id));
+      selectAll.classList.toggle('active', allSelected);
+      selectAll.innerHTML = `<i data-lucide="check-square"></i>${allSelected ? 'Clear selection' : 'Select all on screen'}`;
+    }
+    icons();
+  };
+  document.querySelectorAll('[data-review-select]').forEach(node => node.onchange = event => { const id = Number(node.dataset.reviewSelect); if (event.target.checked) reviewSelection.add(id); else reviewSelection.delete(id); updateSelectionUi(); });
+  document.querySelector('#reviewSelectAll').onclick = () => { const allSelected = candidateIds.length > 0 && candidateIds.every(id => reviewSelection.has(id)); candidateIds.forEach(id => { if (allSelected) reviewSelection.delete(id); else reviewSelection.add(id); }); updateSelectionUi(); };
+  document.querySelector('#reviewRecheck').onclick = () => recheckReviewItems([...reviewSelection]);
+  document.querySelectorAll('[data-review-accept]').forEach(node => node.onclick = () => reviewAction(Number(node.dataset.reviewAccept), 'accept'));
+  document.querySelectorAll('[data-review-reject]').forEach(node => node.onclick = () => reviewAction(Number(node.dataset.reviewReject), 'reject'));
+  document.querySelectorAll('[data-review-reimport]').forEach(node => node.onclick = () => recheckReviewItems([Number(node.dataset.reviewReimport)]));
+  document.querySelectorAll('[data-accept-metadata]').forEach(node => node.onclick = async () => { try { await api(`/api/v1/metadata-suggestions/${node.dataset.acceptMetadata}/accept`,{method:'POST'}); toast('Metadata applied'); showReview(); } catch(error) { toast(error.message,true); } });
+  document.querySelectorAll('[data-reject-metadata]').forEach(node => node.onclick = async () => { try { await api(`/api/v1/metadata-suggestions/${node.dataset.rejectMetadata}/reject`,{method:'POST'}); toast('Metadata ignored'); showReview(); } catch(error) { toast(error.message,true); } });
+  document.querySelectorAll('[data-open-review]').forEach(node => node.onclick = event => {
+    if (event.target.closest('.review-card-select')) return;
+    const item = byId.get(Number(node.dataset.openReview));
+    if (item) openMediaLightbox({contentUrl:item.content_url, type:item.type, title:item.original_name, candidates:item.source_candidates || [], reviewId:item.id});
+  });
+  document.querySelectorAll('[data-open-review-content]').forEach(node => node.onclick = event => {
+    if (event.target.closest('.review-card-select')) return;
+    openMediaLightbox({contentUrl:node.dataset.openReviewContent, type:node.dataset.reviewType || 'image', title:node.dataset.reviewTitle || 'Preview'});
+  });
+  meta.textContent = `${data.page.total} awaiting review`;
+  icons(); updateSelectionUi(); await refreshCounts();
+}
+
+async function recheckReviewItems(ids) {
+  const unique = [...new Set(ids.map(Number).filter(id => id > 0))];
+  if (!unique.length) { toast('Select at least one item', true); return; }
+  try {
+    const job = await runJob(() => api('/api/v1/review-items/reimport',{method:'POST',body:JSON.stringify({review_item_ids:unique})}));
+    const result = job.result || {};
+    unique.forEach(id => reviewSelection.delete(id));
+    const unavailable = Number(result.unavailable || 0);
+    toast(`Recheck complete: ${Number(result.accepted || 0)} resolved, ${Number(result.no_source || 0)} still without a source${unavailable ? `, ${unavailable} unavailable` : ''}`);
+    await refreshCounts();
+    showReview();
+  } catch (error) { toast(error.message,true); }
 }
 
 async function reviewAction(id, action) {
-  try { await api(`/api/v1/review-items/${id}/${action}`,{method:'POST'}); toast(action === 'accept' ? 'File accepted' : 'File rejected'); showReview(); }
-  catch (error) { toast(error.message,true); }
+  try {
+    await api(`/api/v1/review-items/${id}/${action}`,{method:'POST'});
+    reviewSelection.delete(Number(id));
+    toast(action === 'accept' ? 'File accepted' : 'File rejected');
+    await refreshCounts();
+    showReview();
+  } catch (error) { toast(error.message,true); }
 }
 
 function openMediaInLibrary(mediaId) {
