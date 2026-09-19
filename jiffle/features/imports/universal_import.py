@@ -7,10 +7,11 @@ provides the single resolver used by the current Import screen.
 import hashlib
 import json
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from pathlib import Path
 import shutil
 import sqlite3
+from threading import Lock
 import time
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -34,6 +35,40 @@ from jiffle.infrastructure.media_revisions import create_original_revision
 
 
 MIN_SIMILAR_CONFIDENCE = 80.0
+
+# A provider that is blocked or black-holed must not park an import: search
+# calls run in parallel and any provider still running after this deadline is
+# abandoned for this import (its bytes are simply not used).
+PROVIDER_SEARCH_TIMEOUT_SECONDS = 10.0
+
+# After a search times out the provider is skipped for a while so a batch of
+# imports does not pay the same deadline again and again. It is retried
+# automatically once the cooldown expires.
+PROVIDER_COOLDOWN_SECONDS = 300.0
+
+_provider_cooldowns: dict[str, float] = {}
+_provider_cooldowns_lock = Lock()
+
+
+def _provider_on_cooldown(name: str) -> bool:
+    with _provider_cooldowns_lock:
+        until = _provider_cooldowns.get(name)
+        if until is None:
+            return False
+        if until <= time.monotonic():
+            _provider_cooldowns.pop(name, None)
+            return False
+        return True
+
+
+def _mark_provider_cooldown(name: str) -> None:
+    with _provider_cooldowns_lock:
+        _provider_cooldowns[name] = time.monotonic() + PROVIDER_COOLDOWN_SECONDS
+
+
+def _clear_provider_cooldown(name: str) -> None:
+    with _provider_cooldowns_lock:
+        _provider_cooldowns.pop(name, None)
 
 
 # Failures that leave nothing useful to validate manually.  For these the job
@@ -281,6 +316,7 @@ def run_universal_import_job(
             raise ImportFailure("import.source_not_found", "No downloadable exact copy was found for this source.")
 
         inspection = inspect_media(original_path)
+        _progress(connection, job_id, 25, "Reading the file and checking the library")
         candidate_id = _candidate_id(connection, job_id)
         _update_candidate(connection, candidate_id, inspection, None, "pending")
         pending_review = connection.execute(
@@ -321,11 +357,38 @@ def run_universal_import_job(
         if blocked_hash and settings.block_previously_deleted:
             raise ImportFailure("import.previously_deleted", "This media was previously deleted and is blocked by settings.")
 
+        # A local file that is already in the library is answered from the
+        # local fingerprints before any provider is contacted: an unreachable
+        # provider must not make a known file look like it is still importing.
+        if input_kind != "url":
+            perceptual_duplicate = find_exact_perceptual_duplicate(
+                connection, settings, original_path, inspection
+            )
+            if perceptual_duplicate is not None:
+                _set_candidate_result(connection, candidate_id, "duplicate", perceptual_duplicate)
+                details["resolution_method"] = "local_perceptual_duplicate"
+                _finish(
+                    connection,
+                    job_id,
+                    {
+                        "outcome": "duplicate",
+                        "candidate_id": candidate_id,
+                        "media_item_id": perceptual_duplicate,
+                        "resolution_method": "local_perceptual_duplicate",
+                    },
+                    details,
+                )
+                return
+
         if not digest:
             digest = _md5(original_path)
+        _progress(connection, job_id, 45, "Searching supported sources")
         exact_started = time.perf_counter()
         exact, errors = _search_exact(
-            providers, digest, source_hint, details["provider_timings"], details["provider_diagnostics"]
+            providers, digest, source_hint, details["provider_timings"], details["provider_diagnostics"],
+            on_progress=lambda names: _progress(
+                connection, job_id, 50, "Waiting for sources: " + ", ".join(sorted(names))
+            ),
         )
         details["timing"]["phases_ms"]["exact_search"] = _elapsed_ms(exact_started)
         details["exact_candidates_checked"] = len(exact)
@@ -335,6 +398,7 @@ def run_universal_import_job(
             if best_metadata is not None:
                 metadata_source = _match_to_source(best_metadata)
         _set_search_status(details, "matched" if exact else _status_from_errors(errors))
+        _progress(connection, job_id, 70 if exact else 65, "Checking source files")
         download_started = time.perf_counter()
         valid_candidates, download_errors = _download_exact_candidates(
             exact, digest, settings, downloader, details["provider_diagnostics"]
@@ -604,6 +668,7 @@ def _search_exact(
     source_hint: SourceMedia | None,
     provider_timings=None,
     diagnostics=None,
+    on_progress=None,
 ):
     ordered = list(providers)
     if source_hint:
@@ -624,10 +689,63 @@ def _search_exact(
             return position, [], [{"provider": getattr(provider, "provider_name", "unknown"), "code": "import.source_search_failed", "message": _safe_error_message(error, "The source search failed.")}], _elapsed_ms(started), "error"
 
     results = []
-    with ThreadPoolExecutor(max_workers=max(1, len(searchable))) as executor:
-        futures = [executor.submit(lookup, position, provider) for position, (_index, provider) in enumerate(searchable)]
-        for future in as_completed(futures):
-            results.append(future.result())
+    active = []
+    for position, (_index, provider) in enumerate(searchable):
+        name = getattr(provider, "provider_name", "unknown")
+        if _provider_on_cooldown(name):
+            results.append((
+                position,
+                [],
+                [{
+                    "provider": name,
+                    "code": "import.provider_cooldown",
+                    "message": f"{name} did not answer recently and was skipped for a few minutes.",
+                }],
+                0,
+                "skipped",
+            ))
+        else:
+            active.append((position, provider))
+
+    executor = ThreadPoolExecutor(max_workers=max(1, len(active))) if active else None
+    if executor is not None:
+        futures = {
+            executor.submit(lookup, position, provider): (position, provider)
+            for position, provider in active
+        }
+        pending = set(futures)
+        deadline = time.monotonic() + PROVIDER_SEARCH_TIMEOUT_SECONDS
+        while pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            done, pending = wait(pending, timeout=min(remaining, 1.0))
+            for future in done:
+                results.append(future.result())
+            if pending and on_progress is not None:
+                on_progress([
+                    getattr(futures[future][1], "provider_name", "unknown")
+                    for future in pending
+                ])
+        for future in pending:
+            future.cancel()
+            position, provider = futures[future]
+            name = getattr(provider, "provider_name", "unknown")
+            _mark_provider_cooldown(name)
+            results.append((
+                position,
+                [],
+                [{
+                    "provider": name,
+                    "code": "import.provider_timeout",
+                    "message": f"{name} did not answer within {PROVIDER_SEARCH_TIMEOUT_SECONDS:.0f} seconds.",
+                }],
+                int(PROVIDER_SEARCH_TIMEOUT_SECONDS * 1000),
+                "timeout",
+            ))
+        # Abandoned searches keep running in the background; their results are
+        # discarded, so the caller must not wait for their threads either.
+        executor.shutdown(wait=False)
     results.sort(key=lambda item: item[0])
     matches: list[SourceMatch] = []
     errors: list[dict[str, str]] = []
@@ -639,12 +757,21 @@ def _search_exact(
             _record_provider_timing(provider_timings, provider, duration_ms, status)
         if diagnostics is not None:
             provider = searchable[_index][1]
+            name = getattr(provider, "provider_name", "unknown")
+            if status == "ok":
+                _clear_provider_cooldown(name)
             error = provider_errors[0] if provider_errors else None
+            diagnostic_status = (
+                _status_for_error(error["code"])
+                if error else ("matched" if provider_matches else "no_result")
+            )
+            if status in {"timeout", "skipped"}:
+                diagnostic_status = status
             _record_provider_diagnostic(
                 diagnostics,
                 "exact_search",
-                getattr(provider, "provider_name", "unknown"),
-                (_status_for_error(error["code"]) if error else ("matched" if provider_matches else "no_result")),
+                name,
+                diagnostic_status,
                 len(provider_matches),
                 error.get("code") if error else None,
                 error.get("message") if error else None,
@@ -813,7 +940,7 @@ def _status_for_error(code: str | None) -> str:
     value = str(code or "").lower()
     if any(token in value for token in ("auth", "credential", "access_denied", "authorization")):
         return "authorization_error"
-    if any(token in value for token in ("unavailable", "network", "timeout", "connection", "rate_limited", "source_search_failed")):
+    if any(token in value for token in ("unavailable", "network", "timeout", "connection", "rate_limited", "source_search_failed", "cooldown")):
         return "network_error"
     return "unavailable"
 
@@ -1278,8 +1405,27 @@ def _set_candidate_result(connection, candidate_id, status, media_id, stored_pat
     connection.commit()
 
 
-def _running(connection, job_id):
-    connection.execute("UPDATE background_jobs SET status='running', progress=10, started_at=CURRENT_TIMESTAMP WHERE id=?", (job_id,))
+def _running(connection, job_id, message: str = "Starting the import"):
+    connection.execute(
+        "UPDATE background_jobs SET status='running', progress=10, status_message=?, "
+        "started_at=CURRENT_TIMESTAMP WHERE id=?",
+        (message, job_id),
+    )
+    connection.commit()
+
+
+def _progress(connection, job_id, percent: int, message: str | None = None) -> None:
+    """Publish a coarse stage so a long import never looks like a frozen job."""
+    if message is None:
+        connection.execute(
+            "UPDATE background_jobs SET progress=? WHERE id=?",
+            (int(percent), job_id),
+        )
+    else:
+        connection.execute(
+            "UPDATE background_jobs SET progress=?, status_message=? WHERE id=?",
+            (int(percent), message, job_id),
+        )
     connection.commit()
 
 

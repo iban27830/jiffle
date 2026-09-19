@@ -660,6 +660,15 @@ def migration_28(connection: sqlite3.Connection) -> None:
     )
 
 
+def migration_29(connection: sqlite3.Connection) -> None:
+    """Let long-running background jobs publish a short live status message."""
+    columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(background_jobs)")
+    }
+    if "status_message" not in columns:
+        connection.execute("ALTER TABLE background_jobs ADD COLUMN status_message TEXT")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -689,6 +698,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (26, migration_26),
     (27, migration_27),
     (28, migration_28),
+    (29, migration_29),
 )
 
 

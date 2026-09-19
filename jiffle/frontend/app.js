@@ -113,6 +113,7 @@ const diagnosticStageLabels = {
 const diagnosticStatusLabels = {
   matched: 'matched', no_result: 'no result', network_error: 'network error',
   authorization_error: 'authorization required', unavailable: 'unavailable',
+  timeout: 'timed out', skipped: 'skipped',
 };
 function historyDiagnostics(details) {
   const diagnostics = Array.isArray(details.provider_diagnostics) ? details.provider_diagnostics.map(item => ({...item})) : [];
@@ -125,7 +126,10 @@ function historyDiagnostics(details) {
 function historyDiagnosticSummary(details, diagnostics) {
   const status = details.search_status || details.search_state || details.search_outcome || (diagnostics.some(item => item.status === 'authorization_error') ? 'authorization_error' : diagnostics.some(item => item.status === 'network_error') ? 'network_error' : diagnostics.some(item => item.status === 'unavailable') ? 'candidate_download_failed' : 'no_result');
   const tbibDownload = diagnostics.some(item => String(item.provider || '').toLowerCase() === 'tbib' && item.stage === 'exact_download' && item.status === 'unavailable');
-  const tbibNetwork = diagnostics.some(item => String(item.provider || '').toLowerCase() === 'tbib' && item.status === 'network_error');
+  const tbibNetwork = diagnostics.some(item => {
+    if (String(item.provider || '').toLowerCase() !== 'tbib') return false;
+    return ['network_error', 'timeout', 'skipped'].includes(item.status);
+  });
   if (status === 'candidate_download_failed') {
     if (tbibDownload) return 'TBIB returned a post, but the file could not be downloaded';
     const count = Number(details.exact_candidates_checked || 0);
@@ -252,7 +256,7 @@ async function runJob(start, onCreated) {
   onCreated?.(created);
   const job = await waitForJob(created.status_url, value => {
     if (value.type === 'source_set_import') renderSetStatus(value);
-    else jobStatus.textContent = `${value.type}: ${value.progress}%`;
+    else jobStatus.textContent = value.message || `${value.type}: ${value.progress}%`;
   });
   jobStatus.textContent = '';
   return job;

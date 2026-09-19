@@ -287,6 +287,7 @@ def get_job(job_id: int):
         "type": row["job_type"],
         "status": row["status"],
         "progress": row["progress"],
+        "message": row["status_message"],
         "result": json.loads(row["result_json"]) if row["result_json"] else None,
         "error": ({
             "code": row["error_code"],

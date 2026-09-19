@@ -289,6 +289,11 @@ def find_exact_perceptual_duplicate(
     Older library items may not have a cached fingerprint. In that case the
     current file is hashed and the cache is populated opportunistically.
     Missing or unreadable files are ignored so imports remain usable.
+
+    Cached fingerprints are compared without touching the media storage: the
+    library may live on a slow network share, where a stat call per item made
+    every import wait for the whole library.  The file is only opened for the
+    items that actually match, and for rows that still need a fingerprint.
     """
     if inspection is not None and inspection.media_type != "image":
         return None
@@ -314,18 +319,26 @@ def find_exact_perceptual_duplicate(
     pending_fingerprints: list[tuple[int, str]] = []
     for row in rows:
         candidate_hash = row[2]
-        candidate_path = _safe_media_path(root, row[1])
-        if candidate_path is None or not candidate_path.is_file():
-            continue
+        candidate_path: Path | None = None
         if not candidate_hash:
+            candidate_path = _safe_media_path(root, row[1])
+            if candidate_path is None or not candidate_path.is_file():
+                continue
             candidate_hash = _calculate_perceptual_hash(candidate_path)
             if candidate_hash is not None:
                 pending_fingerprints.append((int(row[0]), candidate_hash))
         try:
-            is_match = candidate_hash is not None and wanted - imagehash.hex_to_hash(str(candidate_hash)) == 0
+            is_match = (
+                candidate_hash is not None
+                and wanted - imagehash.hex_to_hash(str(candidate_hash)) == 0
+            )
         except (TypeError, ValueError):
             continue
-        if is_match and _is_readable_image(candidate_path):
+        if not is_match:
+            continue
+        if candidate_path is None:
+            candidate_path = _safe_media_path(root, row[1])
+        if candidate_path is not None and candidate_path.is_file() and _is_readable_image(candidate_path):
             matches.append(int(row[0]))
     if pending_fingerprints:
         connection.executemany(
