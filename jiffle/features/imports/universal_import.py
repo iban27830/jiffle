@@ -36,6 +36,17 @@ from jiffle.infrastructure.media_revisions import create_original_revision
 MIN_SIMILAR_CONFIDENCE = 80.0
 
 
+# Failures that leave nothing useful to validate manually.  For these the job
+# stays failed (the uploaded bytes are still kept on disk by the import worker).
+_RETAIN_EXCLUDED_CODES = {
+    "import.previously_deleted",
+    "import.unsupported_media_type",
+    "import.invalid_media",
+    "import.file_not_found",
+    "import.video_support_unavailable",
+}
+
+
 def create_universal_import_job(
     connection: sqlite3.Connection, submitted_input: str, input_kind: str
 ) -> int:
@@ -320,7 +331,9 @@ def run_universal_import_job(
         details["exact_candidates_checked"] = len(exact)
         details["provider_errors"] = list(details.get("provider_errors", [])) + errors
         if metadata_source is None and exact:
-            metadata_source = _match_to_source(exact[0])
+            best_metadata = _select_metadata_source(exact)
+            if best_metadata is not None:
+                metadata_source = _match_to_source(best_metadata)
         _set_search_status(details, "matched" if exact else _status_from_errors(errors))
         download_started = time.perf_counter()
         valid_candidates, download_errors = _download_exact_candidates(
@@ -469,10 +482,35 @@ def run_universal_import_job(
         _finish(connection, job_id, {"outcome": "review", "candidate_id": candidate_id,
                                      "review_item_id": int(review_cursor.lastrowid)}, details)
     except (ImportFailure, SourceProviderFailure) as error:
-        _failed(connection, job_id, error.code, error.message, details)
+        if _retain_failed_upload(connection, settings, job_id, submitted_input, input_kind, error.code, details):
+            details["resolution_error"] = {
+                "code": error.code,
+                "message": _safe_error_message(error.message, "The source could not be resolved."),
+            }
+            details["resolution_method"] = "source_required"
+            _set_search_status(details, _status_for_error(error.code))
+            _finish(connection, job_id, {
+                "outcome": "review",
+                "candidate_id": _candidate_id(connection, job_id),
+                "review_item_id": details.get("review_item_id"),
+            }, details)
+        else:
+            _failed(connection, job_id, error.code, error.message, details)
     except Exception:
-        _failed(connection, job_id, "import.resolve_failed", "The input could not be resolved.", details)
-        raise
+        if _retain_failed_upload(connection, settings, job_id, submitted_input, input_kind, "import.resolve_failed", details):
+            details["resolution_error"] = {
+                "code": "import.resolve_failed",
+                "message": "The input could not be resolved.",
+            }
+            details["resolution_method"] = "source_required"
+            _finish(connection, job_id, {
+                "outcome": "review",
+                "candidate_id": _candidate_id(connection, job_id),
+                "review_item_id": details.get("review_item_id"),
+            }, details)
+        else:
+            _failed(connection, job_id, "import.resolve_failed", "The input could not be resolved.", details)
+            raise
     finally:
         for path in temporary:
             path.unlink(missing_ok=True)
@@ -482,8 +520,16 @@ def run_universal_import_job(
             ).fetchone()
             upload_path = Path(submitted_input)
             is_staged_upload = upload_path.parent.resolve() == settings.resolved_import_staging_path.resolve() and upload_path.name.startswith("upload-")
-            if row and (row["status"] in {"accepted", "duplicate", "failed"} or is_staged_upload and row["stored_path"] != upload_path.name):
-                Path(submitted_input).unlink(missing_ok=True)
+            stored_path = row["stored_path"] if row is not None else None
+            has_durable_replacement = bool(stored_path) and stored_path != upload_path.name
+            # Keep the uploaded bytes until they are safely stored in the library
+            # (accepted/duplicate) or a durable staged copy exists for review.
+            # Failed imports keep the upload on disk so nothing the user dropped
+            # into Jiffle is ever lost when the source is unavailable.
+            if row and is_staged_upload and (
+                row["status"] in {"accepted", "duplicate"} or has_durable_replacement
+            ):
+                upload_path.unlink(missing_ok=True)
         connection.close()
 
 
@@ -901,6 +947,90 @@ def _unique_similar(matches):
         if key not in unique or unique[key].confidence < match.confidence:
             unique[key] = match
     return sorted(unique.values(), key=lambda item: item.confidence, reverse=True)
+
+
+def _metadata_richness(match: SourceMatch) -> tuple[int, int, int, int]:
+    """Rank an exact match by how much source metadata it carries."""
+    return (
+        len(match.character_tags or ()),
+        len(match.tags or ()),
+        1 if match.author else 0,
+        1 if match.parent_id else 0,
+    )
+
+
+def _select_metadata_source(matches):
+    """Pick the richest metadata among exact matches.
+
+    One file can be found on several providers.  The provider holding the
+    authoritative tags/author is not necessarily the one whose bytes we end up
+    downloading, so choose the richest metadata source and let the download
+    provide the file from wherever it is actually available.
+    """
+    if not matches:
+        return None
+    return max(matches, key=_metadata_richness)
+
+
+def _retain_failed_upload(
+    connection,
+    settings: Settings,
+    job_id: int,
+    submitted_input: str,
+    input_kind: str,
+    code: str,
+    details: dict,
+) -> bool:
+    """Keep an inspected upload in staging and queue it for manual validation.
+
+    A failed source resolution must never lose the file the user dropped into
+    Jiffle.  When the upload itself is valid we turn the failure into a normal
+    ``source_required`` review item so the image can be validated or given a
+    source later.  Returns ``True`` when the job should finish as a review.
+    """
+    if input_kind != "file" or code in _RETAIN_EXCLUDED_CODES:
+        return False
+    row = connection.execute(
+        "SELECT id, media_type, content_hash, width, height, file_size, status "
+        "FROM import_candidates WHERE job_id=?",
+        (job_id,),
+    ).fetchone()
+    if row is None or row["media_type"] is None:
+        return False
+    if row["status"] in {"accepted", "duplicate", "review"}:
+        return False
+    source_path = Path(submitted_input)
+    if not source_path.is_file():
+        return False
+    candidate_id = int(row["id"])
+    relative = None
+    try:
+        connection.rollback()
+        existing = connection.execute(
+            "SELECT id FROM review_items WHERE import_candidate_id=?", (candidate_id,)
+        ).fetchone()
+        if existing is not None:
+            return False
+        relative = atomic_copy(source_path, settings.resolved_import_staging_path, "candidate")
+        connection.execute(
+            "UPDATE import_candidates SET status='review', stored_path=?, media_type=?, "
+            "content_hash=?, width=?, height=?, file_size=? WHERE id=?",
+            (relative, row["media_type"], row["content_hash"], row["width"],
+             row["height"], row["file_size"], candidate_id),
+        )
+        cursor = connection.execute(
+            "INSERT INTO review_items (import_candidate_id, reason) VALUES (?, 'source_required')",
+            (candidate_id,),
+        )
+        connection.commit()
+    except Exception:
+        if relative:
+            (settings.resolved_import_staging_path / relative).unlink(missing_ok=True)
+        connection.rollback()
+        return False
+    details["retained_for_review"] = True
+    details["review_item_id"] = int(cursor.lastrowid)
+    return True
 
 
 def _match_to_source(match: SourceMatch) -> SourceMedia:

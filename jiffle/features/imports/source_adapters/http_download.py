@@ -6,6 +6,11 @@ import time
 import requests
 
 
+# Never honour a server-provided Retry-After longer than this.  Without a cap
+# a rate-limited or overloaded CDN can park an import worker for hours.
+MAX_RETRY_AFTER_SECONDS = 30.0
+
+
 class MediaDownloadError(requests.RequestException):
     """A download failure with a stable code suitable for import diagnostics."""
 
@@ -16,11 +21,18 @@ class MediaDownloadError(requests.RequestException):
 
 
 class RequestsMediaDownloader:
-    """Stream original media with bounded retries for transient CDN failures."""
+    """Stream original media with bounded retries for transient CDN failures.
+
+    ``read_timeout`` is the maximum time the download may make *no* progress at
+    all.  Slow links keep delivering bytes and therefore stay alive, while a
+    dead or black-holed source fails within one timeout instead of hanging the
+    import forever.
+    """
 
     connect_timeout = 15
-    read_timeout = 120
+    read_timeout = 45
     max_attempts = 3
+    chunk_size = 64 * 1024
     transient_statuses = {408, 429, 500, 502, 503, 504}
 
     def download(self, url: str, destination: Path, referer: str | None = None) -> None:
@@ -63,7 +75,7 @@ class RequestsMediaDownloader:
                 if "text/html" in content_type.lower():
                     raise ValueError("Source returned HTML instead of media")
                 with destination.open("wb") as file:
-                    for chunk in response.iter_content(1024 * 1024):
+                    for chunk in response.iter_content(self.chunk_size):
                         if chunk:
                             file.write(chunk)
                 return
@@ -114,4 +126,4 @@ def _sleep_backoff(response, attempt: int) -> None:
                 delay = 0.0
     if delay <= 0:
         delay = min(5.0, 0.5 * (2 ** attempt))
-    time.sleep(delay)
+    time.sleep(min(delay, MAX_RETRY_AFTER_SECONDS))

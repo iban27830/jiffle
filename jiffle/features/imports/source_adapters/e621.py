@@ -11,6 +11,11 @@ from jiffle.features.imports.source_adapters.contracts import SetPostIssue, Sour
 from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
 
 
+# Cap server-provided Retry-After values so a rate-limited response cannot park
+# an import worker for minutes or hours.
+MAX_RETRY_AFTER_SECONDS = 30.0
+
+
 class E621SourceProvider:
     provider_name = "e621"
     domains = {"e621.net", "e926.net"}
@@ -331,7 +336,7 @@ def _sleep_backoff(response, attempt: int) -> None:
                 delay = 0.0
     if delay <= 0:
         delay = min(5.0, 0.5 * (2 ** attempt))
-    time.sleep(delay)
+    time.sleep(min(delay, MAX_RETRY_AFTER_SECONDS))
 
 
 def parse_set_url(url: str) -> tuple[str, str] | None:

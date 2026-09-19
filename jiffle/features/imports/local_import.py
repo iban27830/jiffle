@@ -80,10 +80,13 @@ def run_local_import_job(
                 "SELECT status, stored_path FROM import_candidates WHERE job_id = ?",
                 (job_id,),
             ).fetchone()
-            is_upload = command.source_path.name.startswith("upload-")
+            stored_path = row["stored_path"] if row is not None else None
+            has_durable_replacement = bool(stored_path) and stored_path != command.source_path.name
+            # Keep the uploaded bytes on failed imports: only drop the staging
+            # copy once the media is stored (accepted/duplicate) or a durable
+            # staged replacement exists for review.
             if row and (
-                row["status"] in {"accepted", "duplicate", "failed"}
-                or is_upload and row["stored_path"] != command.source_path.name
+                row["status"] in {"accepted", "duplicate"} or has_durable_replacement
             ):
                 command.source_path.unlink(missing_ok=True)
         connection.close()
