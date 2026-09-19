@@ -252,9 +252,11 @@ To look for a source again after you add or reconfigure providers, tick the chec
 on the cards you want to retry and select **Recheck selected** at the top. **Select all
 on screen** ticks every card on the current page. Rechecking runs the normal import
 resolution again, so a file that only had a metadata match can now combine tags from
-one provider with the file bytes from another. Review shows 60 items per page by
-default; use **Per page** to change the count, and **Previous** / **Next** to move
-between pages.
+one provider with the file bytes from another. When no byte-identical copy exists, the
+recheck also runs the image reverse search and adds every match of 80% similarity or
+more to the card, so a re-encoded copy can be confirmed without dropping the file
+again. Review shows 60 items per page by default; use **Per page** to change the
+count, and **Previous** / **Next** to move between pages.
 
 Metadata refreshes for existing source-backed items also appear in **Review** as **Metadata update** entries. They are suggestions until you apply them, so a refresh cannot silently replace your current tags or parent relationship.
 
