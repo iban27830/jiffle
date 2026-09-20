@@ -6,6 +6,7 @@ from flask import Blueprint, current_app, jsonify, request
 import requests
 
 from jiffle.configuration.settings import Settings, persist_settings
+from jiffle.configuration.credentials import absorb_pasted_credentials
 from jiffle.features.background_editor.runtime import (
     clear_runtime_cache,
     preferred_device_name,
@@ -232,6 +233,9 @@ def clear_thumbnail_cache():
 
 def _validated_update(settings, payload):
     values = dict(payload)
+    # Account pages hand out one credential line (``&api_key=...&user_id=...``).
+    # Split it into the individual fields so a pasted line just works.
+    absorb_pasted_credentials(values)
     for field in ("media_path", "thumbnail_path", "import_staging_path", "export_path"):
         if field not in values:
             continue

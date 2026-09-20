@@ -111,7 +111,9 @@ Supported online sources include:
 Some sources require account credentials configured under **Settings → Sources**.
 Rule34.xxx requires the User ID and API key shown on its account options page;
 FurAffinity requires cookies from an active browser session. Use **Test** beside a
-source to confirm that the saved credentials work. A source without credentials is
+source to confirm that the saved credentials work. You can paste the whole
+`&api_key=...&user_id=...` line from the account page into either credential field:
+Jiffle splits it into the User ID and API key automatically. A source without credentials is
 shown as **not configured** in the import diagnostics and is skipped for that
 import instead of blocking it. A direct image URL is also accepted; Jiffle downloads
 it, calculates its hash, and checks it for duplicates before placing it in the
