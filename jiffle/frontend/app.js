@@ -154,7 +154,12 @@ function historyDiagnosticsHtml(details, item) {
   const diagnostics = historyDiagnostics(details);
   if (!diagnostics.length && !details.search_status && !details.search_state && !details.search_outcome) return '';
   const summary = historyDiagnosticSummary(details, diagnostics);
-  const rows = diagnostics.length ? diagnostics.map(item => {
+  return `<details class="history-diagnostics"><summary>${esc(summary)}</summary><ul>${diagnosticRowsHtml(diagnostics)}</ul></details>`;
+}
+
+function diagnosticRowsHtml(diagnostics) {
+  if (!diagnostics.length) return '<li>No provider diagnostics were recorded.</li>';
+  return diagnostics.map(item => {
     const stage = diagnosticStageLabels[item.stage] || item.stage || 'provider';
     const status = diagnosticStatusLabels[item.status] || item.status || 'unknown';
     const count = item.candidate_count != null ? ` · ${Number(item.candidate_count)} result${Number(item.candidate_count) === 1 ? '' : 's'}` : '';
@@ -162,8 +167,7 @@ function historyDiagnosticsHtml(details, item) {
     const technical = item.code ? ` <code>${esc(item.code)}</code>` : '';
     const message = item.message ? `: ${esc(item.message)}` : '';
     return `<li><strong>${esc(item.provider || 'unknown')}</strong> · ${esc(stage)} · ${esc(status)}${count}${remote}${technical}${message}</li>`;
-  }).join('') : '<li>No provider diagnostics were recorded.</li>';
-  return `<details class="history-diagnostics"><summary>${esc(summary)}</summary><ul>${rows}</ul></details>`;
+  }).join('');
 }
 
 function toast(message, error = false) {
@@ -557,6 +561,21 @@ function reviewReasonLabel(reason) {
   return reviewReasonLabels[reason] || String(reason || 'Review').replaceAll('_', ' ').replace(/^./, character => character.toUpperCase());
 }
 
+const reviewSearchLabels = {
+  no_source: 'Checked · no source', candidates: 'Checked · candidates',
+  unavailable: 'Checked · error',
+};
+function reviewSearchLabel(search) {
+  const label = reviewSearchLabels[search.last_outcome] || 'Checked';
+  return Number(search.count) > 1 ? `${label} ×${Number(search.count)}` : label;
+}
+function reviewSearchTitle(search) {
+  const parts = [reviewSearchLabel(search)];
+  if (search.last_message) parts.push(search.last_message);
+  if (search.last_at) parts.push(formatDateTime(search.last_at));
+  return parts.join(' · ');
+}
+
 function reviewCardHtml(item) {
   const reason = `<span class="review-card-reason">${esc(reviewReasonLabel(item.reason))}</span>`;
   if (item.kind === 'metadata') {
@@ -565,13 +584,21 @@ function reviewCardHtml(item) {
   const selected = reviewSelection.has(item.id) ? ' checked' : '';
   const candidateCount = (item.source_candidates || []).length;
   const found = candidateCount > 0;
+  const search = item.search || {};
+  const searched = Number(search.count || 0) > 0;
   const candidates = found ? `<span class="review-card-candidates">${candidateCount} source${candidateCount === 1 ? '' : 's'} found</span>` : '';
-  // A card whose recheck already produced source candidates is highlighted and its
-  // repeat-search button is locked: the user confirms it from the opened preview.
-  const recheck = found
-    ? `<button type="button" class="icon-btn" data-review-reimport="${item.id}" disabled title="A source was already found - open the image to confirm it"><i data-lucide="refresh-cw"></i></button>`
+  // A rechecked card stays marked even after reopening the page and its
+  // repeat-search button is locked: the user can see that a search already ran.
+  const searchedBadge = searched ? `<span class="review-card-searched" title="${esc(reviewSearchTitle(search))}"><i data-lucide="search-check"></i>${esc(reviewSearchLabel(search))}</span>` : '';
+  const lockTitle = found
+    ? 'A source was already found - open the image to confirm it'
+    : 'Already checked - tick the card and use Recheck selected to search again';
+  const recheck = found || searched
+    ? `<button type="button" class="icon-btn" data-review-reimport="${item.id}" disabled title="${esc(lockTitle)}"><i data-lucide="refresh-cw"></i></button>`
     : `<button type="button" class="icon-btn" data-review-reimport="${item.id}" title="Run import again"><i data-lucide="refresh-cw"></i></button>`;
-  return `<article class="media-card review-card${found ? ' review-card-source-found' : ''}" data-review-kind="candidate" data-review-id="${item.id}"><div class="review-card-preview" data-open-review="${item.id}" title="Open full size"><img loading="lazy" src="${esc(item.thumbnail_url)}" alt="">${reason}${candidates}<label class="review-card-select" title="Select for recheck"><input type="checkbox" data-review-select="${item.id}"${selected}></label></div><div class="review-card-actions"><button type="button" class="icon-btn" data-open-review="${item.id}" title="Open full size to choose a source"><i data-lucide="maximize-2"></i></button>${recheck}<button type="button" class="icon-btn danger" data-review-reject="${item.id}" title="Reject"><i data-lucide="trash-2"></i></button></div></article>`;
+  const log = searched ? `<button type="button" class="icon-btn" data-review-log="${item.id}" title="View the search results for this card"><i data-lucide="scroll-text"></i></button>` : '';
+  const cardClass = ['media-card', 'review-card', found ? 'review-card-source-found' : '', searched ? 'review-card-already-searched' : ''].filter(Boolean).join(' ');
+  return `<article class="${cardClass}" data-review-kind="candidate" data-review-id="${item.id}"><div class="review-card-preview" data-open-review="${item.id}" title="Open full size"><img loading="lazy" src="${esc(item.thumbnail_url)}" alt="">${reason}${candidates}${searchedBadge}<label class="review-card-select" title="Select for recheck"><input type="checkbox" data-review-select="${item.id}"${selected}></label></div><div class="review-card-actions"><button type="button" class="icon-btn" data-open-review="${item.id}" title="Open full size to choose a source"><i data-lucide="maximize-2"></i></button>${recheck}${log}<button type="button" class="icon-btn danger" data-review-reject="${item.id}" title="Reject"><i data-lucide="trash-2"></i></button></div></article>`;
 }
 
 function lightboxCandidateMedia(candidate) {
@@ -675,6 +702,45 @@ function openMediaLightbox({contentUrl, type = 'image', title = '', candidates =
   icons();
 }
 
+function reviewAttemptHtml(attempt) {
+  const details = attempt.details || {};
+  const diagnostics = historyDiagnostics(details);
+  const outcomes = {no_source: 'No source found', candidates: 'Source candidates found', unavailable: 'Search unavailable'};
+  const outcome = outcomes[attempt.outcome] || String(attempt.outcome || 'Search').replaceAll('_', ' ');
+  const candidateCount = Number(details.candidate_count || 0);
+  const facts = [];
+  if (candidateCount) facts.push(`${candidateCount} candidate${candidateCount === 1 ? '' : 's'} downloaded`);
+  if (details.provider) facts.push(`Provider: ${details.provider}`);
+  if (details.source_url) facts.push(details.source_url);
+  const message = attempt.message ? `<p>${esc(attempt.message)}</p>` : '';
+  const diagnosticsBlock = diagnostics.length
+    ? `<details class="history-diagnostics"><summary>Provider details (${diagnostics.length})</summary><ul>${diagnosticRowsHtml(diagnostics)}</ul></details>`
+    : '';
+  return `<article class="review-log-entry"><header><strong>${esc(outcome)}</strong><time>${esc(formatDateTime(attempt.created_at))}</time></header>${facts.length ? `<small>${esc(facts.join(' · '))}</small>` : ''}${message}${diagnosticsBlock}</article>`;
+}
+
+function openReviewSearchLog(reviewId, title = 'Search results') {
+  document.querySelector('.review-log-lightbox')?.remove();
+  const node = document.createElement('div');
+  node.className = 'media-lightbox review-log-lightbox';
+  node.innerHTML = `<div class="media-lightbox-backdrop" data-close></div><figure class="media-lightbox-window review-log-window"><div class="media-lightbox-head"><strong>${esc(title)}</strong><button type="button" class="icon-btn" data-close title="Close"><i data-lucide="x"></i></button></div><div class="review-log-body"><div class="empty">Loading...</div></div></figure>`;
+  document.body.appendChild(node);
+  const close = () => { node.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = event => { if (event.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  node.querySelectorAll('[data-close]').forEach(element => element.onclick = close);
+  icons();
+  api(`/api/v1/review-items/${reviewId}/search-log`).then(data => {
+    const items = data.items || [];
+    node.querySelector('.review-log-body').innerHTML = items.length
+      ? items.map(reviewAttemptHtml).join('')
+      : '<div class="empty">No searches were recorded for this card.</div>';
+    icons();
+  }).catch(error => {
+    node.querySelector('.review-log-body').innerHTML = `<div class="empty">${esc(error.message)}</div>`;
+  });
+}
+
 async function showReview() {
   const prefs = reviewPrefs();
   const filter = prefs.filter;
@@ -724,6 +790,7 @@ async function showReview() {
   document.querySelector('#reviewRecheck').onclick = () => recheckReviewItems([...reviewSelection]);
   document.querySelectorAll('[data-review-reject]').forEach(node => node.onclick = () => reviewAction(Number(node.dataset.reviewReject), 'reject'));
   document.querySelectorAll('[data-review-reimport]').forEach(node => node.onclick = () => recheckReviewItems([Number(node.dataset.reviewReimport)]));
+  document.querySelectorAll('[data-review-log]').forEach(node => node.onclick = () => openReviewSearchLog(Number(node.dataset.reviewLog), `Search results · review #${node.dataset.reviewLog}`));
   document.querySelectorAll('[data-accept-metadata]').forEach(node => node.onclick = async () => { try { await api(`/api/v1/metadata-suggestions/${node.dataset.acceptMetadata}/accept`,{method:'POST'}); toast('Metadata applied'); showReview(); } catch(error) { toast(error.message,true); } });
   document.querySelectorAll('[data-reject-metadata]').forEach(node => node.onclick = async () => { try { await api(`/api/v1/metadata-suggestions/${node.dataset.rejectMetadata}/reject`,{method:'POST'}); toast('Metadata ignored'); showReview(); } catch(error) { toast(error.message,true); } });
   document.querySelectorAll('[data-open-review]').forEach(node => node.onclick = event => {
@@ -746,7 +813,7 @@ function setRecheckBusy(ids, busy) {
     const button = document.querySelector(`[data-review-reimport="${id}"]`);
     const card = button?.closest('.review-card');
     card?.classList.toggle('review-card-searching', busy);
-    if (button) button.disabled = busy || card?.classList.contains('review-card-source-found');
+    if (button) button.disabled = busy || card?.classList.contains('review-card-source-found') || card?.classList.contains('review-card-already-searched');
   });
   const bulk = document.querySelector('#reviewRecheck');
   if (bulk && busy) { bulk.disabled = true; bulk.innerHTML = '<i data-lucide="refresh-cw" class="spin"></i>Rechecking...'; }

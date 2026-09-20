@@ -197,8 +197,19 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
 .review-filters .btn { height: 31px; padding: 0 10px; font-size: .84em; }
 .review-card-source-found { outline: 2px solid var(--good); outline-offset: -2px; }
 .review-card-candidates { display: inline-flex; align-items: center; gap: 4px; }
+.review-card-already-searched { outline: 1px dashed var(--warn); outline-offset: -2px; }
+.review-card-searched { position: absolute; left: 7px; top: 7px; display: inline-flex; align-items: center; gap: 4px; max-width: calc(100% - 46px); padding: 3px 7px; overflow: hidden; border-radius: 4px; color: #6a4300; background: rgba(255,243,214,.96); font-size: .72em; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.review-card-searched [data-lucide] { width: 12px; height: 12px; }
+.review-card-candidates ~ .review-card-searched { top: 34px; }
 .review-card-searching { outline: 2px solid var(--accent); animation: review-search-pulse 1s ease-in-out infinite; }
 @keyframes review-search-pulse { 50% { outline-color: rgba(0,108,91,.25); } }
+.review-log-window { width: min(760px,100%); }
+.review-log-body { display: grid; gap: 10px; max-height: calc(100vh - 160px); padding: 12px 13px; overflow: auto; background: var(--surface-2); }
+.review-log-entry { padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+.review-log-entry header { display: flex; align-items: baseline; gap: 8px; }
+.review-log-entry header time { margin-left: auto; color: var(--muted); font-size: .78em; white-space: nowrap; }
+.review-log-entry small { display: block; margin-top: 3px; color: var(--muted); word-break: break-word; }
+.review-log-entry p { margin: 6px 0 0; font-size: .88em; }
 .media-lightbox-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 10px 13px; border-top: 1px solid var(--line); background: var(--surface); }
 .media-lightbox { position: fixed; z-index: 30; inset: 0; display: grid; place-items: center; padding: 18px; }
 .media-lightbox-backdrop { position: absolute; inset: 0; background: rgba(12,18,22,.78); }

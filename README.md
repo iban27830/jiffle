@@ -262,8 +262,12 @@ green and its **Run import again** button is locked, because the next step is to
 the preview and confirm one of the candidates. To look for a source again after you
 add or reconfigure providers, tick the checkbox on the cards you want to retry and
 select **Recheck selected** at the top; a running card is outlined while its search is
-in progress and its button stays disabled. **Select all on screen** ticks every card
-on the current page. Rechecking runs the normal import resolution again, so a file
+in progress and its button stays disabled. Once a card has been rechecked it keeps a
+**Checked** marker even after the page is reopened, and its **Run import again**
+button stays locked. Select the log button on the card to open the full search
+results for that card, including the outcome, provider details, and why a source was
+not found; the log is removed when the card is confirmed or rejected. **Select all
+on screen** ticks every card on the current page. Rechecking runs the normal import resolution again, so a file
 that only had a metadata match can now combine tags from one provider with the file
 bytes from another. When no byte-identical copy exists, the recheck also runs the
 image reverse search and adds every match of 80% similarity or more to the card, so a
@@ -282,6 +286,8 @@ Set access uses the `e621_login` and `e621_api_key` values saved under **Setting
 ### Configure sources
 
 Open **Settings** to configure source accounts, library display options, storage folders, and tag rules. Under **Sources**, add a Danbooru login and API key, an e621/e926 username and API key, a Gelbooru or Rule34.xxx User ID and API key, or FurAffinity session cookies, then use **Test** to check the connection.
+
+For Gelbooru and Rule34.xxx you can paste the account line exactly as the site shows it (`&api_key=...&user_id=...`) into either the User ID or the API key field and select **Save settings**; Jiffle fills both fields from it.
 
 ### Background replacement
 

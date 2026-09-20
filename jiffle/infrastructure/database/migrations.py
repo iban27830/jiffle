@@ -669,6 +669,29 @@ def migration_29(connection: sqlite3.Connection) -> None:
         connection.execute("ALTER TABLE background_jobs ADD COLUMN status_message TEXT")
 
 
+def migration_30(connection: sqlite3.Connection) -> None:
+    """Store the per-card source recheck log shown in Review.
+
+    Each recheck of a pending review item appends one row; the card reads it
+    back to mark itself as already searched and to show what happened.  Rows
+    are removed when the user confirms or rejects the card, so the table only
+    ever holds unresolved items.
+    """
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS review_search_attempts ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "review_item_id INTEGER NOT NULL REFERENCES review_items(id) ON DELETE CASCADE, "
+        "outcome TEXT NOT NULL, "
+        "code TEXT, message TEXT, "
+        "details_json TEXT NOT NULL DEFAULT '{}', "
+        "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS review_search_attempts_review_idx "
+        "ON review_search_attempts(review_item_id, created_at)"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -699,6 +722,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (27, migration_27),
     (28, migration_28),
     (29, migration_29),
+    (30, migration_30),
 )
 
 

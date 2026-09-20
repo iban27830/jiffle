@@ -78,11 +78,16 @@ def list_review_items():
         (limit, offset),
     ).fetchall()
     items = []
+    candidate_ids = [
+        int(entry["item_id"]) for entry in page if entry["kind"] == "candidate"
+    ]
+    search_summaries = _review_search_summaries(candidate_ids)
     for entry in page:
         if entry["kind"] == "candidate":
-            row = _review_row(entry["item_id"])
+            review_id = int(entry["item_id"])
+            row = _review_row(review_id)
             if row is not None:
-                items.append(_serialize(row))
+                items.append(_serialize(row, search_summaries.get(review_id)))
         else:
             row = _metadata_row(entry["item_id"])
             if row is not None:
@@ -118,9 +123,17 @@ def get_review_item(review_id: int):
     row = _review_row(review_id)
     if row is None:
         return _error("review.not_found", "Review item was not found.", 404)
-    payload = _serialize(row)
+    payload = _serialize(row, _review_search_summaries([review_id]).get(review_id))
     payload["source_candidates"] = _source_candidates(review_id)
     return jsonify(payload)
+
+
+@review_blueprint.get("/api/v1/review-items/<int:review_id>/search-log")
+def get_review_search_log(review_id: int):
+    """Return every source search recorded for one review card."""
+    if _review_row(review_id) is None:
+        return _error("review.not_found", "Review item was not found.", 404)
+    return jsonify({"items": _review_search_attempts(review_id)})
 
 
 @review_blueprint.get("/api/v1/review-items/<int:review_id>/content")
@@ -395,6 +408,54 @@ def _source_candidates(review_id):
     return items
 
 
+def _review_search_summaries(review_ids):
+    """Return ``{review_id: summary}`` for the cards that were already searched."""
+    unique_ids = [int(value) for value in dict.fromkeys(review_ids)]
+    if not unique_ids:
+        return {}
+    placeholders = ",".join("?" for _ in unique_ids)
+    rows = get_database().execute(
+        "SELECT review_item_id, outcome, code, message, created_at "
+        f"FROM review_search_attempts WHERE review_item_id IN ({placeholders}) "
+        "ORDER BY id",
+        unique_ids,
+    ).fetchall()
+    summaries = {}
+    for row in rows:
+        review_id = int(row["review_item_id"])
+        summary = summaries.setdefault(review_id, {"count": 0})
+        summary["count"] += 1
+        # Rows are ordered by id, so the last write is the latest attempt.
+        summary.update({
+            "last_outcome": row["outcome"],
+            "last_code": row["code"],
+            "last_message": row["message"],
+            "last_at": row["created_at"],
+        })
+    return summaries
+
+
+def _review_search_attempts(review_id):
+    rows = get_database().execute(
+        "SELECT id, outcome, code, message, details_json, created_at "
+        "FROM review_search_attempts WHERE review_item_id=? ORDER BY id",
+        (review_id,),
+    ).fetchall()
+    import json
+    items = []
+    for row in rows:
+        try:
+            details = json.loads(row["details_json"] or "{}")
+        except (TypeError, ValueError):
+            details = {}
+        items.append({
+            "id": row["id"], "outcome": row["outcome"], "code": row["code"],
+            "message": row["message"], "details": details,
+            "created_at": row["created_at"],
+        })
+    return items
+
+
 def _source_candidate_file(review_id, candidate_id):
     """Resolve a stored candidate row and its staged file, if it is safe to serve."""
     row = get_database().execute(
@@ -420,7 +481,7 @@ def _review_path(row) -> Path | None:
     return candidate if candidate.is_relative_to(root) else None
 
 
-def _serialize(row):
+def _serialize(row, search=None):
     review_id = row["id"]
     return {
         "id": review_id, "kind": "candidate",
@@ -431,6 +492,7 @@ def _serialize(row):
         "content_url": f"/api/v1/review-items/{review_id}/content",
         "thumbnail_url": f"/api/v1/review-items/{review_id}/thumbnail",
         "source_candidates": _source_candidates(review_id),
+        "search": search or {"count": 0},
     }
 
 

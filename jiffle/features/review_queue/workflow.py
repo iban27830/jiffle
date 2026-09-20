@@ -220,6 +220,7 @@ def accept_source_candidate(
         "source_url": source.canonical_url if source else None,
         "file_source_url": file_source.canonical_url if file_source else None,
     })
+    _delete_review_search_attempts(connection, review_id)
     connection.commit()
     _remove_review_staging(connection, settings, review_id, keep=None, primary_path=row["input_path"])
     return media_item_id
@@ -243,6 +244,7 @@ def reject_review_item(
             (review_id,),
         )
         _history(connection, "review.rejected", review_id, {})
+        _delete_review_search_attempts(connection, review_id)
         connection.commit()
     except Exception:
         connection.rollback()
@@ -298,11 +300,18 @@ def run_manual_source_job(
         connection.commit()
     except (ReviewFailure, SourceProviderFailure) as error:
         _fail_job(connection, job_id, error.code, error.message)
+        _record_review_search_attempt(connection, review_id, {
+            "status": "unavailable", "code": error.code, "message": error.message,
+        })
     except Exception:
         _fail_job(
             connection, job_id, "review.source_resolution_failed",
             "The source could not be applied to this review item.",
         )
+        _record_review_search_attempt(connection, review_id, {
+            "status": "unavailable", "code": "review.source_resolution_failed",
+            "message": "The source could not be applied to this review item.",
+        })
         raise
     finally:
         connection.close()
@@ -389,6 +398,7 @@ def run_review_reimport_job(
                     "message": "The source could not be rechecked.",
                 }
             results.append(result)
+            _record_review_search_attempt(connection, int(review_id), result)
             connection.execute(
                 "UPDATE background_jobs SET progress=?, result_json=? WHERE id=?",
                 (
@@ -671,6 +681,7 @@ def _complete_review(connection, review_id, candidate_id, media_item_id, source,
         "source_url": source.canonical_url if source else None,
         "file_source_url": file_source.canonical_url if file_source else None,
     })
+    _delete_review_search_attempts(connection, review_id)
     connection.commit()
 
 
@@ -740,6 +751,47 @@ def _history(connection, event_type, review_id, details):
         "INSERT INTO operation_history "
         "(event_type, entity_type, entity_id, details_json) VALUES (?, 'review_item', ?, ?)",
         (event_type, review_id, json.dumps(details)),
+    )
+
+
+def _record_review_search_attempt(connection, review_id, result) -> None:
+    """Log one source search for a still-pending review card.
+
+    The card uses these rows to mark itself as already searched and to show the
+    user what happened.  Resolved items keep no log, so the accepted or rejected
+    card does not leave rows behind.
+    """
+    status = str(result.get("status") or "unavailable")
+    if status == "accepted":
+        return
+    pending = connection.execute(
+        "SELECT 1 FROM review_items WHERE id=? AND status='pending'", (review_id,)
+    ).fetchone()
+    if pending is None:
+        return
+    details = {
+        key: result[key]
+        for key in (
+            "candidate_count", "provider", "file_provider", "source_url",
+            "metadata_only", "provider_errors", "provider_diagnostics",
+        )
+        if result.get(key) is not None
+    }
+    connection.execute(
+        "INSERT INTO review_search_attempts "
+        "(review_item_id, outcome, code, message, details_json) VALUES (?, ?, ?, ?, ?)",
+        (
+            review_id, status, result.get("code"), result.get("message"),
+            json.dumps(details),
+        ),
+    )
+    connection.commit()
+
+
+def _delete_review_search_attempts(connection, review_id) -> None:
+    """Discard a card's search log once the card is resolved."""
+    connection.execute(
+        "DELETE FROM review_search_attempts WHERE review_item_id=?", (review_id,)
     )
 
 
