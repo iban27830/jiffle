@@ -240,14 +240,18 @@ Review shows its waiting items as a card grid like **Library**. Each card keeps 
 the preview and a row of actions: **Open full size**, **Run import again**, and
 **Reject**. A card never confirms a file by itself: **Open full size** opens the
 original in a full-screen viewer, and confirming is done there. When several source
-pages matched at 80% or more, that viewer lists the source candidates with provider,
-remote ID, confidence, dimensions, and a preview. Select **Use this source** to keep
-one candidate and its metadata; the other staged files are removed. The viewer also
-offers **Add source URL** as a manual fallback when no usable source was found, and
-**Accept without choosing a source** to keep the staged file when you do not want any
-of the listed candidates (a confirmation appears when candidates exist). **Reject**
-removes the whole group. The history entry records the submitted input, resolution
-method, providers checked, and the URL that supplied the accepted file.
+pages matched at 80% or more, that viewer opens as a side-by-side comparison: your
+staged file on the left and the matched candidate on the right. Use the left and
+right arrows (or the keyboard arrow keys) to switch between candidates; each one
+shows its provider and remote ID, author, match method, confidence, and dimensions,
+along with an **Open source** link to the page it was taken from so you can check it
+in the original gallery. Select **Use this source** to keep the candidate that is
+currently shown together with its metadata; the other staged files are removed. The
+viewer also offers **Add source URL** as a manual fallback when no usable source was
+found, and **Accept without choosing a source** to keep the staged file when you do
+not want any of the listed candidates (a confirmation appears when candidates exist).
+**Reject** removes the whole group. The history entry records the submitted input,
+resolution method, providers checked, and the URL that supplied the accepted file.
 
 Use the category buttons at the top of Review to narrow the list: **All**, **Source
 found** for cards where a recheck already produced source candidates, and **Needs
