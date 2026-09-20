@@ -183,17 +183,12 @@ def reject_review(review_id: int):
 
 @review_blueprint.get("/api/v1/review-items/<int:review_id>/source-candidates/<int:candidate_id>/thumbnail")
 def get_source_candidate_thumbnail(review_id: int, candidate_id: int):
-    row = get_database().execute(
-        "SELECT stored_path, media_type, content_hash, width, height, file_size FROM import_source_candidates "
-        "WHERE id=? AND review_item_id=?", (candidate_id, review_id)
-    ).fetchone()
+    row, path = _source_candidate_file(review_id, candidate_id)
     if row is None:
         return _error("review.candidate_not_found", "The source candidate was not found.", 404)
-    settings: Settings = current_app.config["JIFFLE_SETTINGS"]
-    root = settings.resolved_import_staging_path.resolve()
-    path = (root / (row["stored_path"] or "")).resolve()
-    if not path.is_relative_to(root) or not path.is_file():
+    if path is None:
         return _error("review.file_missing", "The source candidate is unavailable.", 404)
+    settings: Settings = current_app.config["JIFFLE_SETTINGS"]
     item = MediaItem(
         id=-candidate_id, file_path=row["stored_path"], media_type=MediaType(row["media_type"]),
         source_url=None, file_source_url=None, author=None, domain=None, width=row["width"], height=row["height"],
@@ -205,6 +200,17 @@ def get_source_candidate_thumbnail(review_id: int, candidate_id: int):
     except (OSError, ValueError, RuntimeError):
         return _error("review.thumbnail_unavailable", "Thumbnail is unavailable.", 422)
     return send_file(thumbnail, mimetype="image/jpeg", conditional=True)
+
+
+@review_blueprint.get("/api/v1/review-items/<int:review_id>/source-candidates/<int:candidate_id>/content")
+def get_source_candidate_content(review_id: int, candidate_id: int):
+    # The comparison view shows the candidate at full size, next to the staged file.
+    row, path = _source_candidate_file(review_id, candidate_id)
+    if row is None:
+        return _error("review.candidate_not_found", "The source candidate was not found.", 404)
+    if path is None:
+        return _error("review.file_missing", "The source candidate is unavailable.", 404)
+    return send_file(path, conditional=True)
 
 
 @review_blueprint.post("/api/v1/review-items/<int:review_id>/source-candidates/<int:candidate_id>/accept")
@@ -381,10 +387,28 @@ def _source_candidates(review_id):
             "id": row["id"], "rank": row["rank"], "match_method": row["match_method"],
             "confidence": row["confidence"], "provider": row["provider"],
             "status": row["status"], "source_metadata": metadata,
+            "media_type": row["media_type"],
             "width": row["width"], "height": row["height"], "file_size": row["file_size"],
             "thumbnail_url": f"/api/v1/review-items/{review_id}/source-candidates/{row['id']}/thumbnail",
+            "content_url": f"/api/v1/review-items/{review_id}/source-candidates/{row['id']}/content",
         })
     return items
+
+
+def _source_candidate_file(review_id, candidate_id):
+    """Resolve a stored candidate row and its staged file, if it is safe to serve."""
+    row = get_database().execute(
+        "SELECT stored_path, media_type, content_hash, width, height, file_size FROM import_source_candidates "
+        "WHERE id=? AND review_item_id=?", (candidate_id, review_id)
+    ).fetchone()
+    if row is None:
+        return None, None
+    settings: Settings = current_app.config["JIFFLE_SETTINGS"]
+    root = settings.resolved_import_staging_path.resolve()
+    path = (root / (row["stored_path"] or "")).resolve()
+    if not path.is_relative_to(root) or not path.is_file():
+        return row, None
+    return row, path
 
 
 def _review_path(row) -> Path | None:

@@ -574,43 +574,94 @@ function reviewCardHtml(item) {
   return `<article class="media-card review-card${found ? ' review-card-source-found' : ''}" data-review-kind="candidate" data-review-id="${item.id}"><div class="review-card-preview" data-open-review="${item.id}" title="Open full size"><img loading="lazy" src="${esc(item.thumbnail_url)}" alt="">${reason}${candidates}<label class="review-card-select" title="Select for recheck"><input type="checkbox" data-review-select="${item.id}"${selected}></label></div><div class="review-card-actions"><button type="button" class="icon-btn" data-open-review="${item.id}" title="Open full size to choose a source"><i data-lucide="maximize-2"></i></button>${recheck}<button type="button" class="icon-btn danger" data-review-reject="${item.id}" title="Reject"><i data-lucide="trash-2"></i></button></div></article>`;
 }
 
+function lightboxCandidateMedia(candidate) {
+  const source = candidate.content_url || candidate.thumbnail_url;
+  if (candidate.media_type === 'video') {
+    return `<video src="${esc(source)}" controls playsinline preload="metadata"></video>`;
+  }
+  return `<img src="${esc(source)}" alt="" loading="lazy">`;
+}
+
+function lightboxCandidateInfo(candidate) {
+  const metadata = candidate.source_metadata || {};
+  const heading = [candidate.provider, metadata.remote_id ? `#${metadata.remote_id}` : ''].filter(Boolean).join(' ');
+  const details = [];
+  if (candidate.width || candidate.height) details.push(`${candidate.width || '?'}×${candidate.height || '?'}`);
+  if (candidate.match_method) details.push(String(candidate.match_method).replaceAll('_', ' '));
+  if (candidate.confidence != null) details.push(`${Math.round(Number(candidate.confidence))}% match`);
+  // Every candidate keeps a link to the page it was taken from, so the match can be
+  // checked in the original gallery before it is confirmed.
+  const link = metadata.canonical_url
+    ? `<a class="compare-source-link" href="${esc(metadata.canonical_url)}" target="_blank" rel="noopener" title="Open the page this candidate was taken from"><i data-lucide="external-link"></i>Open source${metadata.domain ? ` on ${esc(metadata.domain)}` : ''}</a>`
+    : '';
+  return `<strong>${esc(heading || 'Source candidate')}</strong>` +
+    `<span class="compare-author">${metadata.author ? esc(metadata.author) : 'Unknown author'}</span>` +
+    `<small>${details.join(' · ')}</small>${link}`;
+}
+
 function openMediaLightbox({contentUrl, type = 'image', title = '', candidates = [], reviewId = null}) {
   document.querySelector('.media-lightbox')?.remove();
   const media = type === 'video'
     ? `<video src="${esc(contentUrl)}" controls autoplay playsinline></video>`
     : `<img src="${esc(contentUrl)}" alt="">`;
-  const sourceRows = (candidates || []).map(candidate => {
-    const metadata = candidate.source_metadata || {};
-    return `<div class="media-lightbox-source"><img src="${esc(candidate.thumbnail_url)}" alt=""><div><strong>${esc(candidate.provider)} · #${esc(metadata.remote_id || 'post')}</strong><small>${esc(candidate.match_method)} · ${Number(candidate.confidence).toFixed(0)}% · ${candidate.width || '?'}×${candidate.height || '?'}</small></div><button type="button" class="btn primary use-lightbox-candidate" data-review-id="${reviewId}" data-candidate-id="${candidate.id}"><i data-lucide="check"></i>Use this source</button></div>`;
-  }).join('');
-  const sources = candidates.length ? `<div class="media-lightbox-sources"><h3>Source candidates</h3><div class="media-lightbox-source-list">${sourceRows}</div></div>` : '';
   const manual = reviewId ? `<button type="button" class="btn manual-lightbox-source"><i data-lucide="link"></i>Add source URL</button>` : '';
+  // A card with candidates opens as a side-by-side comparison: the staged file on the
+  // left, the selected candidate on the right, switched with the arrows or keyboard.
+  const compare = Boolean(reviewId && candidates.length);
+  const body = compare
+    ? `<div class="compare-grid"><section class="compare-pane compare-mine"><header><span>Your file</span></header><div class="compare-media">${media}</div></section><section class="compare-pane compare-candidate"><header><span>Source candidate</span><span class="compare-position"></span></header><div class="compare-media"><div class="compare-candidate-media"></div><button type="button" class="compare-nav compare-prev" title="Previous candidate"><i data-lucide="chevron-left"></i></button><button type="button" class="compare-nav compare-next" title="Next candidate"><i data-lucide="chevron-right"></i></button></div><div class="compare-candidate-info"></div></section></div>`
+    : `<div class="media-lightbox-body">${media}</div>`;
   // Accepting is only offered inside the opened preview so a card click can never
   // confirm a file without the source the user meant to keep.
-  const accept = reviewId
-    ? `<div class="media-lightbox-actions"><button type="button" class="btn accept-lightbox-item" title="Keep the staged file and do not use any of the listed source candidates"><i data-lucide="check"></i>Accept without choosing a source</button></div>`
+  const actions = reviewId
+    ? `<div class="media-lightbox-actions"><button type="button" class="btn accept-lightbox-item" title="Keep the staged file and do not use any of the listed source candidates"><i data-lucide="check"></i>Accept without choosing a source</button>${compare ? '<button type="button" class="btn primary use-lightbox-candidate"><i data-lucide="check"></i>Use this source</button>' : ''}</div>`
     : '';
   const node = document.createElement('div');
-  node.className = 'media-lightbox';
-  node.innerHTML = `<div class="media-lightbox-backdrop" data-close></div><figure class="media-lightbox-window"><div class="media-lightbox-head"><strong>${esc(title)}</strong>${manual}<a class="icon-btn" href="${esc(contentUrl)}" target="_blank" rel="noopener" title="Open in a new tab"><i data-lucide="external-link"></i></a><button type="button" class="icon-btn" data-close title="Close"><i data-lucide="x"></i></button></div><div class="media-lightbox-body">${media}</div>${sources}${accept}</figure>`;
+  node.className = `media-lightbox${compare ? ' media-lightbox-compare' : ''}`;
+  node.innerHTML = `<div class="media-lightbox-backdrop" data-close></div><figure class="media-lightbox-window"><div class="media-lightbox-head"><strong>${esc(title)}</strong>${manual}<a class="icon-btn" href="${esc(contentUrl)}" target="_blank" rel="noopener" title="Open in a new tab"><i data-lucide="external-link"></i></a><button type="button" class="icon-btn" data-close title="Close"><i data-lucide="x"></i></button></div>${body}${actions}</figure>`;
   document.body.appendChild(node);
+  let index = 0;
   const close = () => { node.remove(); document.removeEventListener('keydown', onKey); };
-  const onKey = event => { if (event.key === 'Escape') close(); };
+  const useButton = node.querySelector('.use-lightbox-candidate');
+  const showCandidate = () => {
+    if (!compare) return;
+    const candidate = candidates[index];
+    node.querySelector('.compare-position').textContent = `${index + 1} / ${candidates.length}`;
+    node.querySelector('.compare-candidate-media').innerHTML = lightboxCandidateMedia(candidate);
+    node.querySelector('.compare-candidate-info').innerHTML = lightboxCandidateInfo(candidate);
+    if (useButton) useButton.dataset.candidateId = candidate.id;
+    node.querySelector('.compare-prev').disabled = candidates.length < 2;
+    node.querySelector('.compare-next').disabled = candidates.length < 2;
+    icons();
+  };
+  const step = delta => { if (!compare) return; index = (index + delta + candidates.length) % candidates.length; showCandidate(); };
+  const onKey = event => {
+    if (event.key === 'Escape') close();
+    else if (compare && event.key === 'ArrowLeft') step(-1);
+    else if (compare && event.key === 'ArrowRight') step(1);
+  };
   document.addEventListener('keydown', onKey);
   node.querySelectorAll('[data-close]').forEach(element => element.onclick = close);
-  node.querySelectorAll('.use-lightbox-candidate').forEach(element => element.onclick = async () => {
-    try {
-      await api(`/api/v1/review-items/${element.dataset.reviewId}/source-candidates/${element.dataset.candidateId}/accept`,{method:'POST'});
-      reviewSelection.delete(Number(element.dataset.reviewId));
-      close(); toast('Source selected'); showReview();
-    } catch(error) { toast(error.message,true); }
-  });
   node.querySelectorAll('.manual-lightbox-source').forEach(element => element.onclick = async () => {
     const url = prompt('Source URL'); if (!url) return;
     try {
       await runJob(() => api(`/api/v1/review-items/${reviewId}/source`,{method:'POST',body:JSON.stringify({url})}));
       reviewSelection.delete(Number(reviewId));
       close(); toast('Source applied'); showReview();
+    } catch(error) { toast(error.message,true); }
+  });
+  if (compare) {
+    node.querySelector('.compare-prev').onclick = () => step(-1);
+    node.querySelector('.compare-next').onclick = () => step(1);
+    showCandidate();
+  }
+  node.querySelectorAll('.use-lightbox-candidate').forEach(element => element.onclick = async () => {
+    const candidateId = element.dataset.candidateId;
+    if (!candidateId) return;
+    try {
+      await api(`/api/v1/review-items/${reviewId}/source-candidates/${candidateId}/accept`,{method:'POST'});
+      reviewSelection.delete(Number(reviewId));
+      close(); toast('Source selected'); showReview();
     } catch(error) { toast(error.message,true); }
   });
   node.querySelectorAll('.accept-lightbox-item').forEach(element => element.onclick = async () => {
