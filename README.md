@@ -262,7 +262,9 @@ green and its **Run import again** button is locked, because the next step is to
 the preview and confirm one of the candidates. To look for a source again after you
 add or reconfigure providers, tick the checkbox on the cards you want to retry and
 select **Recheck selected** at the top; a running card is outlined while its search is
-in progress and its button stays disabled. Once a card has been rechecked it keeps a
+in progress and its button stays disabled. If you start another search while one card
+is still searching, that card joins a queue: it gets a waiting outline and is searched
+automatically when the current search finishes. Once a card has been rechecked it keeps a
 **Checked** marker even after the page is reopened, and its **Run import again**
 button stays locked. Select the log button on the card to open the full search
 results for that card, including the outcome, provider details, and why a source was

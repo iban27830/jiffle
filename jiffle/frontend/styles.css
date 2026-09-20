@@ -202,6 +202,7 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
 .review-card-searched [data-lucide] { width: 12px; height: 12px; }
 .review-card-candidates ~ .review-card-searched { top: 34px; }
 .review-card-searching { outline: 2px solid var(--accent); animation: review-search-pulse 1s ease-in-out infinite; }
+.review-card-queued { outline: 2px dotted var(--accent); outline-offset: -2px; }
 @keyframes review-search-pulse { 50% { outline-color: rgba(0,108,91,.25); } }
 .review-log-window { width: min(760px,100%); }
 .review-log-body { display: grid; gap: 10px; max-height: calc(100vh - 160px); padding: 12px 13px; overflow: auto; background: var(--surface-2); }

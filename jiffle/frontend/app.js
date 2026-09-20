@@ -16,6 +16,10 @@ let libraryOffset = 0;
 let reviewOffset = 0;
 let reviewSearching = false;
 let reviewSelection = new Set();
+let reviewSearchQueue = [];
+let reviewSearchActive = new Set();
+let reviewSearchApiWarned = false;
+const reviewLocalSearches = new Map();
 let selectedMedia = null;
 let includeTag = ''; let excludeTag = '';
 let librarySearch = '';
@@ -576,6 +580,16 @@ function reviewSearchTitle(search) {
   return parts.join(' · ');
 }
 
+function warnIfReviewSearchApiIsOutdated(items) {
+  // A running backend from before the update does not return the per-card
+  // search summary, so the persistent lock cannot work until it restarts.
+  if (reviewSearchApiWarned) return;
+  const candidates = items.filter(item => item.kind !== 'metadata');
+  if (!candidates.length || candidates.some(item => Object.prototype.hasOwnProperty.call(item, 'search'))) return;
+  reviewSearchApiWarned = true;
+  toast('Restart Jiffle to finish the update: the Review search log is not available in this session', true);
+}
+
 function reviewCardHtml(item) {
   const reason = `<span class="review-card-reason">${esc(reviewReasonLabel(item.reason))}</span>`;
   if (item.kind === 'metadata') {
@@ -584,7 +598,11 @@ function reviewCardHtml(item) {
   const selected = reviewSelection.has(item.id) ? ' checked' : '';
   const candidateCount = (item.source_candidates || []).length;
   const found = candidateCount > 0;
-  const search = item.search || {};
+  // The server keeps the searched state; the local map covers a search that
+  // just finished while an older backend has not been restarted yet.
+  const search = (item.search && Number(item.search.count || 0) > 0)
+    ? item.search
+    : (reviewLocalSearches.get(Number(item.id)) || {});
   const searched = Number(search.count || 0) > 0;
   const candidates = found ? `<span class="review-card-candidates">${candidateCount} source${candidateCount === 1 ? '' : 's'} found</span>` : '';
   // A rechecked card stays marked even after reopening the page and its
@@ -758,6 +776,7 @@ async function showReview() {
     '<button id="reviewSelectAll" class="btn" type="button"><i data-lucide="check-square"></i>Select all on screen</button>' +
     '<button id="reviewRecheck" class="btn primary" type="button" disabled><i data-lucide="refresh-cw"></i>Recheck selected</button>');
   const items = data.items;
+  warnIfReviewSearchApiIsOutdated(items);
   const byId = new Map(items.map(item => [item.id, item]));
   const candidateIds = items.filter(item => item.kind !== 'metadata').map(item => item.id);
   const filterCounts = data.page.filters || {};
@@ -776,7 +795,13 @@ async function showReview() {
     document.querySelectorAll('[data-review-select]').forEach(node => node.checked = reviewSelection.has(Number(node.dataset.reviewSelect)));
     const selectedCount = candidateIds.filter(id => reviewSelection.has(id)).length;
     const recheck = document.querySelector('#reviewRecheck');
-    if (recheck) { recheck.disabled = reviewSearching || selectedCount === 0; recheck.innerHTML = `<i data-lucide="refresh-cw"></i>Recheck selected${selectedCount ? ` (${selectedCount})` : ''}`; }
+    if (recheck) {
+      const busy = reviewSearching || reviewSearchQueue.length > 0;
+      recheck.disabled = busy || selectedCount === 0;
+      recheck.innerHTML = busy
+        ? `<i data-lucide="refresh-cw" class="spin"></i>${reviewSearchQueue.length ? `Queued (${reviewSearchQueue.length})` : 'Rechecking...'}`
+        : `<i data-lucide="refresh-cw"></i>Recheck selected${selectedCount ? ` (${selectedCount})` : ''}`;
+    }
     const selectAll = document.querySelector('#reviewSelectAll');
     if (selectAll) {
       const allSelected = candidateIds.length > 0 && candidateIds.every(id => reviewSelection.has(id));
@@ -803,43 +828,104 @@ async function showReview() {
     openMediaLightbox({contentUrl:node.dataset.openReviewContent, type:node.dataset.reviewType || 'image', title:node.dataset.reviewTitle || 'Preview'});
   });
   meta.textContent = `${data.page.total} awaiting review`;
-  icons(); updateSelectionUi(); await refreshCounts();
+  updateSelectionUi(); applySearchStates(); await refreshCounts();
 }
 
-// Cards whose recheck is running get a visible busy state and a locked button so
-// the same search cannot be queued twice from one card.
-function setRecheckBusy(ids, busy) {
-  ids.forEach(id => {
-    const button = document.querySelector(`[data-review-reimport="${id}"]`);
-    const card = button?.closest('.review-card');
-    card?.classList.toggle('review-card-searching', busy);
-    if (button) button.disabled = busy || card?.classList.contains('review-card-source-found') || card?.classList.contains('review-card-already-searched');
+// A recheck that is running or waiting in the queue gets a visible state and a
+// locked button, so one card can never start the same search twice.
+function applySearchStates() {
+  document.querySelectorAll('.review-card[data-review-id]').forEach(card => {
+    const id = Number(card.dataset.reviewId);
+    const active = reviewSearchActive.has(id);
+    const queued = !active && reviewSearchQueue.includes(id);
+    card.classList.toggle('review-card-searching', active);
+    card.classList.toggle('review-card-queued', queued);
+    const button = card.querySelector('[data-review-reimport]');
+    if (!button) return;
+    const locked = card.classList.contains('review-card-source-found') || card.classList.contains('review-card-already-searched');
+    button.disabled = active || queued || locked;
+    if (active) button.title = 'Search in progress...';
+    else if (queued) button.title = 'Waiting in the search queue';
   });
   const bulk = document.querySelector('#reviewRecheck');
-  if (bulk && busy) { bulk.disabled = true; bulk.innerHTML = '<i data-lucide="refresh-cw" class="spin"></i>Rechecking...'; }
+  if (bulk) {
+    const selectedCount = document.querySelectorAll('[data-review-select]:checked').length;
+    const busy = reviewSearching || reviewSearchQueue.length > 0;
+    bulk.disabled = busy || selectedCount === 0;
+    bulk.innerHTML = busy
+      ? `<i data-lucide="refresh-cw" class="spin"></i>${reviewSearchQueue.length ? `Queued (${reviewSearchQueue.length})` : 'Rechecking...'}`
+      : `<i data-lucide="refresh-cw"></i>Recheck selected${selectedCount ? ` (${selectedCount})` : ''}`;
+  }
+  icons();
 }
 
-async function recheckReviewItems(ids) {
-  const unique = [...new Set(ids.map(Number).filter(id => id > 0))];
-  if (!unique.length) { toast('Select at least one item', true); return; }
+function rememberLocalSearches(ids, result) {
+  // Keep the card locked for this session even if the API response did not
+  // carry the search summary (for example right after an app update).
+  const items = Array.isArray(result.items) ? result.items : [];
+  ids.forEach(id => {
+    const entry = items.find(item => Number(item.review_item_id) === Number(id)) || {};
+    const previous = reviewLocalSearches.get(Number(id)) || {count: 0};
+    reviewLocalSearches.set(Number(id), {
+      count: Number(previous.count || 0) + 1,
+      last_outcome: entry.status || 'unavailable',
+      last_message: entry.message || null,
+      last_at: new Date().toISOString(),
+    });
+  });
+}
+
+function recheckReviewItems(ids) {
+  const unique = [...new Set(ids.map(Number).filter(id => id > 0))]
+    .filter(id => !reviewSearchActive.has(id) && !reviewSearchQueue.includes(id));
+  if (!unique.length) {
+    toast(ids.some(id => Number(id) > 0) ? 'This card is already being searched' : 'Select at least one item', true);
+    return;
+  }
+  const queuedBehind = reviewSearching || reviewSearchQueue.length > 0;
+  reviewSearchQueue.push(...unique);
+  unique.forEach(id => reviewSelection.delete(id));
+  document.querySelectorAll('[data-review-select]').forEach(node => {
+    node.checked = reviewSelection.has(Number(node.dataset.reviewSelect));
+  });
+  if (queuedBehind) toast(`Added to the search queue (${reviewSearchQueue.length})`);
+  else if (unique.length > 1) toast(`Searching ${unique.length} cards`);
+  applySearchStates();
+  drainReviewSearchQueue();
+}
+
+async function drainReviewSearchQueue() {
   if (reviewSearching) return;
   reviewSearching = true;
-  setRecheckBusy(unique, true);
-  icons();
+  applySearchStates();
   try {
-    const job = await runJob(() => api('/api/v1/review-items/reimport',{method:'POST',body:JSON.stringify({review_item_ids:unique})}));
-    const result = job.result || {};
-    unique.forEach(id => reviewSelection.delete(id));
-    const unavailable = Number(result.unavailable || 0);
-    const candidates = Number(result.candidates || 0);
-    toast(`Recheck complete: ${Number(result.accepted || 0)} resolved${candidates ? `, ${candidates} source${candidates === 1 ? '' : 's'} to confirm` : ''}, ${Number(result.no_source || 0)} still without a source${unavailable ? `, ${unavailable} unavailable` : ''}`);
-    await refreshCounts();
+    while (reviewSearchQueue.length) {
+      const batch = [...new Set(reviewSearchQueue.splice(0, reviewSearchQueue.length))];
+      reviewSearchActive = new Set(batch);
+      applySearchStates();
+      let result = {};
+      try {
+        const job = await runJob(() => api('/api/v1/review-items/reimport',{method:'POST',body:JSON.stringify({review_item_ids:batch})}));
+        result = job.result || {};
+        const unavailable = Number(result.unavailable || 0);
+        const candidates = Number(result.candidates || 0);
+        toast(`Recheck complete: ${Number(result.accepted || 0)} resolved${candidates ? `, ${candidates} source${candidates === 1 ? '' : 's'} to confirm` : ''}, ${Number(result.no_source || 0)} still without a source${unavailable ? `, ${unavailable} unavailable` : ''}`);
+      } catch (error) {
+        toast(error.message, true);
+      }
+      rememberLocalSearches(batch, result);
+      reviewSearchActive = new Set();
+      await refreshCounts().catch(() => {});
+      if (currentView === 'review') await showReview();
+      applySearchStates();
+    }
   } catch (error) {
-    toast(error.message,true);
+    toast(error.message, true);
   } finally {
     reviewSearching = false;
+    reviewSearchActive = new Set();
+    applySearchStates();
   }
-  showReview();
 }
 
 async function reviewAction(id, action) {
