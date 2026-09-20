@@ -25,6 +25,8 @@ from jiffle.infrastructure.database.connection import get_database
 
 review_blueprint = Blueprint("review_queue", __name__)
 
+_REVIEW_FILTERS = ("all", "source_found", "needs_source")
+
 
 @review_blueprint.get("/api/v1/review-items")
 def list_review_items():
@@ -35,25 +37,44 @@ def list_review_items():
         return _error("review.invalid_query", "Pagination values must be integers.", 400)
     if not 1 <= limit <= 100 or offset < 0:
         return _error("review.invalid_query", "Pagination is outside its valid range.", 400)
+    queue_filter = request.args.get("filter", "all") or "all"
+    if queue_filter not in _REVIEW_FILTERS:
+        return _error("review.invalid_query", "Unknown review category.", 400)
     connection = get_database()
-    total = connection.execute(
-        "SELECT COUNT(*) FROM ("
-        "SELECT id, created_at FROM review_items WHERE status='pending' "
-        "UNION ALL "
-        "SELECT id, created_at FROM metadata_suggestions WHERE status='pending'"
-        ")"
-    ).fetchone()[0]
+    # The category narrows the candidate cards without changing what "All" shows,
+    # so a user can jump straight to the cards where a source was already found.
+    candidate_filter = ""
+    if queue_filter == "source_found":
+        candidate_filter = (
+            " AND EXISTS (SELECT 1 FROM import_source_candidates candidate "
+            "WHERE candidate.review_item_id=review_items.id AND candidate.status='pending')"
+        )
+    elif queue_filter == "needs_source":
+        candidate_filter = (
+            " AND NOT EXISTS (SELECT 1 FROM import_source_candidates candidate "
+            "WHERE candidate.review_item_id=review_items.id AND candidate.status='pending')"
+        )
+    candidates_sql = (
+        "SELECT 'candidate' AS kind, id AS item_id, created_at FROM review_items "
+        "WHERE status='pending'" + candidate_filter
+    )
+    if queue_filter == "all":
+        queue_sql = (
+            candidates_sql
+            + " UNION ALL SELECT 'metadata' AS kind, id AS item_id, created_at "
+            "FROM metadata_suggestions WHERE status='pending'"
+        )
+    else:
+        queue_sql = candidates_sql
+    total = connection.execute(f"SELECT COUNT(*) FROM ({queue_sql})").fetchone()[0]
     counts = {row["reason"]: row["count"] for row in connection.execute(
         "SELECT reason, COUNT(*) AS count FROM review_items WHERE status='pending' GROUP BY reason"
     ).fetchall()}
     # Paginate the combined queue so Review items and metadata suggestions share
     # one scrollable list instead of paging each table independently.
     page = connection.execute(
-        "SELECT kind, item_id FROM ("
-        "SELECT 'candidate' AS kind, id AS item_id, created_at FROM review_items WHERE status='pending' "
-        "UNION ALL "
-        "SELECT 'metadata' AS kind, id AS item_id, created_at FROM metadata_suggestions WHERE status='pending'"
-        ") ORDER BY created_at ASC, kind ASC, item_id ASC LIMIT ? OFFSET ?",
+        f"SELECT kind, item_id FROM ({queue_sql}) "
+        "ORDER BY created_at ASC, kind ASC, item_id ASC LIMIT ? OFFSET ?",
         (limit, offset),
     ).fetchall()
     items = []
@@ -71,9 +92,24 @@ def list_review_items():
     ).fetchone()[0]
     if metadata_count:
         counts["metadata_update"] = int(metadata_count)
+    pending_reviews = connection.execute(
+        "SELECT COUNT(*) FROM review_items WHERE status='pending'"
+    ).fetchone()[0]
+    with_candidates = connection.execute(
+        "SELECT COUNT(*) FROM review_items review WHERE review.status='pending' AND EXISTS ("
+        "SELECT 1 FROM import_source_candidates candidate "
+        "WHERE candidate.review_item_id=review.id AND candidate.status='pending')"
+    ).fetchone()[0]
     return jsonify({
         "items": items,
-        "page": {"total": int(total), "limit": limit, "offset": offset, "by_reason": counts},
+        "page": {
+            "total": int(total), "limit": limit, "offset": offset, "by_reason": counts,
+            "filters": {
+                "all": int(pending_reviews) + int(metadata_count),
+                "source_found": int(with_candidates),
+                "needs_source": int(pending_reviews) - int(with_candidates),
+            },
+        },
     })
 
 

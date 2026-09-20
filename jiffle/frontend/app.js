@@ -14,6 +14,7 @@ const jobStatus = document.querySelector('#jobStatus');
 let currentView = 'library';
 let libraryOffset = 0;
 let reviewOffset = 0;
+let reviewSearching = false;
 let reviewSelection = new Set();
 let selectedMedia = null;
 let includeTag = ''; let excludeTag = '';
@@ -72,12 +73,18 @@ function applyLibraryPrefs() {
 }
 const REVIEW_PREFS_KEY = 'jiffle-review-preferences';
 const REVIEW_PAGE_SIZES = [20, 40, 60, 100];
-const defaultReviewPrefs = {pageSize: 60};
+const REVIEW_FILTERS = [
+  {value: 'all', label: 'All'},
+  {value: 'source_found', label: 'Source found'},
+  {value: 'needs_source', label: 'Needs source'},
+];
+const defaultReviewPrefs = {pageSize: 60, filter: 'all'};
 function reviewPrefs() {
   try {
     const saved = JSON.parse(localStorage.getItem(REVIEW_PREFS_KEY) || '{}');
     const pageSize = REVIEW_PAGE_SIZES.includes(Number(saved.pageSize)) ? Number(saved.pageSize) : defaultReviewPrefs.pageSize;
-    return {...defaultReviewPrefs, ...saved, pageSize};
+    const filter = REVIEW_FILTERS.some(item => item.value === saved.filter) ? saved.filter : defaultReviewPrefs.filter;
+    return {...defaultReviewPrefs, ...saved, pageSize, filter};
   } catch { return {...defaultReviewPrefs}; }
 }
 function saveReviewPrefs(changes) {
@@ -557,8 +564,14 @@ function reviewCardHtml(item) {
   }
   const selected = reviewSelection.has(item.id) ? ' checked' : '';
   const candidateCount = (item.source_candidates || []).length;
-  const candidates = candidateCount ? `<span class="review-card-candidates">${candidateCount} source${candidateCount === 1 ? '' : 's'}</span>` : '';
-  return `<article class="media-card review-card" data-review-kind="candidate" data-review-id="${item.id}"><div class="review-card-preview" data-open-review="${item.id}" title="Open full size"><img loading="lazy" src="${esc(item.thumbnail_url)}" alt="">${reason}${candidates}<label class="review-card-select" title="Select for recheck"><input type="checkbox" data-review-select="${item.id}"${selected}></label></div><div class="review-card-actions"><button type="button" class="icon-btn" data-open-review="${item.id}" title="Open full size"><i data-lucide="maximize-2"></i></button><button type="button" class="icon-btn" data-review-reimport="${item.id}" title="Run import again"><i data-lucide="refresh-cw"></i></button><button type="button" class="icon-btn good" data-review-accept="${item.id}" title="Accept"><i data-lucide="check"></i></button><button type="button" class="icon-btn danger" data-review-reject="${item.id}" title="Reject"><i data-lucide="trash-2"></i></button></div></article>`;
+  const found = candidateCount > 0;
+  const candidates = found ? `<span class="review-card-candidates">${candidateCount} source${candidateCount === 1 ? '' : 's'} found</span>` : '';
+  // A card whose recheck already produced source candidates is highlighted and its
+  // repeat-search button is locked: the user confirms it from the opened preview.
+  const recheck = found
+    ? `<button type="button" class="icon-btn" data-review-reimport="${item.id}" disabled title="A source was already found - open the image to confirm it"><i data-lucide="refresh-cw"></i></button>`
+    : `<button type="button" class="icon-btn" data-review-reimport="${item.id}" title="Run import again"><i data-lucide="refresh-cw"></i></button>`;
+  return `<article class="media-card review-card${found ? ' review-card-source-found' : ''}" data-review-kind="candidate" data-review-id="${item.id}"><div class="review-card-preview" data-open-review="${item.id}" title="Open full size"><img loading="lazy" src="${esc(item.thumbnail_url)}" alt="">${reason}${candidates}<label class="review-card-select" title="Select for recheck"><input type="checkbox" data-review-select="${item.id}"${selected}></label></div><div class="review-card-actions"><button type="button" class="icon-btn" data-open-review="${item.id}" title="Open full size to choose a source"><i data-lucide="maximize-2"></i></button>${recheck}<button type="button" class="icon-btn danger" data-review-reject="${item.id}" title="Reject"><i data-lucide="trash-2"></i></button></div></article>`;
 }
 
 function openMediaLightbox({contentUrl, type = 'image', title = '', candidates = [], reviewId = null}) {
@@ -572,9 +585,14 @@ function openMediaLightbox({contentUrl, type = 'image', title = '', candidates =
   }).join('');
   const sources = candidates.length ? `<div class="media-lightbox-sources"><h3>Source candidates</h3><div class="media-lightbox-source-list">${sourceRows}</div></div>` : '';
   const manual = reviewId ? `<button type="button" class="btn manual-lightbox-source"><i data-lucide="link"></i>Add source URL</button>` : '';
+  // Accepting is only offered inside the opened preview so a card click can never
+  // confirm a file without the source the user meant to keep.
+  const accept = reviewId
+    ? `<div class="media-lightbox-actions"><button type="button" class="btn accept-lightbox-item" title="Keep the staged file and do not use any of the listed source candidates"><i data-lucide="check"></i>Accept without choosing a source</button></div>`
+    : '';
   const node = document.createElement('div');
   node.className = 'media-lightbox';
-  node.innerHTML = `<div class="media-lightbox-backdrop" data-close></div><figure class="media-lightbox-window"><div class="media-lightbox-head"><strong>${esc(title)}</strong>${manual}<a class="icon-btn" href="${esc(contentUrl)}" target="_blank" rel="noopener" title="Open in a new tab"><i data-lucide="external-link"></i></a><button type="button" class="icon-btn" data-close title="Close"><i data-lucide="x"></i></button></div><div class="media-lightbox-body">${media}</div>${sources}</figure>`;
+  node.innerHTML = `<div class="media-lightbox-backdrop" data-close></div><figure class="media-lightbox-window"><div class="media-lightbox-head"><strong>${esc(title)}</strong>${manual}<a class="icon-btn" href="${esc(contentUrl)}" target="_blank" rel="noopener" title="Open in a new tab"><i data-lucide="external-link"></i></a><button type="button" class="icon-btn" data-close title="Close"><i data-lucide="x"></i></button></div><div class="media-lightbox-body">${media}</div>${sources}${accept}</figure>`;
   document.body.appendChild(node);
   const close = () => { node.remove(); document.removeEventListener('keydown', onKey); };
   const onKey = event => { if (event.key === 'Escape') close(); };
@@ -595,34 +613,53 @@ function openMediaLightbox({contentUrl, type = 'image', title = '', candidates =
       close(); toast('Source applied'); showReview();
     } catch(error) { toast(error.message,true); }
   });
+  node.querySelectorAll('.accept-lightbox-item').forEach(element => element.onclick = async () => {
+    if (candidates.length && !confirm(`This file has ${candidates.length} source candidate${candidates.length === 1 ? '' : 's'}. Accept it anyway without choosing one?`)) return;
+    try {
+      await api(`/api/v1/review-items/${reviewId}/accept`,{method:'POST'});
+      reviewSelection.delete(Number(reviewId));
+      close(); toast('File accepted'); await refreshCounts(); showReview();
+    } catch(error) { toast(error.message,true); }
+  });
   icons();
 }
 
 async function showReview() {
-  const state = viewState('review');
-  reviewOffset = Math.max(0, Number(state.offset ?? reviewOffset) || 0);
   const prefs = reviewPrefs();
+  const filter = prefs.filter;
+  // ``reviewOffset`` is owned by navigate() and the pager buttons. Reading it back
+  // from the saved view state on every render reset the pager to page one.
+  const loadPage = offset => api(`/api/v1/review-items?limit=${prefs.pageSize}&offset=${offset}&filter=${encodeURIComponent(filter)}`);
+  let data = await loadPage(reviewOffset);
+  if (!data.items.length && data.page.total > 0 && reviewOffset > 0) {
+    // The last page can become empty after items are resolved; step back to the new last page.
+    reviewOffset = Math.max(0, (Math.ceil(data.page.total / prefs.pageSize) - 1) * prefs.pageSize);
+    data = await loadPage(reviewOffset);
+  }
+  saveViewState('review', {offset: reviewOffset, filter});
   setHeader('Review', '',
     '<button id="reviewSelectAll" class="btn" type="button"><i data-lucide="check-square"></i>Select all on screen</button>' +
     '<button id="reviewRecheck" class="btn primary" type="button" disabled><i data-lucide="refresh-cw"></i>Recheck selected</button>');
-  const data = await api(`/api/v1/review-items?limit=${prefs.pageSize}&offset=${reviewOffset}`);
-  saveViewState('review', {offset: reviewOffset});
   const items = data.items;
   const byId = new Map(items.map(item => [item.id, item]));
   const candidateIds = items.filter(item => item.kind !== 'metadata').map(item => item.id);
+  const filterCounts = data.page.filters || {};
+  const filters = REVIEW_FILTERS.map(option => `<button type="button" class="btn review-filter${option.value === filter ? ' primary' : ''}" data-review-filter="${option.value}">${esc(option.label)}${filterCounts[option.value] != null ? ` (${filterCounts[option.value]})` : ''}</button>`).join('');
   const summary = Object.entries(data.page.by_reason || {}).map(([reason, count]) => `<span class="badge">${esc(reviewReasonLabel(reason))}: ${count}</span>`).join('');
-  workspace.innerHTML = `<div class="page review-page"><div class="review-toolbar">${summary ? `<div class="review-summary">${summary}</div>` : '<span class="muted-value">Nothing needs review</span>'}<label class="toolbar-count" title="Items per page"><span>Per page</span><select id="reviewPageSize" class="control">${REVIEW_PAGE_SIZES.map(size => `<option value="${size}" ${size === prefs.pageSize ? 'selected' : ''}>${size}</option>`).join('')}</select></label></div><div class="gallery review-gallery">${items.length ? items.map(reviewCardHtml).join('') : '<div class="empty">Nothing needs review</div>'}</div><div id="reviewPager" class="pager"></div></div>`;
+  const emptyText = filter === 'all' ? 'Nothing needs review' : 'No cards in this category';
+  workspace.innerHTML = `<div class="page review-page"><div class="review-toolbar"><div class="review-filters" role="group" aria-label="Review category">${filters}</div>${summary ? `<div class="review-summary">${summary}</div>` : ''}<label class="toolbar-count" title="Items per page"><span>Per page</span><select id="reviewPageSize" class="control">${REVIEW_PAGE_SIZES.map(size => `<option value="${size}" ${size === prefs.pageSize ? 'selected' : ''}>${size}</option>`).join('')}</select></label></div><div class="gallery review-gallery">${items.length ? items.map(reviewCardHtml).join('') : `<div class="empty">${emptyText}</div>`}</div><div id="reviewPager" class="pager"></div></div>`;
   const from = data.page.total ? reviewOffset + 1 : 0;
   const to = Math.min(reviewOffset + items.length, data.page.total);
   document.querySelector('#reviewPager').innerHTML = `<span class="page-range">${from}-${to} of ${data.page.total}</span><button class="btn" id="reviewPrev" ${reviewOffset === 0 ? 'disabled' : ''}><i data-lucide="chevron-left"></i>Previous</button><button class="btn" id="reviewNext" ${reviewOffset + prefs.pageSize >= data.page.total ? 'disabled' : ''}>Next<i data-lucide="chevron-right"></i></button>`;
   document.querySelector('#reviewPageSize').onchange = event => { saveReviewPrefs({pageSize:Number(event.target.value)}); reviewOffset = 0; showReview(); };
+  document.querySelectorAll('[data-review-filter]').forEach(node => node.onclick = () => { if (node.dataset.reviewFilter === filter) return; saveReviewPrefs({filter:node.dataset.reviewFilter}); reviewOffset = 0; showReview(); });
   document.querySelector('#reviewPrev').onclick = () => { reviewOffset = Math.max(0, reviewOffset - prefs.pageSize); showReview(); };
   document.querySelector('#reviewNext').onclick = () => { reviewOffset += prefs.pageSize; showReview(); };
   const updateSelectionUi = () => {
     document.querySelectorAll('[data-review-select]').forEach(node => node.checked = reviewSelection.has(Number(node.dataset.reviewSelect)));
     const selectedCount = candidateIds.filter(id => reviewSelection.has(id)).length;
     const recheck = document.querySelector('#reviewRecheck');
-    if (recheck) { recheck.disabled = selectedCount === 0; recheck.innerHTML = `<i data-lucide="refresh-cw"></i>Recheck selected${selectedCount ? ` (${selectedCount})` : ''}`; }
+    if (recheck) { recheck.disabled = reviewSearching || selectedCount === 0; recheck.innerHTML = `<i data-lucide="refresh-cw"></i>Recheck selected${selectedCount ? ` (${selectedCount})` : ''}`; }
     const selectAll = document.querySelector('#reviewSelectAll');
     if (selectAll) {
       const allSelected = candidateIds.length > 0 && candidateIds.every(id => reviewSelection.has(id));
@@ -634,7 +671,6 @@ async function showReview() {
   document.querySelectorAll('[data-review-select]').forEach(node => node.onchange = event => { const id = Number(node.dataset.reviewSelect); if (event.target.checked) reviewSelection.add(id); else reviewSelection.delete(id); updateSelectionUi(); });
   document.querySelector('#reviewSelectAll').onclick = () => { const allSelected = candidateIds.length > 0 && candidateIds.every(id => reviewSelection.has(id)); candidateIds.forEach(id => { if (allSelected) reviewSelection.delete(id); else reviewSelection.add(id); }); updateSelectionUi(); };
   document.querySelector('#reviewRecheck').onclick = () => recheckReviewItems([...reviewSelection]);
-  document.querySelectorAll('[data-review-accept]').forEach(node => node.onclick = () => reviewAction(Number(node.dataset.reviewAccept), 'accept'));
   document.querySelectorAll('[data-review-reject]').forEach(node => node.onclick = () => reviewAction(Number(node.dataset.reviewReject), 'reject'));
   document.querySelectorAll('[data-review-reimport]').forEach(node => node.onclick = () => recheckReviewItems([Number(node.dataset.reviewReimport)]));
   document.querySelectorAll('[data-accept-metadata]').forEach(node => node.onclick = async () => { try { await api(`/api/v1/metadata-suggestions/${node.dataset.acceptMetadata}/accept`,{method:'POST'}); toast('Metadata applied'); showReview(); } catch(error) { toast(error.message,true); } });
@@ -652,9 +688,26 @@ async function showReview() {
   icons(); updateSelectionUi(); await refreshCounts();
 }
 
+// Cards whose recheck is running get a visible busy state and a locked button so
+// the same search cannot be queued twice from one card.
+function setRecheckBusy(ids, busy) {
+  ids.forEach(id => {
+    const button = document.querySelector(`[data-review-reimport="${id}"]`);
+    const card = button?.closest('.review-card');
+    card?.classList.toggle('review-card-searching', busy);
+    if (button) button.disabled = busy || card?.classList.contains('review-card-source-found');
+  });
+  const bulk = document.querySelector('#reviewRecheck');
+  if (bulk && busy) { bulk.disabled = true; bulk.innerHTML = '<i data-lucide="refresh-cw" class="spin"></i>Rechecking...'; }
+}
+
 async function recheckReviewItems(ids) {
   const unique = [...new Set(ids.map(Number).filter(id => id > 0))];
   if (!unique.length) { toast('Select at least one item', true); return; }
+  if (reviewSearching) return;
+  reviewSearching = true;
+  setRecheckBusy(unique, true);
+  icons();
   try {
     const job = await runJob(() => api('/api/v1/review-items/reimport',{method:'POST',body:JSON.stringify({review_item_ids:unique})}));
     const result = job.result || {};
@@ -663,8 +716,12 @@ async function recheckReviewItems(ids) {
     const candidates = Number(result.candidates || 0);
     toast(`Recheck complete: ${Number(result.accepted || 0)} resolved${candidates ? `, ${candidates} source${candidates === 1 ? '' : 's'} to confirm` : ''}, ${Number(result.no_source || 0)} still without a source${unavailable ? `, ${unavailable} unavailable` : ''}`);
     await refreshCounts();
-    showReview();
-  } catch (error) { toast(error.message,true); }
+  } catch (error) {
+    toast(error.message,true);
+  } finally {
+    reviewSearching = false;
+  }
+  showReview();
 }
 
 async function reviewAction(id, action) {
@@ -1146,7 +1203,7 @@ async function refreshCounts(){try{const [reviews,crops]=await Promise.all([api(
 function formatBytes(value){if(value==null)return 'unknown size';const units=['B','KB','MB','GB'];let size=value,index=0;while(size>=1024&&index<3){size/=1024;index++;}return `${size.toFixed(index?1:0)} ${units[index]}`;}
 
 const views={library:showLibrary,import:showImport,review:showReview,duplicates:showDuplicates,editor:showEditor,collections:showCollections,settings:showSettingsPage};
-async function navigate(view){if(!views[view])view='library';saveScrollState();currentView=view;history.replaceState(null,'',`#${view}`);document.querySelectorAll('.nav-item').forEach(node=>node.classList.toggle('active',node.dataset.view===view));workspace.innerHTML='<div class="empty">Loading...</div>';try{await views[view]();restoreScrollState(view)}catch(error){workspace.innerHTML='<div class="empty">Could not load this section</div>';toast(error.message,true);}icons();}
+async function navigate(view){if(!views[view])view='library';saveScrollState();currentView=view;if(view==='review')reviewOffset=Math.max(0,Number(viewState('review').offset)||0);history.replaceState(null,'',`#${view}`);document.querySelectorAll('.nav-item').forEach(node=>node.classList.toggle('active',node.dataset.view===view));workspace.innerHTML='<div class="empty">Loading...</div>';try{await views[view]();restoreScrollState(view)}catch(error){workspace.innerHTML='<div class="empty">Could not load this section</div>';toast(error.message,true);}icons();}
 document.querySelectorAll('.nav-item').forEach(node=>node.onclick=()=>navigate(node.dataset.view));
 window.addEventListener('hashchange',()=>navigate(location.hash.slice(1)||'library'));
 window.addEventListener('beforeunload',saveScrollState);
