@@ -1,6 +1,6 @@
 import json
-import os
 from pathlib import Path
+import shutil
 import sqlite3
 
 from jiffle.configuration.settings import Settings
@@ -51,7 +51,7 @@ def resolve_match(
     quarantine_root = settings.database_path.parent / "delete-quarantine"
     quarantine_root.mkdir(parents=True, exist_ok=True)
     quarantine = quarantine_root / f"duplicate-{match_id}-{source.name}"
-    os.replace(source, quarantine)
+    _move_file(source, quarantine)
     try:
         if merge_metadata:
             _merge_metadata(connection, keep, remove)
@@ -77,7 +77,12 @@ def resolve_match(
         connection.commit()
     except Exception:
         connection.rollback()
-        os.replace(quarantine, source)
+        try:
+            _move_file(quarantine, source)
+        except DuplicateFailure:
+            # Keep the original failure; a quarantined file can be recovered
+            # manually from the delete-quarantine directory.
+            pass
         raise
     quarantine.unlink(missing_ok=True)
     return keep_id
@@ -186,6 +191,28 @@ def _media_path(root_path: Path, stored_path: str) -> Path | None:
     root = root_path.resolve()
     candidate = (root / stored_path).resolve()
     return candidate if candidate.is_relative_to(root) else None
+
+
+def _move_file(source: Path, destination: Path) -> None:
+    """Move a file even when the two paths live on different filesystems.
+
+    The media library and the application state are separate mounts on the NAS
+    (the library is on the HDD volume, the state on the SSD volume), and
+    ``os.replace`` fails there with ``EXDEV``. ``shutil.move`` keeps the same
+    atomic rename on one filesystem and falls back to a copy-and-delete move
+    across filesystems.
+    """
+    try:
+        destination.unlink(missing_ok=True)
+        shutil.move(str(source), str(destination))
+    except OSError as error:
+        # A half-written copy must not be mistaken for a complete quarantined file.
+        if source.is_file() and destination.is_file():
+            destination.unlink(missing_ok=True)
+        raise DuplicateFailure(
+            "duplicates.file_move_failed",
+            "The removable media file could not be moved.",
+        ) from error
 
 
 def _history(connection, event_type, match_id, details):
