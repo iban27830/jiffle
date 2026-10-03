@@ -152,8 +152,9 @@ Paste that post URL into the same Import window and Jiffle can use the MD5 to se
 TBIB and other supported sources. The e621 post remains **Source** for its tags,
 characters, parent, and author even when TBIB supplies the downloadable file; in
 that case the TBIB post is shown separately as **File source**. If no exact copy is downloadable, Jiffle checks
-local perceptual fingerprints and then performs an image reverse search: IQDB plus
-the Danbooru and e621 reverse-search endpoints when those accounts are configured.
+local perceptual fingerprints and then performs an image reverse search: IQDB,
+SauceNAO, plus the Danbooru and e621 reverse-search endpoints when those accounts
+are configured.
 Only a small preview of the image is uploaded, so a re-encoded or lower-resolution
 copy can still be matched. Matches from 80% similarity are shown in **Review** as
 source candidates with their similarity percentage; when a match points at a
@@ -185,8 +186,10 @@ Universal import checks the local MD5 first, then performs exact MD5 searches on
 the supported providers. A TBIB sample, resized image, or re-encoded copy has
 different bytes and therefore cannot match the original through exact MD5;
 approximate matching for images is provided by the local perceptual fingerprint,
-IQDB, and the Danbooru and e621 reverse-search endpoints (the last two need the
-saved account credentials). Each reverse search runs in parallel under a
+IQDB, SauceNAO, and the Danbooru and e621 reverse-search endpoints (the last two
+need the saved account credentials; SauceNAO is queried anonymously and needs no
+account). SauceNAO indexes FurAffinity, so it is how an image that exists only
+there can be found automatically. Each reverse search runs in parallel under a
 20-second deadline, and its slowest service cannot park the import. TBIB supports
 exact MD5 lookup, while it does not provide a separate visual reverse-search API.
 

@@ -1026,7 +1026,7 @@ def _reverse_similar(image_path, providers, diagnostics=None):
     the original file instead of only a similarity thumbnail.
     """
     reverse_providers = []
-    for provider in list(providers) + [_iqdb_reverse_search()]:
+    for provider in list(providers) + [_iqdb_reverse_search(), _saucenao_reverse_search()]:
         if provider is None or not callable(getattr(provider, "search_similar", None)):
             continue
         if _provider_needs_configuration(provider):
@@ -1108,6 +1108,14 @@ def _iqdb_reverse_search():
     try:
         from jiffle.features.imports.source_adapters.iqdb import IqdbReverseSearch
         return IqdbReverseSearch()
+    except Exception:
+        return None
+
+
+def _saucenao_reverse_search():
+    try:
+        from jiffle.features.imports.source_adapters.saucenao import SaucenaoReverseSearch
+        return SaucenaoReverseSearch()
     except Exception:
         return None
 
