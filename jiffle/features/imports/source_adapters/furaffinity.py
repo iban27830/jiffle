@@ -1,5 +1,5 @@
 import re
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import requests
 
@@ -46,13 +46,29 @@ class FurAffinitySourceProvider:
         except (requests.RequestException, ValueError) as error:
             raise SourceProviderFailure("import.provider_unavailable", "FurAffinity submission could not be loaded.") from error
         direct_url = "https:" + direct.group(1)
-        title = re.search(r'<title>.*? by ([^<]+)</title>', response.text, re.IGNORECASE | re.DOTALL)
-        tags = tuple(re.findall(r'/search/@keywords/([^/"?]+)', response.text))
+        # The page title is "<Artwork> by <artist> -- Fur Affinity [dot] net".
+        # A greedy prefix keeps a title that itself contains " by " intact.
+        title = re.search(
+            r"<title>(?P<title>.*)\s+by\s+(?P<author>.+?)\s+--\s+Fur Affinity",
+            response.text,
+            re.IGNORECASE | re.DOTALL,
+        )
+        # FurAffinity links tags as /search/@keywords%20<tag> (the space is
+        # sometimes literal), not as a path segment.
+        tags = tuple(
+            dict.fromkeys(
+                unquote(value)
+                for value in re.findall(
+                    r"/search/@keywords(?:%20|\s+|/)([^/\"'?&<>\s]+)", response.text
+                )
+            )
+        )
         tags = add_platform_tags(tags, self.provider_name, "furaffinity.net")
         return SourceMedia(
             canonical_url=f"https://www.furaffinity.net/view/{match.group(1)}/",
             direct_media_url=direct_url, provider=self.provider_name,
-            remote_id=match.group(1), author=title.group(1).strip() if title else None,
+            remote_id=match.group(1),
+            author=title.group("author").strip() if title else None,
             domain="furaffinity.net", tags=tags,
             file_extension="." + direct_url.rsplit(".", 1)[-1].split("?", 1)[0].lower(),
         )
