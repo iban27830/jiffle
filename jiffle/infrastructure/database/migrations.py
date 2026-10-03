@@ -714,6 +714,46 @@ def migration_31(connection: sqlite3.Connection) -> None:
     )
 
 
+def migration_32(connection: sqlite3.Connection) -> None:
+    """Store video/animation trim review state and derived fragments.
+
+    A fragment is a first-class media item cut from another clip; it keeps a
+    link to the clip it came from (``derived_from_media_id``) plus the segment
+    bounds so the editor can reopen and redo it. ``is_animated`` caches the
+    once-per-file animation probe so the review scan never reopens images, and
+    ``trim_review_status`` keeps imported videos/animations in a confirmation
+    queue until the user approves them or splits them into fragments.
+    """
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(media_items)")}
+    additions = (
+        ("derived_from_media_id", "INTEGER REFERENCES media_items(id) ON DELETE SET NULL"),
+        ("trim_start_ms", "INTEGER"),
+        ("trim_end_ms", "INTEGER"),
+        ("trim_index", "INTEGER"),
+        ("is_animated", "INTEGER"),
+        ("trim_review_status", "TEXT"),
+    )
+    for name, definition in additions:
+        if name not in columns:
+            connection.execute(f"ALTER TABLE media_items ADD COLUMN {name} {definition}")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS media_items_derived_idx "
+        "ON media_items(derived_from_media_id)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS media_items_trim_review_idx "
+        "ON media_items(trim_review_status)"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS trim_scan_jobs ("
+        "job_id INTEGER PRIMARY KEY REFERENCES background_jobs(id) ON DELETE CASCADE, "
+        "cancel_requested INTEGER NOT NULL DEFAULT 0, "
+        "scanned_count INTEGER NOT NULL DEFAULT 0, "
+        "candidate_count INTEGER NOT NULL DEFAULT 0, "
+        "parameters_json TEXT NOT NULL DEFAULT '{}')"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -746,6 +786,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (29, migration_29),
     (30, migration_30),
     (31, migration_31),
+    (32, migration_32),
 )
 
 

@@ -14,6 +14,8 @@ from jiffle.features.settings_api.routes import settings_blueprint
 from jiffle.features.tag_management.routes import tag_management_blueprint
 from jiffle.features.crop_editor.routes import crop_blueprint, resume_crop_scans
 from jiffle.features.background_editor.routes import background_blueprint, resume_background_scans
+from jiffle.features.trim_editor.routes import trim_blueprint
+from jiffle.features.trim_editor.workflow import resume_review_scans
 from jiffle.infrastructure.database.connection import close_database
 from jiffle.infrastructure.database.migrations import migrate_database
 
@@ -44,6 +46,7 @@ def create_app(
     app.register_blueprint(tag_management_blueprint)
     app.register_blueprint(crop_blueprint)
     app.register_blueprint(background_blueprint)
+    app.register_blueprint(trim_blueprint)
     register_error_handlers(app)
 
     @app.get("/")
@@ -57,6 +60,7 @@ def create_app(
         if not resolved_settings.run_jobs_inline:
             resume_crop_scans(resolved_settings.database_path, resolved_settings)
             resume_background_scans(resolved_settings.database_path, resolved_settings)
+            resume_review_scans(resolved_settings.database_path, resolved_settings)
 
     return app
 

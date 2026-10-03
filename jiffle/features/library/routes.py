@@ -192,6 +192,13 @@ def _serialize(item: MediaItem) -> dict[str, object]:
         "relatives": list(item.relatives),
         "family_members": sorted((item.id, *item.relatives)) if item.family_id else [],
         "has_family": bool(item.family_id),
+        "derived_from_media_id": item.derived_from_media_id,
+        "trim_start_ms": item.trim_start_ms,
+        "trim_end_ms": item.trim_end_ms,
+        "trim_index": item.trim_index,
+        "fragment_count": item.fragment_count,
+        "auto_collection_excluded": item.auto_collection_excluded,
+        "is_animated": item.is_animated,
         "content_url": f"/api/v1/media/{item.id}/content?revision={item.active_revision_id or 0}",
         "thumbnail_url": f"/api/v1/media/{item.id}/thumbnail?revision={item.active_revision_id or 0}",
     }

@@ -5,7 +5,11 @@ import webbrowser
 from flask import Blueprint, current_app, jsonify, request
 import requests
 
-from jiffle.configuration.settings import Settings, persist_settings
+from jiffle.configuration.settings import (
+    Settings,
+    collection_export_mode_value,
+    persist_settings,
+)
 from jiffle.configuration.credentials import absorb_pasted_credentials
 from jiffle.features.background_editor.runtime import (
     clear_runtime_cache,
@@ -38,8 +42,10 @@ def update_settings():
         return _error("settings.invalid_request", "A JSON object is required.", 400)
     allowed = {
         "media_path", "thumbnail_path", "import_staging_path", "export_path",
+        "collection_export_mode",
         "max_items_per_author", "max_image_export_size_bytes",
         "max_video_export_size_bytes", "export_format_rules", "block_previously_deleted",
+        "trim_review_enabled",
         "crop_vision_url", "crop_vision_key", "crop_vision_model", "crop_vision_format",
         "crop_min_area_percent", "crop_padding_percent", "crop_background_tolerance", "crop_selected_analysis",
         "background_model", "background_device",
@@ -59,6 +65,19 @@ def update_settings():
     except OSError:
         return _error("settings.write_failed", "Settings could not be saved.", 500)
     current_app.config["JIFFLE_SETTINGS"] = updated
+    if updated.trim_review_enabled and not current.trim_review_enabled:
+        # Turning the review gate on queues every existing video/animation, so
+        # the first pass runs as a background job instead of blocking the save.
+        try:
+            from jiffle.features.trim_editor.workflow import (
+                create_review_scan_job,
+                start_review_scan,
+            )
+
+            scan_job_id = create_review_scan_job(get_database(), updated)
+            start_review_scan(updated, scan_job_id)
+        except Exception:
+            current_app.logger.exception("Could not start the trim review scan")
     if (
         updated.background_model != current.background_model
         or updated.background_device != current.background_device
@@ -286,6 +305,14 @@ def _validated_update(settings, payload):
         values["block_previously_deleted"], bool
     ):
         raise ValueError("block_previously_deleted must be boolean.")
+    if "trim_review_enabled" in values and not isinstance(
+        values["trim_review_enabled"], bool
+    ):
+        raise ValueError("trim_review_enabled must be boolean.")
+    if "collection_export_mode" in values:
+        values["collection_export_mode"] = collection_export_mode_value(
+            values["collection_export_mode"]
+        )
     if "crop_vision_format" in values and values["crop_vision_format"] not in {"openai", "gemini"}:
         raise ValueError("crop_vision_format must be openai or gemini.")
     if "crop_selected_analysis" in values and values["crop_selected_analysis"] not in {"local", "vision"}:
@@ -331,11 +358,13 @@ def _public_settings(settings):
         "thumbnail_path": str(settings.thumbnail_path),
         "import_staging_path": str(settings.resolved_import_staging_path),
         "export_path": str(settings.resolved_export_path),
+        "collection_export_mode": settings.collection_export_mode,
         "max_items_per_author": settings.max_items_per_author,
         "max_image_export_size_bytes": settings.max_image_export_size_bytes,
         "max_video_export_size_bytes": settings.max_video_export_size_bytes,
         "export_format_rules": dict(settings.export_format_rules),
         "block_previously_deleted": settings.block_previously_deleted,
+        "trim_review_enabled": settings.trim_review_enabled,
         "crop_vision_url": settings.crop_vision_url,
         "crop_vision_model": settings.crop_vision_model,
         "crop_vision_format": settings.crop_vision_format,

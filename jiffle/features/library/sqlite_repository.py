@@ -69,6 +69,22 @@ class SqliteLibraryRepository:
         parent_media_id = None
         parent_url = None
         family_id = row["family_id"] if "family_id" in keys else None
+        derived_from_media_id = (
+            row["derived_from_media_id"] if "derived_from_media_id" in keys else None
+        )
+        trim_start_ms = row["trim_start_ms"] if "trim_start_ms" in keys else None
+        trim_end_ms = row["trim_end_ms"] if "trim_end_ms" in keys else None
+        trim_index = row["trim_index"] if "trim_index" in keys else None
+        is_animated = row["is_animated"] if "is_animated" in keys else None
+        fragment_count = 0
+        if "derived_from_media_id" in keys:
+            fragment_count = int(
+                self.connection.execute(
+                    "SELECT COUNT(*) FROM media_items "
+                    "WHERE derived_from_media_id=? AND deleted_at IS NULL",
+                    (row["id"],),
+                ).fetchone()[0]
+            )
         relatives: tuple[int, ...] = ()
         if source_row is not None:
             remote_id = source_row["remote_id"] if "remote_id" in source_row.keys() else None
@@ -121,6 +137,15 @@ class SqliteLibraryRepository:
             parent_url=parent_url,
             family_id=int(family_id) if family_id is not None else None,
             relatives=relatives,
+            derived_from_media_id=(
+                int(derived_from_media_id) if derived_from_media_id is not None else None
+            ),
+            trim_start_ms=int(trim_start_ms) if trim_start_ms is not None else None,
+            trim_end_ms=int(trim_end_ms) if trim_end_ms is not None else None,
+            trim_index=int(trim_index) if trim_index is not None else None,
+            fragment_count=fragment_count,
+            auto_collection_excluded=fragment_count > 0,
+            is_animated=bool(is_animated) if is_animated is not None else None,
         )
 
 

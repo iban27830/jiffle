@@ -7,6 +7,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import zipfile
 from uuid import uuid4
 
 from PIL import Image, ImageSequence
@@ -224,6 +225,105 @@ def create_export_job(connection: sqlite3.Connection, collection_id: int) -> int
     return job_id
 
 
+def export_staging_directory(settings: Settings, label: str) -> Path:
+    """Create a unique staging directory used while a collection is exported."""
+    root = settings.resolved_export_path.parent / "export-staging"
+    root.mkdir(parents=True, exist_ok=True)
+    destination = root / f"{label}-{uuid4().hex}.part"
+    destination.mkdir()
+    return destination
+
+
+def export_collection_directory(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    collection_id: int,
+    destination: Path,
+    progress=None,
+) -> tuple[object, ExportPreview, list[dict]]:
+    """Export a collection into ``destination`` with conversions and size limits.
+
+    Used both by the background folder export and by the browser archive
+    download, so both deliveries produce exactly the same files.
+    """
+    preview = preview_export(connection, settings, collection_id)
+    if preview.violations:
+        raise CollectionFailure("exports.constraints_failed", ", ".join(preview.violations))
+    collection = _collection(connection, collection_id)
+    rows = _collection_media(connection, collection_id)
+    exported_items = []
+    for index, row in enumerate(rows, start=1):
+        source = _media_path(settings.media_path, row["file_path"])
+        if source is None or not source.is_file():
+            raise CollectionFailure(
+                "exports.media_missing", f"Media item {row['id']} is unavailable."
+            )
+        original_size = source.stat().st_size
+        exported = _export_media(source, row["media_type"], settings, destination, index)
+        exported_items.append({
+            "position": row["position"], "media_item_id": row["id"],
+            "source_url": row["source_url"], "filename": exported.name,
+            "format": exported.suffix.lower().lstrip("."),
+            "file_size": exported.stat().st_size,
+            "converted": (
+                exported.suffix.lower() != source.suffix.lower()
+                or exported.stat().st_size != original_size
+            ),
+        })
+        if progress is not None:
+            progress(10 + int(80 * index / len(rows)))
+    manifest = {
+        "collection_id": collection_id,
+        "name": collection["name"],
+        "items": exported_items,
+    }
+    (destination / "manifest.json").write_text(
+        json.dumps(manifest, indent=2), encoding="utf-8"
+    )
+    return collection, preview, exported_items
+
+
+_UNSAFE_DOWNLOAD_CHARACTERS = frozenset('/\\:*?"<>|')
+
+
+def export_archive_prefix(name: object) -> str:
+    """Return a download-safe name that keeps the collection's own spelling."""
+    cleaned = "".join(
+        character for character in str(name or "")
+        if character not in _UNSAFE_DOWNLOAD_CHARACTERS and ord(character) >= 32
+    ).strip().strip(".")
+    return cleaned[:80] or "collection"
+
+
+def export_archive_filename(name: object) -> str:
+    return f"{export_archive_prefix(name)}.zip"
+
+
+def iter_export_archive(destination: Path, archive_prefix: str):
+    """Yield a ZIP archive of ``destination`` in chunks.
+
+    The archive is streamed from a temporary file so memory use stays bounded,
+    and both the archive and the staging directory are removed when the
+    response finishes (or the client disconnects).
+    """
+    archive_path = destination.with_suffix(".zip")
+    try:
+        with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+            for path in sorted(destination.rglob("*")):
+                if path.is_file():
+                    entry = f"{archive_prefix}/{path.relative_to(destination).as_posix()}"
+                    archive.write(path, entry)
+        with archive_path.open("rb") as file:
+            while True:
+                chunk = file.read(256 * 1024)
+                if not chunk:
+                    break
+                yield chunk
+    finally:
+        archive_path.unlink(missing_ok=True)
+        shutil.rmtree(destination, ignore_errors=True)
+
+
 def run_export_job(
     database_path: Path, settings: Settings, job_id: int, collection_id: int
 ) -> None:
@@ -238,48 +338,13 @@ def run_export_job(
             "UPDATE export_runs SET status='running' WHERE job_id=?", (job_id,)
         )
         connection.commit()
-        preview = preview_export(connection, settings, collection_id)
-        if preview.violations:
-            raise CollectionFailure(
-                "exports.constraints_failed", ", ".join(preview.violations)
-            )
-        collection = _collection(connection, collection_id)
-        rows = _collection_media(connection, collection_id)
         export_root = settings.resolved_export_path
-        staging_root = export_root.parent / "export-staging"
-        staging_root.mkdir(parents=True, exist_ok=True)
-        staging = staging_root / f"run-{job_id}.part"
-        staging.mkdir()
-        exported_items = []
-        for index, row in enumerate(rows, start=1):
-            source = _media_path(settings.media_path, row["file_path"])
-            if source is None or not source.is_file():
-                raise CollectionFailure(
-                    "exports.media_missing", f"Media item {row['id']} is unavailable."
-                )
-            original_size = source.stat().st_size
-            exported = _export_media(source, row["media_type"], settings, staging, index)
-            exported_items.append({
-                "position": row["position"], "media_item_id": row["id"],
-                "source_url": row["source_url"], "filename": exported.name,
-                "format": exported.suffix.lower().lstrip("."),
-                "file_size": exported.stat().st_size,
-                "converted": (
-                    exported.suffix.lower() != source.suffix.lower()
-                    or exported.stat().st_size != original_size
-                ),
-            })
-            progress = 10 + int(80 * index / len(rows))
-            connection.execute(
-                "UPDATE background_jobs SET progress=? WHERE id=?", (progress, job_id)
-            )
-        manifest = {
-            "collection_id": collection_id,
-            "name": collection["name"],
-            "items": exported_items,
-        }
-        (staging / "manifest.json").write_text(
-            json.dumps(manifest, indent=2), encoding="utf-8"
+        staging = export_staging_directory(settings, f"run-{job_id}")
+        collection, preview, exported_items = export_collection_directory(
+            connection, settings, collection_id, staging,
+            progress=lambda value: connection.execute(
+                "UPDATE background_jobs SET progress=? WHERE id=?", (value, job_id)
+            ),
         )
         export_root.mkdir(parents=True, exist_ok=True)
         destination = export_root / f"{collection_id}-{_safe_name(collection['name'])}-run-{job_id}"
@@ -339,6 +404,12 @@ def _matching_candidates(connection, included_tags, excluded_tags, excluded_ids)
 
     clauses = ["item.deleted_at IS NULL"]
     parameters: list[object] = []
+    # A clip that was split into fragments keeps its place in the library but
+    # is never picked automatically: the fragments stand in for it.
+    clauses.append(
+        "NOT EXISTS (SELECT 1 FROM media_items fragment "
+        "WHERE fragment.derived_from_media_id=item.id AND fragment.deleted_at IS NULL)"
+    )
     for tag in included_tags:
         values = expand_tag_aliases(tag, aliases)
         clauses.append("EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_item_id=item.id AND LOWER(mt.tag) IN (" + ",".join("?" for _ in values) + "))")

@@ -218,6 +218,21 @@ For an e621 or e926 post set, Jiffle first checks the complete set (using the sa
 - When viewing a collection, select the copy button beside its name to copy one source link per item to the clipboard. Links follow the same order as the gallery; when a different provider supplied the stored file, its **File source** link is used.
 - Jiggie-compatible export conversions are configured under **Settings → Import and limits**. New installations convert GIF and WebM files to MP4 by default. A converted video is kept close to the source file size: Jiffle allows only a small encoding margin, never exceeds the configured video limit, and reports an export error if the target cannot be reached without changing the frame dimensions. Add, change, or remove conversion rows as needed; originals in the library are never changed.
 
+### Trim videos and animations
+
+Long clips and animations can be split into shorter fragments without changing
+the original. A fragment is a separate library item: it keeps the source link,
+author, and tags of the clip it came from, appears as a relative in the same
+family, and is exported as a standalone file.
+
+- Select a video or an animation in **Library** and choose **Open in Editor**, or open **Editor** and use **Videos and animations to review**. The full-size trim editor is always available from **Library**, whether or not the review queue is enabled.
+- In the trim editor, set the start and end of a range, select **Add segment**, and repeat for every part you need. **Preview range** plays only the marked range. Segments must not overlap and must each last at least 0.2 s.
+- Select **Save fragments**. Jiffle creates one MP4 file per segment under the media folder and links it to the original; the original keeps its place in the library.
+- Open a fragment to see **Part N of Media #X** and return to its source. **Open in Editor** on a fragment reopens the same trim editor with its existing segments, where you can add, change, or remove parts. Existing fragments keep their identity, so collections that already contain them stay valid.
+- When a clip has fragments it is marked in the library and left out of automatic collection assembly by tags; the fragments are picked instead. The original can still be added to a collection manually.
+- **Settings → Import and limits → Review videos and animations for trimming** (off by default) sends every imported video and animated image, including the ones already in the library, to the Editor review queue. Confirm a clip with **Looks good** or split it with **Trim**.
+- Trimming re-encodes each segment, so it needs FFmpeg (already required for collection exports) and takes a little time on large files.
+
 ### Import and review
 
 The attempt appears in Import history immediately with an **Importing** status while

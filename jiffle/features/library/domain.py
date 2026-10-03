@@ -31,6 +31,13 @@ class MediaItem:
     family_id: int | None = None
     relatives: tuple[int, ...] = ()
     file_source_url: str | None = None
+    derived_from_media_id: int | None = None
+    trim_start_ms: int | None = None
+    trim_end_ms: int | None = None
+    trim_index: int | None = None
+    fragment_count: int = 0
+    auto_collection_excluded: bool = False
+    is_animated: bool | None = None
 
     @property
     def characters(self) -> tuple[str, ...]:

@@ -1,14 +1,17 @@
+import shutil
 from threading import Thread
 
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, Response, current_app, jsonify, request
 from sqlite3 import IntegrityError
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from jiffle.configuration.settings import Settings
 from jiffle.features.collections.workflow import (
     CollectionFailure, build_collection_preview, build_tag_alias_map, create_export_job,
-    expand_tag_aliases, normalize_tags, parse_collection_query, preview_export,
-    replace_collection_items, run_export_job,
+    expand_tag_aliases, export_archive_filename, export_archive_prefix,
+    export_collection_directory, export_staging_directory, iter_export_archive,
+    normalize_tags, parse_collection_query, preview_export, replace_collection_items,
+    run_export_job,
 )
 from jiffle.infrastructure.database.connection import get_database
 
@@ -322,6 +325,40 @@ def start_export(collection_id: int):
     return jsonify({"job_id": job_id, "status_url": f"/api/v1/jobs/{job_id}"}), 202
 
 
+@collections_blueprint.get("/api/v1/collections/<int:collection_id>/export-archive")
+def download_export_archive(collection_id: int):
+    """Stream the exported collection to the browser as a ZIP archive.
+
+    The selection, conversions, and size limits are identical to the folder
+    export; only the delivery changes, so a collection can be pulled from the
+    NAS to any device without reaching into the container filesystem.
+    """
+    settings: Settings = current_app.config["JIFFLE_SETTINGS"]
+    connection = get_database()
+    staging = None
+    try:
+        staging = export_staging_directory(settings, f"download-{collection_id}")
+        collection, _preview, _items = export_collection_directory(
+            connection, settings, collection_id, staging
+        )
+    except CollectionFailure as error:
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
+        return _collection_error(error)
+    except Exception:
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
+        raise
+    filename = export_archive_filename(collection["name"])
+    response = Response(
+        iter_export_archive(staging, export_archive_prefix(collection["name"])),
+        mimetype="application/zip",
+    )
+    response.headers["Content-Disposition"] = _archive_disposition(filename)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @collections_blueprint.get("/api/v1/export-runs")
 def list_export_runs():
     rows = get_database().execute(
@@ -462,3 +499,12 @@ def _save_preset(preset_id):
 
 def _error(code, message, status):
     return jsonify({"error": {"code": code, "message": message, "details": {}}}), status
+
+
+def _archive_disposition(filename: str) -> str:
+    """Build a Content-Disposition header that keeps non-ASCII names intact."""
+    fallback = "".join(
+        character if character.isascii() and character not in '"\\' else "_"
+        for character in filename
+    ) or "collection.zip"
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename, safe='')}"

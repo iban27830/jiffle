@@ -502,3 +502,34 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
   .background-save-note, .background-compose-controls .btn, .background-compose-controls #previewBackgroundComposition, .background-compose-controls #applyBackground { grid-column: 1; grid-row: auto; }
   .background-compose-controls .btn { width: 100%; }
 }
+
+/* Video and animation trim review */
+.fragment-marker { position: absolute; top: 7px; left: 7px; width: 28px; height: 28px; display: grid; place-items: center; border-radius: 5px; color: #6b2f8f; background: rgba(243,231,251,.96); box-shadow: 0 1px 4px rgba(18,30,36,.24); }
+.fragment-marker [data-lucide] { width: 16px; height: 16px; }
+.parent-marker + .family-marker, .family-marker + .fragment-marker, .parent-marker + .fragment-marker { top: 42px; }
+.fragment-count-marker { position: absolute; bottom: 7px; right: 7px; display: inline-flex; align-items: center; gap: 3px; padding: 2px 7px; border-radius: 999px; font-size: 11px; font-weight: 700; color: #0b5f52; background: rgba(223,243,238,.96); box-shadow: 0 1px 4px rgba(18,30,36,.24); }
+.fragment-count-marker [data-lucide] { width: 13px; height: 13px; }
+
+.trim-candidates-section { margin-top: 30px; padding-top: 20px; border-top: 1px solid var(--line); }
+.trim-scan-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 14px; }
+.trim-scan-toolbar .muted { flex: 1 1 260px; color: var(--muted); }
+.trim-candidate .actions { flex-wrap: wrap; }
+
+.trim-editor-page .page-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.trim-layout { display: grid; grid-template-columns: minmax(0,2fr) minmax(0,1fr); gap: 20px; margin: 18px 0; align-items: start; }
+.trim-preview { background: #0f1518; border-radius: 8px; padding: 10px; display: grid; place-items: center; min-height: 220px; }
+.trim-preview video, .trim-preview img { max-width: 100%; max-height: 62vh; border-radius: 6px; }
+.trim-controls { display: grid; gap: 8px; }
+.trim-controls label { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; }
+.trim-controls input[type="range"] { width: 100%; }
+.trim-controls .control { max-width: 110px; }
+.trim-segments { margin-top: 10px; }
+.trim-segment { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 8px; background: var(--surface); }
+.trim-segment small { display: block; color: var(--muted); }
+.trim-save-actions { display: flex; align-items: center; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
+.trim-save-actions .muted { color: var(--muted); }
+.fragment-notice span, .fragment-field span { color: var(--muted); }
+
+@media (max-width: 900px) {
+  .trim-layout { grid-template-columns: 1fr; }
+}

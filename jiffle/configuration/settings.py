@@ -14,6 +14,17 @@ from jiffle.features.background_editor.workflow import (
 
 DEFAULT_EXPORT_FORMAT_RULES = (("gif", "mp4"), ("webm", "mp4"))
 
+COLLECTION_EXPORT_MODES = ("download", "folder", "both")
+COLLECTION_EXPORT_MODE_DEFAULT = "download"
+
+
+def collection_export_mode_value(value: object) -> str:
+    """Return the canonical collection export delivery mode."""
+    normalized = str(value if value is not None else "").strip().lower()
+    if normalized not in COLLECTION_EXPORT_MODES:
+        raise ValueError("collection_export_mode must be download, folder, or both.")
+    return normalized
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -23,6 +34,7 @@ class Settings:
     configuration_file_path: Path | None = None
     import_staging_path: Path | None = None
     export_path: Path | None = None
+    collection_export_mode: str = COLLECTION_EXPORT_MODE_DEFAULT
     initialize_database: bool = True
     run_jobs_inline: bool = False
     max_items_per_author: int = 5
@@ -30,6 +42,7 @@ class Settings:
     max_video_export_size_bytes: int = 50 * 1024 * 1024
     export_format_rules: tuple[tuple[str, str], ...] = DEFAULT_EXPORT_FORMAT_RULES
     block_previously_deleted: bool = False
+    trim_review_enabled: bool = False
     crop_vision_url: str | None = None
     crop_vision_key: str | None = None
     crop_vision_model: str | None = None
@@ -82,6 +95,9 @@ class Settings:
             export_path=Path(
                 os.environ.get("JIFFLE_EXPORT_PATH", project_root / "collections")
             ).resolve(),
+            collection_export_mode=collection_export_mode_value(
+                os.environ.get("JIFFLE_COLLECTION_EXPORT_MODE", COLLECTION_EXPORT_MODE_DEFAULT)
+            ),
             crop_vision_url=os.environ.get("JIFFLE_CROP_VISION_URL"),
             crop_vision_key=os.environ.get("JIFFLE_CROP_VISION_KEY"),
             crop_vision_model=os.environ.get("JIFFLE_CROP_VISION_MODEL"),
@@ -102,9 +118,11 @@ class Settings:
             }
             allowed = {
                 "media_path", "thumbnail_path", "import_staging_path", "export_path",
+                "collection_export_mode",
                 "max_items_per_author", "max_image_export_size_bytes",
                 "max_video_export_size_bytes", "export_format_rules",
                 "block_previously_deleted",
+                "trim_review_enabled",
                 "crop_vision_url", "crop_vision_key", "crop_vision_model", "crop_vision_format",
                 "crop_min_area_percent", "crop_padding_percent", "crop_background_tolerance", "crop_selected_analysis",
                 "background_model", "background_device",
@@ -115,6 +133,15 @@ class Settings:
                 "furaffinity_cookie_a", "furaffinity_cookie_b",
             }
             values = {key: value for key, value in payload.items() if key in allowed}
+            if "collection_export_mode" in values:
+                try:
+                    values["collection_export_mode"] = collection_export_mode_value(
+                        values["collection_export_mode"]
+                    )
+                except ValueError:
+                    # An unknown value written by an older build falls back to
+                    # the default instead of blocking startup.
+                    values.pop("collection_export_mode")
             if "background_model" in values:
                 # Accept model ids and older aliases written by previous
                 # versions while keeping the persisted setting canonical.
@@ -149,11 +176,13 @@ def persist_settings(settings: Settings) -> None:
         "thumbnail_path": str(settings.thumbnail_path),
         "import_staging_path": str(settings.resolved_import_staging_path),
         "export_path": str(settings.resolved_export_path),
+        "collection_export_mode": settings.collection_export_mode,
         "max_items_per_author": settings.max_items_per_author,
         "max_image_export_size_bytes": settings.max_image_export_size_bytes,
         "max_video_export_size_bytes": settings.max_video_export_size_bytes,
         "export_format_rules": dict(settings.export_format_rules),
         "block_previously_deleted": settings.block_previously_deleted,
+        "trim_review_enabled": settings.trim_review_enabled,
         "crop_vision_url": settings.crop_vision_url,
         "crop_vision_key": settings.crop_vision_key,
         "crop_vision_model": settings.crop_vision_model,
