@@ -514,6 +514,7 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
 .trim-scan-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 14px; }
 .trim-scan-toolbar .muted { flex: 1 1 260px; color: var(--muted); }
 .trim-candidate .actions { flex-wrap: wrap; }
+.trim-open-source { color: inherit; text-decoration: none; }
 
 .trim-editor-page .page-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .trim-layout { display: grid; grid-template-columns: minmax(0,2fr) minmax(0,1fr); gap: 20px; margin: 18px 0; align-items: start; }

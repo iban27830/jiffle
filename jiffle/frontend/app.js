@@ -993,7 +993,7 @@ async function showEditor() {
       <section class="trim-candidates-section">
         <div class="page-head"><h2>Videos and animations to review</h2><span class="badge">${trimItems.length}</span></div>
         <div class="trim-scan-toolbar"><button id="scanTrims" class="btn primary" ${(trimEnabled||trimItems.length)?'':'hidden'}><i data-lucide="scan-search"></i>Find videos and animations</button><span class="muted">${(trimEnabled||trimItems.length)?'Approve a clip or split it into fragments. Fragments replace it in automatic collections.':'Enable "Review videos and animations for trimming" in Settings to build this queue.'}</span></div>
-        <div class="item-list trim-candidate-list">${trimItems.map(item=>`<article class="queue-item trim-candidate"><img src="${item.thumbnail_url}" alt=""><div><strong>Media #${item.media_id}</strong><small>${esc(item.type==='video'?'Video':'Animation')} ? ${item.width||'?'}?${item.height||'?'} ? ${formatBytes(item.file_size)}</small></div><div class="actions"><button class="icon-btn trim-open-library" data-media-id="${item.media_id}" title="Open in Library"><i data-lucide="images"></i></button><button class="btn trim-approve" data-media-id="${item.media_id}"><i data-lucide="check"></i>Looks good</button><button class="btn primary trim-open" data-media-id="${item.media_id}"><i data-lucide="scissors"></i>Trim</button></div></article>`).join('')||'<div class="empty">Nothing to review</div>'}</div>
+        <div class="item-list trim-candidate-list">${trimItems.map(item=>`<article class="queue-item trim-candidate"><img src="${item.thumbnail_url}" alt=""><div><strong>Media #${item.media_id}</strong><small>${esc(item.type==='video'?'Video':'Animation')} ? ${item.width||'?'}?${item.height||'?'} ? ${formatBytes(item.file_size)}</small></div><div class="actions"><a class="icon-btn trim-open-source" href="${item.content_url}" target="_blank" rel="noopener" title="Open the source file in a new tab" aria-label="Open the source file in a new tab"><i data-lucide="external-link"></i></a><button class="icon-btn trim-open-library" data-media-id="${item.media_id}" title="Open in Library"><i data-lucide="images"></i></button><button class="btn trim-approve" data-media-id="${item.media_id}"><i data-lucide="check"></i>Looks good</button><button class="btn primary trim-open" data-media-id="${item.media_id}"><i data-lucide="scissors"></i>Trim</button></div></article>`).join('')||'<div class="empty">Nothing to review</div>'}</div>
       </section>
     </div>`;
     document.querySelector('#cropStatus').value=status; document.querySelector('#cropStatus').onchange=e=>render(e.target.value);
@@ -1174,12 +1174,17 @@ async function showEditor() {
     const source=state.source; const durationMs=Number(state.duration_ms)||0;
     let segments=(state.segments||[]).map(segment=>({start_ms:Number(segment.start_ms),end_ms:Number(segment.end_ms),media_item_id:segment.media_item_id,index:segment.index}));
     const isVideo=source.media_type==='video';
+    // A pending clip with no fragments can be confirmed as-is from inside the
+    // editor, without going back to the review list to use "Looks good".
+    const canConfirmOriginal=!state.derived_from_media_id&&state.review_status==='pending'&&!(state.segments||[]).length;
     const build=()=>{
       const list=segments.map((segment,index)=>`<article class="trim-segment"><span><strong>${esc(describeSegment(segment,index+1))}</strong><small>${formatDuration(segmentDurationMs(segment))}</small></span><div class="actions"><button type="button" class="btn trim-edit" data-index="${index}"><i data-lucide="pencil"></i>Edit</button><button type="button" class="icon-btn danger trim-remove" data-index="${index}" title="Remove"><i data-lucide="trash-2"></i></button></div></article>`).join('');
       document.querySelector('#trimSegmentList').innerHTML=list||'<div class="empty">No segments yet. Set a range and add it.</div>';
       const saveButton=document.querySelector('#saveTrim');
       saveButton.innerHTML=`<i data-lucide="scissors"></i>Save ${segments.length} fragment(s)`;
       saveButton.disabled=!segments.length;
+      const keepButton=document.querySelector('#keepTrimOriginal');
+      if(keepButton)keepButton.hidden=!canConfirmOriginal||segments.length>0;
       document.querySelectorAll('.trim-edit').forEach(n=>n.onclick=()=>{const segment=segments[Number(n.dataset.index)];document.querySelector('#trimStartSeconds').value=msToSeconds(segment.start_ms).toFixed(2);document.querySelector('#trimEndSeconds').value=msToSeconds(segment.end_ms).toFixed(2);segments.splice(Number(n.dataset.index),1);build()});
       document.querySelectorAll('.trim-remove').forEach(n=>n.onclick=()=>{segments.splice(Number(n.dataset.index),1);build()});
       icons();
@@ -1198,7 +1203,7 @@ async function showEditor() {
         </div>
       </div>
       <section class="trim-segments"><div class="page-head"><h3>Fragments</h3><span class="badge">${segments.length}</span></div><div id="trimSegmentList" class="item-list"></div></section>
-      <div class="actions trim-save-actions"><button class="btn primary" id="saveTrim"><i data-lucide="scissors"></i>Save fragments</button><span class="muted">Existing fragments are updated in place; removed ones are deleted.</span></div>
+      <div class="actions trim-save-actions"><button class="btn primary" id="saveTrim"><i data-lucide="scissors"></i>Save fragments</button><button class="btn" id="keepTrimOriginal" hidden><i data-lucide="check"></i>Keep original, no trim</button><span class="muted">Existing fragments are updated in place; removed ones are deleted.</span></div>
     </div>`;
     const startRange=document.querySelector('#trimStartRange'),endRange=document.querySelector('#trimEndRange');
     const startSeconds=document.querySelector('#trimStartSeconds'),endSeconds=document.querySelector('#trimEndSeconds');
@@ -1211,6 +1216,8 @@ async function showEditor() {
     document.querySelector('#previewTrim').onclick=()=>{if(!isVideo||!previewSource)return;const start=secondsToMs(startSeconds.value)/1000,end=secondsToMs(endSeconds.value)/1000;previewSource.currentTime=start;previewSource.play();const handler=()=>{if(previewSource.currentTime>=end){previewSource.pause();previewSource.removeEventListener('timeupdate',handler)}};previewSource.addEventListener('timeupdate',handler)};
     document.querySelector('#addTrimSegment').onclick=()=>{const start=secondsToMs(startSeconds.value),end=secondsToMs(endSeconds.value);const check=validateSegment(segments,start,end,durationMs);if(!check.ok){toast(check.message,true);return}segments=segmentsPayload([...segments,{start_ms:start,end_ms:end}]).map((segment,index)=>({...segment,index:index+1}));build()};
     document.querySelector('#saveTrim').onclick=async()=>{if(!segments.length){toast('Add at least one segment',true);return}try{const job=await runJob(()=>api(`/api/v1/media/${source.id}/trim-jobs`,{method:'POST',body:JSON.stringify({segments:segmentsPayload(segments)})}));const result=job.result||{};toast(`${result.segment_count||segments.length} fragment(s) saved`);await openTrim(source.id)}catch(error){toast(error.message,true)}};
+    const keepOriginal=document.querySelector('#keepTrimOriginal');
+    if(keepOriginal)keepOriginal.onclick=async()=>{keepOriginal.disabled=true;try{await api(`/api/v1/trim-reviews/${source.id}/approve`,{method:'POST'});toast('Original kept without trimming');saveViewState('editor',{targetMediaId:null,trimTarget:false,trimMediaId:null});await render('pending')}catch(error){toast(error.message,true);keepOriginal.disabled=false}};
     build();icons();
   };
   const targetMediaId=Number(editorState.targetMediaId || 0);

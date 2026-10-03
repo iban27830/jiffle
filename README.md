@@ -227,10 +227,11 @@ family, and is exported as a standalone file.
 
 - Select a video or an animation in **Library** and choose **Open in Editor**, or open **Editor** and use **Videos and animations to review**. The full-size trim editor is always available from **Library**, whether or not the review queue is enabled.
 - In the trim editor, set the start and end of a range, select **Add segment**, and repeat for every part you need. **Preview range** plays only the marked range. Segments must not overlap and must each last at least 0.2 s.
+- If the clip is still waiting for review and has no fragments yet, select **Keep original, no trim** to confirm it as-is from inside the editor. The clip leaves the review queue without creating any fragments.
 - Select **Save fragments**. Jiffle creates one MP4 file per segment under the media folder and links it to the original; the original keeps its place in the library.
 - Open a fragment to see **Part N of Media #X** and return to its source. **Open in Editor** on a fragment reopens the same trim editor with its existing segments, where you can add, change, or remove parts. Existing fragments keep their identity, so collections that already contain them stay valid.
 - When a clip has fragments it is marked in the library and left out of automatic collection assembly by tags; the fragments are picked instead. The original can still be added to a collection manually.
-- **Settings → Import and limits → Review videos and animations for trimming** (off by default) sends every imported video and animated image, including the ones already in the library, to the Editor review queue. Confirm a clip with **Looks good** or split it with **Trim**.
+- **Settings → Import and limits → Review videos and animations for trimming** (off by default) sends every imported video and animated image, including the ones already in the library, to the Editor review queue. Confirm a clip with **Looks good** or split it with **Trim**. The new-tab button on a candidate opens the source media file by itself for a closer look before you decide.
 - Trimming re-encodes each segment, so it needs FFmpeg (already required for collection exports) and takes a little time on large files.
 
 ### Import and review
