@@ -194,6 +194,11 @@ class TbibSourceProvider:
                             continue
                         break
                     response.raise_for_status()
+                    # A DAPI query with no rows (for example an unknown
+                    # ``md5:`` tag) comes back as HTTP 200 with an empty body.
+                    # Treat that as "no results" instead of a broken payload.
+                    if not str(getattr(response, "text", "") or "").strip():
+                        return []
                     return response.json()
                 except SourceProviderFailure:
                     raise
