@@ -4,7 +4,7 @@ import {parseLibrarySearch, withAuthorFilter, toggleSearchTerm} from './library_
 import {droppedUrl} from './import_drop.js';
 import {drawCompositionPreview, drawForegroundPreview} from './background_preview.js';
 import {formatDateTime, formatDuration} from './time.js';
-import {segmentsPayload, msToSeconds, secondsToMs, validateSegment, describeSegment, segmentDurationMs} from './trim.js';
+import {segmentsPayload, validateSegment, describeSegment, segmentDurationMs, parseTimecode, formatTimecode} from './trim.js';
 
 const workspace = document.querySelector('#workspace');
 const title = document.querySelector('#viewTitle');
@@ -1171,54 +1171,113 @@ async function showEditor() {
   };
   const openTrim = async mediaId => {
     const state=await api(`/api/v1/media/${mediaId}/trim-state`);
-    const source=state.source; const durationMs=Number(state.duration_ms)||0;
+    const source=state.source; let durationMs=Number(state.duration_ms)||0;
     let segments=(state.segments||[]).map(segment=>({start_ms:Number(segment.start_ms),end_ms:Number(segment.end_ms),media_item_id:segment.media_item_id,index:segment.index}));
     const isVideo=source.media_type==='video';
     // A pending clip with no fragments can be confirmed as-is from inside the
     // editor, without going back to the review list to use "Looks good".
     const canConfirmOriginal=!state.derived_from_media_id&&state.review_status==='pending'&&!(state.segments||[]).length;
+    const MIN_RANGE_MS=200;
+    let pendingStartMs=0,pendingEndMs=Math.max(0,durationMs),rangeTouched=false;
+    workspace.innerHTML=`<div class="page editor-page trim-editor-page">
+      <div class="page-head"><button class="btn" id="backEditor"><i data-lucide="chevron-left"></i>Editor</button><button class="icon-btn" id="trimOpenLibrary" title="Open in Library"><i data-lucide="images"></i></button><h2>Trim ${isVideo?'video':'animation'}</h2><span class="badge">Media #${source.id}</span>${state.derived_from_media_id?`<span class="badge">Part ${state.trim_index||'?'}</span>`:''}</div>
+      <div class="trim-layout">
+        <div class="trim-stage">
+          <div class="trim-preview">${isVideo?`<video id="trimSource" src="${source.content_url}" controls preload="metadata" playsinline></video>`:`<img id="trimSource" src="${source.content_url}" alt="">`}</div>
+          ${isVideo?`<div class="trim-timeline" id="trimTimeline"><div class="trim-ruler" id="trimRuler"></div><div class="trim-track" id="trimTrack"><div class="trim-band" id="trimBand"></div><div class="trim-segments-lane" id="trimSegmentsLane"></div><div class="trim-handle trim-handle-start" id="trimHandleStart" role="slider" tabindex="0" aria-label="Range start" aria-valuemin="0"></div><div class="trim-handle trim-handle-end" id="trimHandleEnd" role="slider" tabindex="0" aria-label="Range end" aria-valuemin="0"></div><div class="trim-playhead" id="trimPlayhead"></div></div></div>`:''}
+        </div>
+        <div class="trim-controls">
+          <p class="muted">${isVideo?'Drag the markers or park the player and use the buttons to mark a range, add it to the list, then repeat for every fragment. The original file stays in the library.':'Mark a range, add it to the list, then repeat for every fragment. The original file stays in the library.'}</p>
+          <label for="trimStartTime">Start<input id="trimStartTime" class="control" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" value="0:00.0"></label>
+          <label for="trimEndTime">End<input id="trimEndTime" class="control" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" value="0:00.0"></label>
+          <p class="muted trim-time-hint">Time format: mm:ss.d or seconds.</p>
+          <div class="actions trim-range-actions"><button type="button" class="btn" id="trimSetStart" ${isVideo?'':'disabled'}><i data-lucide="log-in"></i>Set start here</button><button type="button" class="btn" id="trimSetEnd" ${isVideo?'':'disabled'}><i data-lucide="log-out"></i>Set end here</button><button type="button" class="btn" id="trimJumpEnd" ${isVideo?'':'disabled'}><i data-lucide="skip-forward"></i>Jump to end</button></div>
+          <div class="actions"><button type="button" class="btn" id="previewTrim" ${isVideo?'':'disabled'}><i data-lucide="play"></i>Preview range</button><button type="button" class="btn primary" id="addTrimSegment"><i data-lucide="plus"></i>Add segment</button></div>
+        </div>
+      </div>
+      <section class="trim-segments"><div class="page-head"><h3>Fragments</h3><span class="badge" id="trimSegmentCount">0</span></div><div id="trimSegmentList" class="item-list"></div></section>
+      <div class="actions trim-save-actions"><button class="btn primary" id="saveTrim"><i data-lucide="scissors"></i>Save fragments</button><button class="btn" id="keepTrimOriginal" hidden><i data-lucide="check"></i>Keep original, no trim</button><span class="muted">Existing fragments are updated in place; removed ones are deleted.</span></div>
+    </div>`;
+    const startTime=document.querySelector('#trimStartTime'),endTime=document.querySelector('#trimEndTime');
+    const video=isVideo?document.querySelector('#trimSource'):null;
+    const timeline=document.querySelector('#trimTimeline'),track=document.querySelector('#trimTrack');
+    const band=document.querySelector('#trimBand'),handleStart=document.querySelector('#trimHandleStart'),handleEnd=document.querySelector('#trimHandleEnd');
+    const playhead=document.querySelector('#trimPlayhead'),segmentsLane=document.querySelector('#trimSegmentsLane'),ruler=document.querySelector('#trimRuler');
+    const maxMs=()=>durationMs||(video&&Number.isFinite(video.duration)?Math.round(video.duration*1000):0);
+    const clampMs=value=>{const top=maxMs();const number=Math.max(0,Math.round(Number(value)||0));return top?Math.min(top,number):number;};
+    const percent=value=>{const top=maxMs();return top?Math.max(0,Math.min(100,value/top*100)):0;};
+    const syncRangeUI=()=>{
+      startTime.value=formatTimecode(pendingStartMs);endTime.value=formatTimecode(pendingEndMs);
+      if(!timeline)return;
+      const startPct=percent(pendingStartMs),endPct=percent(pendingEndMs);
+      band.style.left=`${startPct}%`;band.style.width=`${Math.max(0,endPct-startPct)}%`;
+      handleStart.style.left=`${startPct}%`;handleEnd.style.left=`${endPct}%`;
+      handleStart.setAttribute('aria-valuemax',String(Math.max(0,pendingEndMs-MIN_RANGE_MS)));handleStart.setAttribute('aria-valuenow',String(pendingStartMs));handleStart.setAttribute('aria-valuetext',formatTimecode(pendingStartMs));
+      handleEnd.setAttribute('aria-valuemin',String(pendingStartMs+MIN_RANGE_MS));handleEnd.setAttribute('aria-valuenow',String(pendingEndMs));handleEnd.setAttribute('aria-valuetext',formatTimecode(pendingEndMs));
+      timeline.classList.toggle('disabled',!maxMs());
+    };
+    const renderPlayhead=()=>{if(playhead&&video)playhead.style.left=`${percent(video.currentTime*1000)}%`;};
+    const seekTo=value=>{if(!video)return;const top=maxMs();const seconds=Math.max(0,top?Math.min(top,value):value)/1000;try{video.currentTime=seconds}catch{}};
+    const setStart=value=>{rangeTouched=true;pendingStartMs=Math.max(0,Math.min(clampMs(value),pendingEndMs-MIN_RANGE_MS));syncRangeUI();};
+    const setEnd=value=>{rangeTouched=true;const top=maxMs();pendingEndMs=clampMs(Math.max(value,pendingStartMs+MIN_RANGE_MS));if(top&&pendingEndMs>top)pendingEndMs=top;if(pendingEndMs<pendingStartMs+MIN_RANGE_MS)pendingEndMs=pendingStartMs+MIN_RANGE_MS;syncRangeUI();};
+    const tickStepMs=()=>{const top=maxMs();if(top<=30000)return 5000;if(top<=120000)return 10000;if(top<=600000)return 60000;return 300000;};
+    const renderTimeline=()=>{
+      if(!timeline){syncRangeUI();return}
+      const top=maxMs();
+      ruler.innerHTML='';
+      if(top){const step=tickStepMs();for(let ms=0;ms<=top;ms+=step){const tick=document.createElement('span');tick.className='trim-tick';tick.style.left=`${percent(ms)}%`;tick.textContent=formatTimecode(ms).replace(/\.0$/,'');ruler.appendChild(tick)}}
+      segmentsLane.innerHTML='';
+      segments.forEach((segment,index)=>{const item=document.createElement('button');item.type='button';item.className='trim-segment-band';item.dataset.index=String(index);const left=percent(Number(segment.start_ms)||0),right=percent(Number(segment.end_ms)||0);item.style.left=`${left}%`;item.style.width=`${Math.max(0,right-left)}%`;item.title=describeSegment(segment,index+1);item.onpointerdown=event=>event.stopPropagation();item.onclick=event=>{event.stopPropagation();pendingStartMs=clampMs(segment.start_ms);pendingEndMs=clampMs(segment.end_ms);if(pendingEndMs<pendingStartMs+MIN_RANGE_MS)pendingEndMs=pendingStartMs+MIN_RANGE_MS;rangeTouched=true;syncRangeUI();seekTo(pendingStartMs)};segmentsLane.appendChild(item)});
+      syncRangeUI();
+    };
     const build=()=>{
       const list=segments.map((segment,index)=>`<article class="trim-segment"><span><strong>${esc(describeSegment(segment,index+1))}</strong><small>${formatDuration(segmentDurationMs(segment))}</small></span><div class="actions"><button type="button" class="btn trim-edit" data-index="${index}"><i data-lucide="pencil"></i>Edit</button><button type="button" class="icon-btn danger trim-remove" data-index="${index}" title="Remove"><i data-lucide="trash-2"></i></button></div></article>`).join('');
       document.querySelector('#trimSegmentList').innerHTML=list||'<div class="empty">No segments yet. Set a range and add it.</div>';
+      document.querySelector('#trimSegmentCount').textContent=String(segments.length);
       const saveButton=document.querySelector('#saveTrim');
       saveButton.innerHTML=`<i data-lucide="scissors"></i>Save ${segments.length} fragment(s)`;
       saveButton.disabled=!segments.length;
       const keepButton=document.querySelector('#keepTrimOriginal');
       if(keepButton)keepButton.hidden=!canConfirmOriginal||segments.length>0;
-      document.querySelectorAll('.trim-edit').forEach(n=>n.onclick=()=>{const segment=segments[Number(n.dataset.index)];document.querySelector('#trimStartSeconds').value=msToSeconds(segment.start_ms).toFixed(2);document.querySelector('#trimEndSeconds').value=msToSeconds(segment.end_ms).toFixed(2);segments.splice(Number(n.dataset.index),1);build()});
+      document.querySelectorAll('.trim-edit').forEach(n=>n.onclick=()=>{const segment=segments[Number(n.dataset.index)];segments.splice(Number(n.dataset.index),1);pendingStartMs=clampMs(segment.start_ms);pendingEndMs=clampMs(segment.end_ms);if(pendingEndMs<pendingStartMs+MIN_RANGE_MS)pendingEndMs=pendingStartMs+MIN_RANGE_MS;rangeTouched=true;seekTo(pendingStartMs);build()});
       document.querySelectorAll('.trim-remove').forEach(n=>n.onclick=()=>{segments.splice(Number(n.dataset.index),1);build()});
-      icons();
+      renderTimeline();if(video)renderPlayhead();icons();
     };
-    workspace.innerHTML=`<div class="page editor-page trim-editor-page">
-      <div class="page-head"><button class="btn" id="backEditor"><i data-lucide="chevron-left"></i>Editor</button><button class="icon-btn" id="trimOpenLibrary" title="Open in Library"><i data-lucide="images"></i></button><h2>Trim ${isVideo?'video':'animation'}</h2><span class="badge">Media #${source.id}</span>${state.derived_from_media_id?`<span class="badge">Part ${state.trim_index||'?'}</span>`:''}</div>
-      <div class="trim-layout">
-        <div class="trim-preview">${isVideo?`<video id="trimSource" src="${source.content_url}" controls preload="metadata" playsinline></video>`:`<img id="trimSource" src="${source.content_url}" alt="">`}</div>
-        <div class="trim-controls">
-          <p class="muted">Mark a range, add it to the list, then repeat for every fragment. The original file stays in the library.</p>
-          <label>Start, s<input id="trimStartSeconds" class="control" type="number" min="0" step="0.1" value="0"></label>
-          <input id="trimStartRange" type="range" min="0" max="${msToSeconds(durationMs)}" step="0.1" value="0" ${durationMs?'':'disabled'}>
-          <label>End, s<input id="trimEndSeconds" class="control" type="number" min="0" step="0.1" value="${msToSeconds(durationMs).toFixed(2)}"></label>
-          <input id="trimEndRange" type="range" min="0" max="${msToSeconds(durationMs)}" step="0.1" value="${msToSeconds(durationMs)}" ${durationMs?'':'disabled'}>
-          <div class="actions"><button type="button" class="btn" id="previewTrim" ${isVideo?'':'disabled'}><i data-lucide="play"></i>Preview range</button><button type="button" class="btn primary" id="addTrimSegment"><i data-lucide="plus"></i>Add segment</button></div>
-        </div>
-      </div>
-      <section class="trim-segments"><div class="page-head"><h3>Fragments</h3><span class="badge">${segments.length}</span></div><div id="trimSegmentList" class="item-list"></div></section>
-      <div class="actions trim-save-actions"><button class="btn primary" id="saveTrim"><i data-lucide="scissors"></i>Save fragments</button><button class="btn" id="keepTrimOriginal" hidden><i data-lucide="check"></i>Keep original, no trim</button><span class="muted">Existing fragments are updated in place; removed ones are deleted.</span></div>
-    </div>`;
-    const startRange=document.querySelector('#trimStartRange'),endRange=document.querySelector('#trimEndRange');
-    const startSeconds=document.querySelector('#trimStartSeconds'),endSeconds=document.querySelector('#trimEndSeconds');
-    const syncFromRange=()=>{startSeconds.value=Number(startRange.value).toFixed(2);endSeconds.value=Number(endRange.value).toFixed(2)};
-    const syncFromNumber=()=>{if(Number(startSeconds.value)<Number(endSeconds.value)){startRange.value=startSeconds.value;endRange.value=endSeconds.value}else{endSeconds.value=startSeconds.value}};
-    startRange.oninput=syncFromRange;endRange.oninput=syncFromRange;startSeconds.oninput=syncFromNumber;endSeconds.oninput=syncFromNumber;
+    startTime.oninput=()=>startTime.classList.remove('invalid');endTime.oninput=()=>endTime.classList.remove('invalid');
+    startTime.onchange=()=>{const parsed=parseTimecode(startTime.value);if(parsed===null){startTime.classList.add('invalid');toast('Enter the start as mm:ss.d, for example 0:56.0.',true);startTime.value=formatTimecode(pendingStartMs);startTime.classList.remove('invalid');return}setStart(parsed);seekTo(pendingStartMs)};
+    endTime.onchange=()=>{const parsed=parseTimecode(endTime.value);if(parsed===null){endTime.classList.add('invalid');toast('Enter the end as mm:ss.d, for example 0:56.0.',true);endTime.value=formatTimecode(pendingEndMs);endTime.classList.remove('invalid');return}setEnd(parsed);seekTo(pendingEndMs)};
     document.querySelector('#backEditor').onclick=()=>{saveViewState('editor',{targetMediaId:null,trimTarget:false});render()};
     document.querySelector('#trimOpenLibrary').onclick=()=>openMediaInLibrary(source.id);
-    const previewSource=document.querySelector('#trimSource');
-    document.querySelector('#previewTrim').onclick=()=>{if(!isVideo||!previewSource)return;const start=secondsToMs(startSeconds.value)/1000,end=secondsToMs(endSeconds.value)/1000;previewSource.currentTime=start;previewSource.play();const handler=()=>{if(previewSource.currentTime>=end){previewSource.pause();previewSource.removeEventListener('timeupdate',handler)}};previewSource.addEventListener('timeupdate',handler)};
-    document.querySelector('#addTrimSegment').onclick=()=>{const start=secondsToMs(startSeconds.value),end=secondsToMs(endSeconds.value);const check=validateSegment(segments,start,end,durationMs);if(!check.ok){toast(check.message,true);return}segments=segmentsPayload([...segments,{start_ms:start,end_ms:end}]).map((segment,index)=>({...segment,index:index+1}));build()};
+    document.querySelector('#previewTrim').onclick=()=>{if(!video)return;rangeTouched=true;seekTo(pendingStartMs);const playing=video.play();if(playing&&playing.catch)playing.catch(()=>{})};
+    document.querySelector('#trimSetStart').onclick=()=>{if(video)setStart(Math.round(video.currentTime*1000))};
+    document.querySelector('#trimSetEnd').onclick=()=>{if(video)setEnd(Math.round(video.currentTime*1000))};
+    document.querySelector('#trimJumpEnd').onclick=()=>{if(video){video.pause();seekTo(pendingEndMs)}};
+    document.querySelector('#addTrimSegment').onclick=()=>{const check=validateSegment(segments,pendingStartMs,pendingEndMs,maxMs());if(!check.ok){toast(check.message,true);return}segments=segmentsPayload([...segments,{start_ms:pendingStartMs,end_ms:pendingEndMs}]).map((segment,index)=>({...segment,index:index+1}));build()};
     document.querySelector('#saveTrim').onclick=async()=>{if(!segments.length){toast('Add at least one segment',true);return}try{const job=await runJob(()=>api(`/api/v1/media/${source.id}/trim-jobs`,{method:'POST',body:JSON.stringify({segments:segmentsPayload(segments)})}));const result=job.result||{};toast(`${result.segment_count||segments.length} fragment(s) saved`);await openTrim(source.id)}catch(error){toast(error.message,true)}};
     const keepOriginal=document.querySelector('#keepTrimOriginal');
     if(keepOriginal)keepOriginal.onclick=async()=>{keepOriginal.disabled=true;try{await api(`/api/v1/trim-reviews/${source.id}/approve`,{method:'POST'});toast('Original kept without trimming');saveViewState('editor',{targetMediaId:null,trimTarget:false,trimMediaId:null});await render('pending')}catch(error){toast(error.message,true);keepOriginal.disabled=false}};
-    build();icons();
+    if(video){
+      const enforceRange=()=>{if(video.paused)return;const top=maxMs();if(!top)return;const time=video.currentTime*1000;if(time>pendingEndMs+30){video.pause();try{video.currentTime=Math.min(pendingEndMs,top)/1000}catch{}}};
+      video.addEventListener('timeupdate',()=>{renderPlayhead();enforceRange()});
+      video.addEventListener('seeked',renderPlayhead);
+      video.addEventListener('play',()=>{const top=maxMs();if(!top)return;const time=video.currentTime*1000;if(time<pendingStartMs-30||time>=pendingEndMs-30)seekTo(pendingStartMs)});
+      video.addEventListener('ended',renderPlayhead);
+      video.addEventListener('loadedmetadata',()=>{if(!durationMs&&Number.isFinite(video.duration)&&video.duration>0){durationMs=Math.round(video.duration*1000);if(!rangeTouched)pendingEndMs=durationMs;renderTimeline()}renderPlayhead()});
+      const msFromClientX=clientX=>{const rect=track.getBoundingClientRect();return rect.width?clampMs((clientX-rect.left)/rect.width*maxMs()):0};
+      let drag=null;
+      const applyDrag=event=>{const value=msFromClientX(event.clientX);if(drag.kind==='start'){setStart(value);seekTo(pendingStartMs)}else if(drag.kind==='end'){setEnd(value);seekTo(pendingEndMs)}else{seekTo(value)}};
+      const beginDrag=(kind,event)=>{if(!maxMs())return;event.preventDefault();drag={kind,pointerId:event.pointerId};try{track.setPointerCapture(event.pointerId)}catch{}applyDrag(event)};
+      track.addEventListener('pointerdown',event=>{if(event.target===handleStart||event.target===handleEnd||event.target.closest('.trim-segment-band'))return;beginDrag('play',event)});
+      handleStart.addEventListener('pointerdown',event=>beginDrag('start',event));
+      handleEnd.addEventListener('pointerdown',event=>beginDrag('end',event));
+      track.addEventListener('pointermove',event=>{if(drag&&event.pointerId===drag.pointerId)applyDrag(event)});
+      const finishDrag=event=>{if(drag&&event.pointerId===drag.pointerId)drag=null};
+      track.addEventListener('pointerup',finishDrag);track.addEventListener('pointercancel',finishDrag);
+      const nudge=(kind,delta)=>{if(kind==='start'){setStart(pendingStartMs+delta);seekTo(pendingStartMs)}else{setEnd(pendingEndMs+delta);seekTo(pendingEndMs)}};
+      handleStart.onkeydown=event=>{const step=event.shiftKey?1000:100;if(event.key==='ArrowLeft'){event.preventDefault();nudge('start',-step)}else if(event.key==='ArrowRight'){event.preventDefault();nudge('start',step)}else if(event.key==='Home'){event.preventDefault();setStart(0);seekTo(0)}else if(event.key==='End'){event.preventDefault();setStart(pendingEndMs-MIN_RANGE_MS);seekTo(pendingEndMs-MIN_RANGE_MS)}};
+      handleEnd.onkeydown=event=>{const step=event.shiftKey?1000:100;if(event.key==='ArrowLeft'){event.preventDefault();nudge('end',-step)}else if(event.key==='ArrowRight'){event.preventDefault();nudge('end',step)}else if(event.key==='Home'){event.preventDefault();setEnd(pendingStartMs+MIN_RANGE_MS);seekTo(pendingStartMs+MIN_RANGE_MS)}else if(event.key==='End'){event.preventDefault();setEnd(maxMs());seekTo(maxMs())}};
+    }
+    build();
   };
   const targetMediaId=Number(editorState.targetMediaId || 0);
   if(targetMediaId){if(editorState.trimTarget||editorState.trimMediaId){try{await openTrim(targetMediaId);return}catch(error){toast(error.message,true);saveViewState('editor',{targetMediaId:null,trimTarget:false})}}try{await openMediaEditor(targetMediaId);return}catch(error){toast(error.message,true);saveViewState('editor',{targetMediaId:null})}}

@@ -50,3 +50,28 @@ export function segmentsPayload(segments) {
 export function describeSegment(segment, index) {
   return `Part ${index}: ${msToSeconds(segment.start_ms).toFixed(2)}s - ${msToSeconds(segment.end_ms).toFixed(2)}s`;
 }
+
+export function formatTimecode(value) {
+  const totalMs = Math.max(0, Math.round(Number(value) || 0));
+  const totalTenths = Math.round(totalMs / 100);
+  const tenths = totalTenths % 10;
+  const totalSeconds = Math.floor(totalTenths / 10);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const head = hours ? `${hours}:${String(minutes).padStart(2, '0')}` : String(minutes);
+  return `${head}:${String(seconds).padStart(2, '0')}.${tenths}`;
+}
+
+export function parseTimecode(value) {
+  const text = String(value ?? '').trim();
+  if (!/^\d+(?::\d+){0,2}(?:\.\d+)?$/.test(text)) return null;
+  const [clock, fraction = ''] = text.split('.');
+  const parts = clock.split(':').map(Number);
+  if (parts.some(part => !Number.isFinite(part))) return null;
+  let seconds = 0;
+  for (const part of parts) seconds = seconds * 60 + part;
+  const fractionSeconds = fraction ? Number(`0.${fraction}`) : 0;
+  if (!Number.isFinite(seconds) || !Number.isFinite(fractionSeconds)) return null;
+  return Math.round((seconds + fractionSeconds) * 1000);
+}
