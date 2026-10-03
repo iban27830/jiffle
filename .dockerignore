@@ -1,0 +1,14 @@
+# В контекст сборки попадает только код (deploy.ps1 не копирует state/ и данные),
+# поэтому здесь минимум, чтобы случайно не вырезать пакеты кода.
+/.git
+/.env
+/state
+/settings.json
+/jiffle-data
+/thumbnails
+/collections
+/import-staging
+/export-staging
+/media
+/__pycache__
+*.pyc

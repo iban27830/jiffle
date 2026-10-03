@@ -1,5 +1,6 @@
 import importlib
 import importlib.util
+import os
 import subprocess
 import sys
 import threading
@@ -422,6 +423,14 @@ def _model_cache_available(model_root, model_name=LEGACY_MODEL_NAME):
 
 
 def _ensure_dependencies():
+    if os.environ.get("JIFFLE_DISABLE_LOCAL_BACKGROUND") == "1":
+        raise BackgroundFailure(
+            "background.disabled_on_host",
+            "Локальная уборка фона отключена на этом хосте "
+            "(JIFFLE_DISABLE_LOCAL_BACKGROUND=1). Выполняйте её на машине с GPU "
+            "или включите локальный режим.",
+            {"reason": "disabled_on_host"},
+        )
     missing = _missing_dependencies()
     if not missing:
         _verify_dependency_imports()

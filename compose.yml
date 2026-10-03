@@ -1,0 +1,46 @@
+# Запуск jiggle3 на NAS: sudo docker compose up -d --build
+name: jiggle3
+
+services:
+  jiggle3:
+    build: .
+    image: services/jiggle3:latest
+    container_name: jiggle3
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      TZ: Europe/Moscow
+      HOST: 0.0.0.0
+      PORT: 5001
+      JIFFLE_NO_BROWSER: 1
+      JIFFLE_NO_AUTO_INSTALL: 1
+      JIFFLE_DISABLE_LOCAL_BACKGROUND: 1
+      JIFFLE_DATA_ROOT: /data
+      JIFFLE_CONFIG_PATH: /data/settings.json
+      JIFFLE_MEDIA_PATH: /media/pics
+      JIFFLE_THUMBNAIL_PATH: /data/thumbnails
+      JIFFLE_EXPORT_PATH: /data/collections
+    ports:
+      - "${HOST_PORT}:5001"
+    volumes:
+      - ./state:/data
+      - "${MEDIA_HOST_PATH:-/Volume1/NAS/pics}:/media/pics"
+    mem_limit: ${MEM_LIMIT}
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys,urllib.request;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5001/api/v1/health',timeout=5).status<400 else 1)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    labels:
+      autoheal: "true"
+      homepage.group: Сервисы
+      homepage.name: jiggle3
+      homepage.icon: mdi-image-multiple
+      homepage.href: http://${HOME_HOST}:${HOST_PORT}/
+      homepage.description: ${SERVICE_DESCRIPTION}

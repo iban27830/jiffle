@@ -65,15 +65,19 @@ def ensure_startup_packages() -> None:
 
 
 def main() -> None:
-    ensure_startup_packages()
+    if os.environ.get("JIFFLE_NO_AUTO_INSTALL") != "1":
+        ensure_startup_packages()
+
+    host = os.environ.get("HOST", "127.0.0.1")
+    port = int(os.environ.get("PORT", "5001"))
 
     from jiffle import create_app
 
     app = create_app()
 
     if not os.environ.get("JIFFLE_NO_BROWSER"):
-        Timer(1, lambda: webbrowser.open_new("http://127.0.0.1:5001/")).start()
-    app.run(host="127.0.0.1", port=5001, debug=False)
+        Timer(1, lambda: webbrowser.open_new(f"http://127.0.0.1:{port}/")).start()
+    app.run(host=host, port=port, debug=False)
 
 
 if __name__ == "__main__":
