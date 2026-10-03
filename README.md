@@ -258,15 +258,14 @@ resolution method, providers checked, and the URL that supplied the accepted fil
 Use the category buttons at the top of Review to narrow the list: **All**, **Source
 found** for cards where a recheck already produced source candidates, and **Needs
 source** for cards that still have none. A card with a found source is highlighted in
-green and its **Run import again** button is locked, because the next step is to open
-the preview and confirm one of the candidates. To look for a source again after you
-add or reconfigure providers, tick the checkbox on the cards you want to retry and
-select **Recheck selected** at the top; a running card is outlined while its search is
-in progress and its button stays disabled. If you start another search while one card
-is still searching, that card joins a queue: it gets a waiting outline and is searched
-automatically when the current search finishes. Once a card has been rechecked it keeps a
-**Checked** marker even after the page is reopened, and its **Run import again**
-button stays locked. Select the log button on the card to open the full search
+green, and a rechecked card keeps a **Checked** marker even after the page reopens.
+**Run import again** stays available on both kinds of card, because a source can appear
+after a provider is added or reconfigured; select it to search that one card, or tick
+several cards and select **Recheck selected** at the top. A running card is outlined
+while its search is in progress and its button is disabled only for that request. If
+you start another search while one card is still searching, that card joins a queue: it
+gets a waiting outline and is searched automatically when the current search finishes.
+Select the log button on the card to open the full search
 results for that card, including the outcome, provider details, and why a source was
 not found; the log is removed when the card is confirmed or rejected. **Select all
 on screen** ticks every card on the current page. Rechecking runs the normal import resolution again, so a file

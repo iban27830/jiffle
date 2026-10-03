@@ -605,15 +605,14 @@ function reviewCardHtml(item) {
     : (reviewLocalSearches.get(Number(item.id)) || {});
   const searched = Number(search.count || 0) > 0;
   const candidates = found ? `<span class="review-card-candidates">${candidateCount} source${candidateCount === 1 ? '' : 's'} found</span>` : '';
-  // A rechecked card stays marked even after reopening the page and its
-  // repeat-search button is locked: the user can see that a search already ran.
+  // A rechecked card stays marked even after reopening the page, so the user
+  // can see that a search already ran. The button stays enabled: a source may
+  // have appeared since, and re-running the search must not be blocked.
   const searchedBadge = searched ? `<span class="review-card-searched" title="${esc(reviewSearchTitle(search))}"><i data-lucide="search-check"></i>${esc(reviewSearchLabel(search))}</span>` : '';
-  const lockTitle = found
-    ? 'A source was already found - open the image to confirm it'
-    : 'Already checked - tick the card and use Recheck selected to search again';
-  const recheck = found || searched
-    ? `<button type="button" class="icon-btn" data-review-reimport="${item.id}" disabled title="${esc(lockTitle)}"><i data-lucide="refresh-cw"></i></button>`
-    : `<button type="button" class="icon-btn" data-review-reimport="${item.id}" title="Run import again"><i data-lucide="refresh-cw"></i></button>`;
+  const recheckTitle = found
+    ? 'Search again - a new source may have appeared since'
+    : 'Run the source search again';
+  const recheck = `<button type="button" class="icon-btn" data-review-reimport="${item.id}" title="${esc(recheckTitle)}"><i data-lucide="refresh-cw"></i></button>`;
   const log = searched ? `<button type="button" class="icon-btn" data-review-log="${item.id}" title="View the search results for this card"><i data-lucide="scroll-text"></i></button>` : '';
   const cardClass = ['media-card', 'review-card', found ? 'review-card-source-found' : '', searched ? 'review-card-already-searched' : ''].filter(Boolean).join(' ');
   return `<article class="${cardClass}" data-review-kind="candidate" data-review-id="${item.id}"><div class="review-card-preview" data-open-review="${item.id}" title="Open full size"><img loading="lazy" src="${esc(item.thumbnail_url)}" alt="">${reason}${candidates}${searchedBadge}<label class="review-card-select" title="Select for recheck"><input type="checkbox" data-review-select="${item.id}"${selected}></label></div><div class="review-card-actions"><button type="button" class="icon-btn" data-open-review="${item.id}" title="Open full size to choose a source"><i data-lucide="maximize-2"></i></button>${recheck}${log}<button type="button" class="icon-btn danger" data-review-reject="${item.id}" title="Reject"><i data-lucide="trash-2"></i></button></div></article>`;
@@ -842,8 +841,7 @@ function applySearchStates() {
     card.classList.toggle('review-card-queued', queued);
     const button = card.querySelector('[data-review-reimport]');
     if (!button) return;
-    const locked = card.classList.contains('review-card-source-found') || card.classList.contains('review-card-already-searched');
-    button.disabled = active || queued || locked;
+    button.disabled = active || queued;
     if (active) button.title = 'Search in progress...';
     else if (queued) button.title = 'Waiting in the search queue';
   });
