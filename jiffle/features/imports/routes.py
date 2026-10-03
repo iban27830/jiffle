@@ -8,6 +8,10 @@ from flask import Blueprint, current_app, jsonify, request
 
 from jiffle.configuration.settings import Settings
 from jiffle.features.imports.domain import LocalImportCommand
+from jiffle.features.imports.implicit_tags import (
+    create_implicit_tag_job,
+    run_implicit_tag_job,
+)
 from jiffle.features.imports.local_import import create_local_import_job, run_local_import_job
 from jiffle.features.imports.url_import import create_url_import_job, run_url_import_job
 from jiffle.features.imports.universal_import import (
@@ -322,6 +326,22 @@ def cancel_set_job(job_id: int):
 @imports_blueprint.get("/api/v1/set-import-jobs/active")
 def active_set_import():
     return jsonify({"job": active_set_job(get_database())})
+
+
+@imports_blueprint.post("/api/v1/implicit-tag-jobs")
+def create_implicit_tags_job():
+    """Re-read source pages for media that may be missing an implicit ``furry`` tag."""
+    settings: Settings = current_app.config["JIFFLE_SETTINGS"]
+    connection = get_database()
+    job_id = create_implicit_tag_job(connection)
+    arguments = (
+        settings.database_path, job_id, current_app.config["JIFFLE_SOURCE_PROVIDERS"],
+    )
+    if settings.run_jobs_inline:
+        run_implicit_tag_job(*arguments)
+    else:
+        Thread(target=run_implicit_tag_job, args=arguments, daemon=True).start()
+    return jsonify({"job_id": job_id, "status_url": f"/api/v1/jobs/{job_id}"}), 202
 
 
 def _error(code: str, message: str, status: int):

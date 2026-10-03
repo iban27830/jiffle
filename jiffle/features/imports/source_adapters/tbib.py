@@ -8,6 +8,7 @@ import requests
 
 from jiffle.features.imports.source_adapters.contracts import SourceMedia
 from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
+from jiffle.features.imports.source_adapters.platform_tags import add_platform_tags
 
 
 class TbibSourceProvider:
@@ -45,7 +46,10 @@ class TbibSourceProvider:
                 if raw_parent_id not in (None, "", 0, "0")
                 else None
             )
-            tags = tuple(str(post.get("tags", "")).split())
+            tags = add_platform_tags(
+                tuple(str(post.get("tags", "")).split()),
+                self.provider_name, domain, post.get("source"),
+            )
             extension = PurePosixPath(urlparse(direct_url).path).suffix.lower() or ".jpg"
             return SourceMedia(
                 canonical_url=_canonical_url(domain, post_id),
@@ -104,7 +108,10 @@ class TbibSourceProvider:
                     canonical_url=_canonical_url(domain, post_id),
                     direct_media_url=direct_url,
                     author=post.get("owner"),
-                    tags=str(post.get("tags") or "").split(),
+                    tags=list(add_platform_tags(
+                        str(post.get("tags") or "").split(),
+                        self.provider_name, domain, post.get("source"),
+                    )),
                     content_md5=_md5(post.get("hash")),
                     width=post.get("width"),
                     height=post.get("height"),

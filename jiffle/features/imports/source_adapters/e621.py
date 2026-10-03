@@ -9,6 +9,7 @@ import requests
 
 from jiffle.features.imports.source_adapters.contracts import SetPostIssue, SourceMedia, SourceSet
 from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
+from jiffle.features.imports.source_adapters.platform_tags import add_platform_tags
 from jiffle.features.imports.source_adapters.reverse_search import (
     REVERSE_SEARCH_USER_AGENT,
     iqdb_query_matches,
@@ -113,6 +114,7 @@ class E621SourceProvider:
                 if isinstance(group, (list, tuple))
                 for tag in group
             )
+            tags = add_platform_tags(tags, self.provider_name, "e621.net")
             artists = tags_payload.get("artist", [])
             character_tags = tuple(str(tag) for tag in tags_payload.get("character", []) if str(tag).strip())
             raw_parent_id = post.get("parent_id")
@@ -257,6 +259,7 @@ class E621SourceProvider:
         tags_payload = post.get("tags") or {}
         artists = tags_payload.get("artist", [])
         tags = tuple(tag for group in tags_payload.values() if isinstance(group, (list, tuple)) for tag in group)
+        tags = add_platform_tags(tags, self.provider_name, domain)
         character_tags = tuple(str(tag) for tag in tags_payload.get("character", []) if str(tag).strip())
         raw_parent_id = post.get("parent_id")
         parent_id = str(raw_parent_id) if raw_parent_id not in (None, "", 0, "0") else None

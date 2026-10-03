@@ -13,6 +13,7 @@ from jiffle.configuration.settings import Settings
 from jiffle.features.imports.local_import import atomic_copy, inspect_media
 from jiffle.features.imports.source_adapters.contracts import SourceMedia, SourceProvider
 from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
+from jiffle.features.imports.source_adapters.platform_tags import add_platform_tags
 from jiffle.features.imports.universal_import import (
     _extension,
     _match_to_source,
@@ -620,14 +621,15 @@ def _candidate_source(raw_metadata: str | None) -> SourceMedia | None:
     if not raw_metadata:
         return None
     payload = json.loads(raw_metadata)
+    domain = payload.get("domain") or urlsplit(payload["canonical_url"]).netloc
     return SourceMedia(
         canonical_url=payload["canonical_url"],
         direct_media_url=payload.get("direct_media_url"),
         provider=payload["provider"],
         remote_id=payload["remote_id"],
         author=payload.get("author"),
-        domain=payload.get("domain") or urlsplit(payload["canonical_url"]).netloc,
-        tags=tuple(payload.get("tags", ())),
+        domain=domain,
+        tags=add_platform_tags(payload.get("tags", ()), payload["provider"], domain),
         file_extension=payload.get("file_extension") or (os.path.splitext(urlsplit(payload.get("direct_media_url") or payload["canonical_url"]).path)[1] or ".jpg"),
         character_tags=tuple(payload.get("character_tags", ())),
         parent_id=payload.get("parent_id"),

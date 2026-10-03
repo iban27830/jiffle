@@ -14,6 +14,7 @@ import requests
 
 from jiffle.features.imports.source_adapters.contracts import SourceMedia
 from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
+from jiffle.features.imports.source_adapters.platform_tags import add_platform_tags
 
 API_URL = "https://api.rule34.xxx/index.php"
 SITE_URL = "https://rule34.xxx/index.php"
@@ -184,6 +185,12 @@ def _source_from_post(post: dict[str, object], fallback_id: str) -> SourceMedia:
         raise SourceProviderFailure(
             "import.source_media_missing", "The source has no downloadable media."
         )
+    tags = add_platform_tags(
+        str(post.get("tags") or "").split(),
+        Rule34SourceProvider.provider_name,
+        DOMAIN,
+        post.get("source"),
+    )
     return SourceMedia(
         canonical_url=_canonical_url(post_id),
         direct_media_url=direct_url,
@@ -191,7 +198,7 @@ def _source_from_post(post: dict[str, object], fallback_id: str) -> SourceMedia:
         remote_id=post_id,
         author=str(post.get("owner") or "") or None,
         domain=DOMAIN,
-        tags=tuple(str(post.get("tags") or "").split()),
+        tags=tags,
         file_extension=PurePosixPath(urlparse(direct_url).path).suffix.lower() or ".jpg",
         parent_id=_parent_id(post),
         content_md5=_valid_md5(post.get("hash") or post.get("md5")),
@@ -210,7 +217,12 @@ def _match_from_post(post: dict[str, object]) -> dict[str, object] | None:
         "canonical_url": _canonical_url(post_id),
         "direct_media_url": _media_url(post),
         "author": str(post.get("owner") or "") or None,
-        "tags": str(post.get("tags") or "").split(),
+        "tags": list(add_platform_tags(
+            str(post.get("tags") or "").split(),
+            Rule34SourceProvider.provider_name,
+            DOMAIN,
+            post.get("source"),
+        )),
         "content_md5": _valid_md5(post.get("hash") or post.get("md5")),
         "width": _int_or_none(post.get("width")),
         "height": _int_or_none(post.get("height")),

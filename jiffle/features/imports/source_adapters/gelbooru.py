@@ -5,6 +5,7 @@ import requests
 
 from jiffle.features.imports.source_adapters.contracts import SourceMedia
 from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
+from jiffle.features.imports.source_adapters.platform_tags import add_platform_tags
 
 
 class GelbooruSourceProvider:
@@ -48,7 +49,10 @@ class GelbooruSourceProvider:
         return SourceMedia(
             canonical_url=url, direct_media_url=direct_url, provider=self.provider_name,
             remote_id=str(post_id), author=post.get("owner") or None, domain=domain,
-            tags=tuple(str(post.get("tags", "")).split()),
+            tags=add_platform_tags(
+                tuple(str(post.get("tags", "")).split()),
+                self.provider_name, domain, post.get("source"),
+            ),
             file_extension=PurePosixPath(urlparse(direct_url).path).suffix or ".jpg",
             character_tags=character_tags, parent_id=parent_id,
             content_md5=_valid_md5(post.get("hash") or post.get("md5")),
@@ -105,7 +109,10 @@ class GelbooruSourceProvider:
                 ),
                 "direct_media_url": direct_url,
                 "author": post.get("owner") or None,
-                "tags": str(post.get("tags", "")).split(),
+                "tags": list(add_platform_tags(
+                    str(post.get("tags", "")).split(),
+                    self.provider_name, domain, post.get("source"),
+                )),
                 "content_md5": _valid_md5(post.get("hash") or post.get("md5")),
                 "width": post.get("width"),
                 "height": post.get("height"),

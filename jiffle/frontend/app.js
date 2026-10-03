@@ -1322,6 +1322,7 @@ async function showSettingsPage() {
       ${provider('gelbooru','Gelbooru','User ID and API key',[field('gelbooru_user_id','User ID',{hint:'Paste the whole account line if it is easier: &amp;api_key=...&amp;user_id=... Jiffle splits it into both fields.'}),field('gelbooru_api_key','API key',{type:'password',secret:true})])}
       ${provider('rule34','Rule34.xxx','User ID and API key (required)',[field('rule34_user_id','User ID',{hint:'Paste the whole account line if it is easier: &amp;api_key=...&amp;user_id=... Jiffle splits it into both fields.'}),field('rule34_api_key','API key',{type:'password',secret:true})],'<a class="btn" href="https://rule34.xxx/index.php?page=account&s=options" target="_blank" rel="noopener"><i data-lucide="external-link"></i>Open account options</a>')}
       ${provider('furaffinity','FurAffinity','Cookie a and b from an active session',[field('furaffinity_cookie_a','Cookie a',{type:'password',secret:true}),field('furaffinity_cookie_b','Cookie b',{type:'password',secret:true})],'<a class="btn" href="https://www.furaffinity.net/login/" target="_blank" rel="noopener"><i data-lucide="external-link"></i>Open login</a>')}
+      <div class="section-actions"><button id="backfillImplicitTags" type="button" class="btn"><i data-lucide="tags"></i>Fill implicit tags</button><small class="field-hint">Re-reads each media's source page and adds the furry tag when the original post is from e621/e926 or FurAffinity.</small></div>
     </div></details>
     <details class="settings-section"><summary><span class="section-icon"><i data-lucide="eraser"></i></span><span><strong>Background removal</strong><small>Automatic subject isolation and model access</small></span><i data-lucide="chevron-down"></i></summary><div class="settings-section-body">
       <div class="form-row"><label for="setting-background_model">Removal model</label><small class="field-hint">Automatic (recommended) uses BiRefNet-HR on a GPU and the faster BiRefNet model on CPU. RMBG-2.0 remains available for compatibility.</small><select class="control" id="setting-background_model" name="background_model"><option value="auto" ${data.background_model==='auto' || !data.background_model?'selected':''}>Automatic (recommended)</option><option value="birefnet_hr" ${data.background_model==='birefnet_hr'?'selected':''}>BiRefNet-HR (quality)</option><option value="birefnet" ${data.background_model==='birefnet'?'selected':''}>BiRefNet (faster)</option><option value="rmbg" ${data.background_model==='rmbg'?'selected':''}>RMBG-2.0 (compatibility)</option></select></div>
@@ -1400,6 +1401,17 @@ async function showSettingsPage() {
     finally { updateHuggingFaceTestButton(); }
   };
   document.querySelectorAll('.test-source').forEach(node => node.onclick = async () => { try { await api(`/api/v1/settings/source-providers/${node.dataset.provider}/test`,{method:'POST'});toast('Connection successful'); } catch(error) { toast(error.message,true); } });
+  const implicitTagsButton = document.querySelector('#backfillImplicitTags');
+  if (implicitTagsButton) implicitTagsButton.onclick = async () => {
+    implicitTagsButton.disabled = true;
+    try {
+      const job = await runJob(() => api('/api/v1/implicit-tag-jobs',{method:'POST'}));
+      const result = job.result || {};
+      const failed = Array.isArray(result.errors) ? result.errors.length : 0;
+      toast(`Implicit tags: added to ${Number(result.tagged||0)} of ${Number(result.checked||0)} checked${Number(result.unchanged||0) ? `, ${Number(result.unchanged||0)} unchanged` : ''}${failed ? `, ${failed} unavailable` : ''}`);
+    } catch(error) { toast(error.message,true); }
+    finally { implicitTagsButton.disabled = false; }
+  };
   icons(); restoreScrollState('settings');
 }
 

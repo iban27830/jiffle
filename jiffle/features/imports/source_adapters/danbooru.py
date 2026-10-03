@@ -9,6 +9,7 @@ from jiffle.features.imports.source_adapters.reverse_search import (
     iqdb_query_matches,
     reverse_preview_bytes,
 )
+from jiffle.features.imports.source_adapters.platform_tags import add_platform_tags
 
 
 class SourceProviderFailure(Exception):
@@ -69,7 +70,10 @@ class DanbooruSourceProvider:
             )
         if direct_url.startswith("//"):
             direct_url = "https:" + direct_url
-        tags = tuple(filter(None, str(payload.get("tag_string", "")).split()))
+        tags = add_platform_tags(
+            tuple(filter(None, str(payload.get("tag_string", "")).split())),
+            self.provider_name, domain, payload.get("source"),
+        )
         character_tags = tuple(filter(None, str(payload.get("tag_string_character", "")).split()))
         raw_parent_id = payload.get("parent_id")
         parent_id = str(raw_parent_id) if raw_parent_id not in (None, "", 0, "0") else None
@@ -128,7 +132,10 @@ class DanbooruSourceProvider:
                 "author": str(post.get("tag_string_artist", "")).split()[0]
                 if str(post.get("tag_string_artist", "")).split()
                 else None,
-                "tags": str(post.get("tag_string", "")).split(),
+                "tags": list(add_platform_tags(
+                    tuple(filter(None, str(post.get("tag_string", "")).split())),
+                    self.provider_name, "danbooru.donmai.us", post.get("source"),
+                )),
                 "content_md5": _valid_md5(post.get("md5")),
                 "width": post.get("image_width"),
                 "height": post.get("image_height"),

@@ -5,6 +5,7 @@ import requests
 
 from jiffle.features.imports.source_adapters.contracts import SourceMedia
 from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
+from jiffle.features.imports.source_adapters.platform_tags import add_platform_tags
 
 
 class FurAffinitySourceProvider:
@@ -47,6 +48,7 @@ class FurAffinitySourceProvider:
         direct_url = "https:" + direct.group(1)
         title = re.search(r'<title>.*? by ([^<]+)</title>', response.text, re.IGNORECASE | re.DOTALL)
         tags = tuple(re.findall(r'/search/@keywords/([^/"?]+)', response.text))
+        tags = add_platform_tags(tags, self.provider_name, "furaffinity.net")
         return SourceMedia(
             canonical_url=f"https://www.furaffinity.net/view/{match.group(1)}/",
             direct_media_url=direct_url, provider=self.provider_name,

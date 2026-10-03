@@ -291,6 +291,8 @@ Open **Settings** to configure source accounts, library display options, storage
 
 For Gelbooru and Rule34.xxx you can paste the account line exactly as the site shows it (`&api_key=...&user_id=...`) into either the User ID or the API key field and select **Save settings**; Jiffle fills both fields from it.
 
+Imports from e621/e926 and FurAffinity always carry the `furry` tag, even when the site does not list it, and a post on another booru (Rule34.xxx, Gelbooru, Danbooru, or TBIB) gets the tag when its `source` field points back at one of those sites. Media imported before that rule existed can be corrected with **Fill implicit tags** under **Settings → Sources**: Jiffle re-reads the saved source page of every record that is missing the tag and adds it when the original upload is furry-only.
+
 ### Background replacement
 
 Background replacement is available for static images in **Library** and **Editor**. Jiffle looks for likely replacement candidates by checking whether a large connected area at the image edges is almost one color (white, black, or another uniform color). This scan is only a suggestion; always check the removal preview before saving a result.

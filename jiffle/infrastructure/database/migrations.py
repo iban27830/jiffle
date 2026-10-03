@@ -692,6 +692,28 @@ def migration_30(connection: sqlite3.Connection) -> None:
     )
 
 
+def migration_31(connection: sqlite3.Connection) -> None:
+    """Tag media imported from furry-only sources with ``furry``.
+
+    e621/e926 and FurAffinity host furry artwork only, but the ``furry`` tag is
+    not present on every post. New imports carry it from the source adapters;
+    this adds it to media that was imported before that rule existed. Matching
+    is case-insensitive and idempotent, so already-tagged media is untouched.
+    """
+    connection.execute(
+        "INSERT OR IGNORE INTO media_tags (media_item_id, tag) "
+        "SELECT item.id, 'furry' FROM media_items item "
+        "WHERE LOWER(COALESCE(item.domain, '')) IN "
+        "('e621.net', 'e926.net', 'furaffinity.net', 'www.furaffinity.net') "
+        "OR EXISTS ("
+        "  SELECT 1 FROM media_sources source WHERE source.media_item_id = item.id "
+        "  AND (LOWER(COALESCE(source.provider, '')) IN ('e621', 'furaffinity') "
+        "       OR LOWER(COALESCE(source.domain, '')) IN "
+        "           ('e621.net', 'e926.net', 'furaffinity.net', 'www.furaffinity.net'))"
+        ")"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -723,6 +745,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (28, migration_28),
     (29, migration_29),
     (30, migration_30),
+    (31, migration_31),
 )
 
 
