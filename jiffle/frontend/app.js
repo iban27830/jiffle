@@ -637,7 +637,7 @@ async function inspectMedia(id) {
 async function showImport() {
   setHeader('Import', 'Drop an image or paste a link');
   const history = await api('/api/v1/history?limit=100&entity_type=background_job');
-  const historyLabels = {'import.pending':'Importing','import.accepted':'Imported','import.review':'Waiting for review','import.duplicate':'Already imported or awaiting review','import.failed':'Import failed','import.set_completed':'Set imported','import.set_partial':'Set partially imported','import.set_cancelled':'Set import stopped'};
+  const historyLabels = {'import.pending':'Importing','import.accepted':'Imported','import.review':'Waiting for review','import.duplicate':'Already imported','import.rejected':'Review rejected','import.failed':'Import failed','import.set_completed':'Set imported','import.set_partial':'Set partially imported','import.set_cancelled':'Set import stopped'};
   const historyRows = history.items.map(item=>{
     let details={}; try { details=JSON.parse(item.details_json || '{}'); } catch {}
     const set=details.set || {};
@@ -645,14 +645,15 @@ async function showImport() {
     const issues=Array.isArray(details.issues) && details.issues.length ? `<details class="history-issues"><summary>Issues (${details.issues.length})</summary><ul>${details.issues.map(issue=>`<li><a href="${esc(issue.url || '#')}" target="_blank" rel="noopener">${esc(issue.post_id || issue.remote_id || 'post')}</a>: ${esc(issue.message || issue.code || 'Import failed')}</li>`).join('')}</ul></details>` : '';
     const diagnostics=historyDiagnosticsHtml(details, item);
     const mediaId = Number(details.media_item_id);
-    const hasMedia = item.event_type === 'import.duplicate' && Number.isInteger(mediaId) && mediaId > 0;
-    const label = hasMedia ? 'Already imported' : (historyLabels[item.event_type] || item.event_type);
+    const hasMedia = Number.isInteger(mediaId) && mediaId > 0 && (item.event_type === 'import.duplicate' || item.event_type === 'import.accepted');
+    const label = historyLabels[item.event_type] || item.event_type;
     const openAction = hasMedia ? `<button type="button" class="icon-btn open-import-media" data-media-id="${mediaId}" title="Open in Library"><i data-lucide="images"></i></button>` : '';
+    const duplicateNote = details.merged ? ` · merged into #${mediaId}` : (details.possible_duplicate_of ? ` · possible duplicate #${details.possible_duplicate_of}` : '');
     const resolved = details.resolved_source_url ? ` · ${esc(details.resolved_source_url)}` : '';
     const duration = details.timing?.duration_ms != null ? ` · ${formatDuration(details.timing.duration_ms)}` : '';
     const slowest = details.timing?.slowest_posts?.[0];
     const slowestLabel = slowest ? ` · slowest #${esc(slowest.post_id)} (${formatDuration(slowest.duration_ms)})` : '';
-    return `<article class="history-row"><i data-lucide="${item.event_type === 'import.pending' ? 'loader-circle' : 'activity'}" class="${item.event_type === 'import.pending' ? 'spin' : ''}"></i><div><strong>${esc(label)}</strong><small>${set.name ? `${esc(set.name)} · ` : ''}Import #${item.entity_id}${counters ? ` · ${esc(counters)}` : ''}${duration}${slowestLabel}${resolved}</small>${diagnostics}${issues}</div><div class="history-meta"><time>${esc(formatDateTime(item.created_at))}</time>${openAction}</div></article>`;
+    return `<article class="history-row"><i data-lucide="${item.event_type === 'import.pending' ? 'loader-circle' : 'activity'}" class="${item.event_type === 'import.pending' ? 'spin' : ''}"></i><div><strong>${esc(label)}</strong><small>${set.name ? `${esc(set.name)} · ` : ''}Import #${item.entity_id}${counters ? ` · ${esc(counters)}` : ''}${duration}${slowestLabel}${duplicateNote}${resolved}</small>${diagnostics}${issues}</div><div class="history-meta"><time>${esc(formatDateTime(item.created_at))}</time>${openAction}</div></article>`;
   }).join('');
   workspace.innerHTML = `<div class="page"><section id="dropImport" class="drop-import" tabindex="0"><i data-lucide="upload-cloud"></i><strong>Drop a file, image link, or post link here</strong><span>Paste an image, video, or URL into this window</span><input id="fileImport" type="file" accept="image/*,video/*" hidden><button id="chooseImport" type="button" class="btn primary"><i data-lucide="file-up"></i>Choose file</button><input id="pasteImport" class="control" type="url" placeholder="https://..." aria-label="Image or post URL"><button id="submitUrlImport" type="button" class="btn"><i data-lucide="link"></i>Resolve and import</button><div id="importResolveStatus" class="muted" aria-live="polite"></div></section><section class="import-history"><div class="page-head"><h2>Import history</h2><span class="badge">${history.page.total}</span></div><div class="item-list">${historyRows || '<div class="empty">History is empty</div>'}</div></section></div>`;
   const drop = document.querySelector('#dropImport'); const fileInput = document.querySelector('#fileImport');
@@ -796,6 +797,22 @@ function lightboxCandidateInfo(candidate) {
     (link ? `<div class="candidate-footer">${link}</div>` : '');
 }
 
+// The accept response says whether the file merged into an existing library
+// item or was queued for a duplicate decision, so the user is told what
+// actually happened instead of a generic "applied".
+function acceptOutcomeMessage(result, fallback) {
+  const outcome = result && result.outcome;
+  if (outcome === 'merged') {
+    const target = Number(result.duplicate_of ?? result.media_item_id);
+    return Number.isInteger(target) && target > 0 ? `Already in library — merged into #${target}` : 'Already in library';
+  }
+  if (outcome === 'duplicate_pending') {
+    const target = Number(result.duplicate_of);
+    return Number.isInteger(target) && target > 0 ? `Added to Duplicates — possible duplicate of #${target}` : 'Added to Duplicates';
+  }
+  return fallback;
+}
+
 function openMediaLightbox({contentUrl, type = 'image', title = '', candidates = [], reviewId = null}) {
   document.querySelector('.media-lightbox')?.remove();
   const media = type === 'video'
@@ -843,9 +860,9 @@ function openMediaLightbox({contentUrl, type = 'image', title = '', candidates =
   node.querySelectorAll('.manual-lightbox-source').forEach(element => element.onclick = async () => {
     const url = prompt('Source URL'); if (!url) return;
     try {
-      await runJob(() => api(`/api/v1/review-items/${reviewId}/source`,{method:'POST',body:JSON.stringify({url})}));
+      const job = await runJob(() => api(`/api/v1/review-items/${reviewId}/source`,{method:'POST',body:JSON.stringify({url})}));
       reviewSelection.delete(Number(reviewId));
-      close(); toast('Source applied'); showReview();
+      close(); toast(acceptOutcomeMessage(job && job.result, 'Source applied')); showReview();
     } catch(error) { toast(error.message,true); }
   });
   if (compare) {
@@ -862,9 +879,9 @@ function openMediaLightbox({contentUrl, type = 'image', title = '', candidates =
     reviewAccepting.add(id);
     applyAcceptStates();
     try {
-      await api(url, {method:'POST'});
+      const result = await api(url, {method:'POST'});
       reviewSelection.delete(id);
-      toast(successMessage);
+      toast(acceptOutcomeMessage(result, successMessage));
     } catch(error) {
       toast(error.message, true);
     } finally {
