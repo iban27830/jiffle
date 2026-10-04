@@ -1,8 +1,10 @@
 import json
+import math
 from pathlib import Path
 import sqlite3
 
 import imagehash
+import numpy
 from PIL import Image
 
 from jiffle.configuration.settings import Settings
@@ -22,6 +24,19 @@ def create_duplicate_scan_job(connection: sqlite3.Connection, threshold: float) 
 def run_duplicate_scan_job(
     database_path: Path, settings: Settings, job_id: int, threshold: float
 ) -> None:
+    """Compare live images by perceptual hash and record close pairs.
+
+    The expensive part of a scan is decoding every image.  Fingerprints are
+    therefore cached in ``media_fingerprints`` and reused between scans; the
+    cache is invalidated by the editors whenever the stored file changes, so a
+    cached hash always describes the file that is actually in the library.  A
+    second scan of an unchanged library only reads hashes and compares them.
+
+    The comparison itself is vectorised with numpy: every hash becomes one
+    ``uint64`` and the Hamming distance to all of the remaining hashes is
+    computed in a single operation, so thousands of images stay a matter of
+    seconds instead of millions of Python-level pairs.
+    """
     connection = connect_database(database_path)
     try:
         connection.execute(
@@ -30,29 +45,28 @@ def run_duplicate_scan_job(
         )
         connection.commit()
         items = connection.execute(
-            "SELECT id, file_path FROM media_items "
-            "WHERE media_type='image' AND deleted_at IS NULL ORDER BY id"
+            "SELECT media.id AS id, media.file_path AS file_path, "
+            "fp.perceptual_hash AS perceptual_hash "
+            "FROM media_items media "
+            "LEFT JOIN media_fingerprints fp ON fp.media_item_id=media.id "
+            "WHERE media.media_type='image' AND media.deleted_at IS NULL "
+            "ORDER BY media.id"
         ).fetchall()
-        fingerprints = []
+        fingerprints: list[tuple[int, int]] = []
         last_progress = 5
         for index, item in enumerate(items):
-            path = _media_path(settings.media_path, item["file_path"])
-            if path is not None and path.is_file():
-                try:
-                    with Image.open(path) as image:
-                        fingerprint = str(imagehash.phash(image))
-                except (OSError, ValueError):
-                    pass
-                else:
+            fingerprint = _hash_to_int(item["perceptual_hash"])
+            if fingerprint is None:
+                fingerprint = _fingerprint_for(settings, item["file_path"])
+                if fingerprint is not None:
                     connection.execute(
                         "INSERT INTO media_fingerprints (media_item_id, perceptual_hash) "
                         "VALUES (?, ?) ON CONFLICT(media_item_id) DO UPDATE SET "
                         "perceptual_hash=excluded.perceptual_hash, updated_at=CURRENT_TIMESTAMP",
-                        (item["id"], fingerprint),
+                        (item["id"], "%016x" % fingerprint),
                     )
-                    fingerprints.append(
-                        (int(item["id"]), imagehash.hex_to_hash(fingerprint))
-                    )
+            if fingerprint is not None:
+                fingerprints.append((int(item["id"]), fingerprint))
             progress = 5 + int(45 * (index + 1) / max(len(items), 1))
             if progress > last_progress:
                 connection.execute(
@@ -61,34 +75,12 @@ def run_duplicate_scan_job(
                 )
                 connection.commit()
                 last_progress = progress
-        found = 0
-        total_pairs = len(fingerprints) * (len(fingerprints) - 1) // 2
-        compared_pairs = 0
-        last_progress = 50
-        for left_index, (left_id, left_hash) in enumerate(fingerprints):
-            for right_id, right_hash in fingerprints[left_index + 1:]:
-                bit_count = left_hash.hash.size
-                confidence = 100.0 * (bit_count - (left_hash - right_hash)) / bit_count
-                if confidence >= threshold:
-                    connection.execute(
-                        "INSERT INTO duplicate_matches "
-                        "(left_media_id, right_media_id, match_method, confidence) "
-                        "VALUES (?, ?, 'perceptual', ?) "
-                        "ON CONFLICT(left_media_id, right_media_id, match_method) "
-                        "DO UPDATE SET confidence=excluded.confidence",
-                        (left_id, right_id, round(confidence, 2)),
-                    )
-                    found += 1
-                compared_pairs += 1
-                progress = 50 + int(49 * compared_pairs / max(total_pairs, 1))
-                if progress > last_progress:
-                    connection.execute(
-                        "UPDATE background_jobs SET progress=? WHERE id=?",
-                        (progress, job_id),
-                    )
-                    connection.commit()
-                    last_progress = progress
-        result = json.dumps({"matches_found": found, "items_scanned": len(fingerprints)})
+        found = _compare_fingerprints(connection, job_id, fingerprints, threshold)
+        connection.commit()
+        result = json.dumps({
+            "matches_found": found,
+            "items_scanned": len(fingerprints),
+        })
         connection.execute(
             "UPDATE background_jobs SET status='completed', progress=100, result_json=?, "
             "finished_at=CURRENT_TIMESTAMP WHERE id=?", (result, job_id)
@@ -106,6 +98,93 @@ def run_duplicate_scan_job(
         raise
     finally:
         connection.close()
+
+
+def _compare_fingerprints(
+    connection: sqlite3.Connection,
+    job_id: int,
+    fingerprints: list[tuple[int, int]],
+    threshold: float,
+) -> int:
+    """Record every pair whose similarity reaches ``threshold``."""
+    count = len(fingerprints)
+    if count < 2:
+        return 0
+    identifiers = numpy.array([item[0] for item in fingerprints], dtype=numpy.int64)
+    hashes = numpy.array([item[1] for item in fingerprints], dtype=numpy.uint64)
+    bits = 64
+    # confidence = 100 * (bits - distance) / bits  =>  distance <= bits * (100 - threshold) / 100
+    max_distance = int(math.floor(bits * (100.0 - threshold) / 100.0))
+    total_pairs = count * (count - 1) // 2
+    compared_pairs = 0
+    found = 0
+    last_progress = 50
+    for left_index in range(count):
+        distances = _popcount(hashes[left_index + 1:] ^ hashes[left_index])
+        close_offsets = numpy.nonzero(distances <= max_distance)[0]
+        for offset in close_offsets:
+            right_index = left_index + 1 + int(offset)
+            distance = int(distances[offset])
+            confidence = 100.0 * (bits - distance) / bits
+            if confidence < threshold:
+                continue
+            left_id = int(identifiers[left_index])
+            right_id = int(identifiers[right_index])
+            if left_id > right_id:
+                left_id, right_id = right_id, left_id
+            connection.execute(
+                "INSERT INTO duplicate_matches "
+                "(left_media_id, right_media_id, match_method, confidence) "
+                "VALUES (?, ?, 'perceptual', ?) "
+                "ON CONFLICT(left_media_id, right_media_id, match_method) "
+                "DO UPDATE SET confidence=excluded.confidence",
+                (left_id, right_id, round(confidence, 2)),
+            )
+            found += 1
+        compared_pairs += int(distances.size)
+        progress = 50 + int(49 * compared_pairs / max(total_pairs, 1))
+        if progress > last_progress:
+            connection.execute(
+                "UPDATE background_jobs SET progress=? WHERE id=?",
+                (progress, job_id),
+            )
+            connection.commit()
+            last_progress = progress
+    return found
+
+
+def _popcount(values):
+    """Number of set bits in each ``uint64`` of a numpy array."""
+    values = numpy.asarray(values, dtype=numpy.uint64)
+    if hasattr(numpy, "bitwise_count"):
+        return numpy.bitwise_count(values)
+    counts = values - ((values >> numpy.uint64(1)) & numpy.uint64(0x5555555555555555))
+    counts = (counts & numpy.uint64(0x3333333333333333)) + (
+        (counts >> numpy.uint64(2)) & numpy.uint64(0x3333333333333333)
+    )
+    counts = (counts + (counts >> numpy.uint64(4))) & numpy.uint64(0x0F0F0F0F0F0F0F0F)
+    return (counts * numpy.uint64(0x0101010101010101)) >> numpy.uint64(56)
+
+
+def _hash_to_int(raw) -> int | None:
+    if not raw:
+        return None
+    try:
+        return int(str(raw), 16)
+    except (TypeError, ValueError):
+        return None
+
+
+def _fingerprint_for(settings: Settings, stored_path: str) -> int | None:
+    """Return the pHash of a stored file, or ``None`` when it is unreadable."""
+    path = _media_path(settings.media_path, stored_path)
+    if path is None or not path.is_file():
+        return None
+    try:
+        with Image.open(path) as image:
+            return int(str(imagehash.phash(image)), 16)
+    except (OSError, ValueError):
+        return None
 
 
 def _media_path(root_path: Path, stored_path: str) -> Path | None:
