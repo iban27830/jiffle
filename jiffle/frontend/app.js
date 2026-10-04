@@ -261,7 +261,11 @@ function diagnosticResultCount(item) {
   }
   if (item.candidate_count == null) return '';
   const count = Number(item.candidate_count);
-  return ` · ${count} result${count === 1 ? '' : 's'}`;
+  // Older rows recorded only the raw hit count, so name the kept threshold
+  // instead of letting a below-threshold match look like a candidate.
+  const hint = item.stage === 'perceptual_search' && item.status === 'matched'
+    ? ' (only ≥80% similarity are kept)' : '';
+  return ` · ${count} result${count === 1 ? '' : 's'}${hint}`;
 }
 function diagnosticRowHtml(item) {
   const status = diagnosticStatusLabels[item.status] || item.status || 'unknown';
