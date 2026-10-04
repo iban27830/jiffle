@@ -21,6 +21,7 @@ class SourceProviderFailure(Exception):
 
 class DanbooruSourceProvider:
     provider_name = "danbooru"
+    supports_reverse_search = True
     # A Danbooru account raises the tag/search limits and its reverse-search
     # endpoint is authenticated-only.
     credentials_improve_results = True
@@ -30,6 +31,15 @@ class DanbooruSourceProvider:
     def __init__(self, login: str | None = None, api_key: str | None = None):
         self.login = login
         self.api_key = api_key
+
+    def reverse_search_readiness(self):
+        """Return ``(ready, missing_fields)`` for the authenticated reverse search."""
+        missing = []
+        if not self.login:
+            missing.append("login")
+        if not self.api_key:
+            missing.append("api_key")
+        return (not missing), missing
 
     def can_handle(self, url: str) -> bool:
         parsed = urlparse(url)

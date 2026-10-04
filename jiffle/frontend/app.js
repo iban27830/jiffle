@@ -118,14 +118,19 @@ function editSummary(operations=[]) {
   return [...counts].map(([operation,count])=>`${operationName(operation)}${count>1?` ×${count}`:''}`).join(' + ');
 }
 
-const diagnosticStageLabels = {
-  metadata: 'metadata', exact_search: 'exact search', exact_download: 'candidate download',
-  perceptual_search: 'perceptual search',
+// The stage headings make it obvious that a provider is queried twice on
+// purpose: once by hash (exact) and once by similarity (reverse image).
+const diagnosticStageHeadings = {
+  metadata: 'Metadata',
+  exact_search: 'Exact search (MD5)',
+  exact_download: 'Candidate download',
+  perceptual_search: 'Similarity search (reverse image)',
 };
 const diagnosticStatusLabels = {
   matched: 'matched', no_result: 'no result', network_error: 'network error',
   authorization_error: 'authorization required', unavailable: 'unavailable',
   timeout: 'timed out', skipped: 'skipped', not_configured: 'not configured',
+  not_supported: 'not supported',
 };
 // Sources whose account credentials widen the search: they either need a login
 // outright or answer fewer results while anonymous.  Used to explain an empty
@@ -136,6 +141,7 @@ const diagnosticStatusIcons = {
   matched: 'check-circle', no_result: 'minus-circle', network_error: 'triangle-alert',
   authorization_error: 'key-round', unavailable: 'triangle-alert',
   timeout: 'clock', skipped: 'circle-slash', not_configured: 'key-round',
+  not_supported: 'circle-slash',
 };
 function diagnosticCapabilities(diagnostics) {
   const list = (Array.isArray(diagnostics) ? diagnostics : []).filter(item => item && item.stage);
@@ -238,26 +244,61 @@ function historyDiagnosticsHtml(details, item) {
   return `<details class="history-diagnostics"><summary>${esc(summary)}</summary><ul>${diagnosticRowsHtml(diagnostics)}</ul></details>`;
 }
 
+function diagnosticResultCount(item) {
+  // A source that was never queried (unsupported, unconfigured, or skipped)
+  // has no meaningful result count to show.
+  if (['not_supported', 'not_configured', 'skipped'].includes(item.status)) return '';
+  const raw = item.raw_count != null ? Number(item.raw_count) : null;
+  const threshold = item.min_confidence != null ? Number(item.min_confidence) : null;
+  if (raw != null && threshold != null && (raw > 0 || item.status === 'matched')) {
+    // A similarity provider can answer with hits that all sit below the kept
+    // threshold, so show both numbers instead of a single confusing count.
+    const above = item.above_threshold != null ? Number(item.above_threshold) : 0;
+    let text = ` · ${raw} found, ${above} at ≥${threshold}%`;
+    const kept = Number(item.candidate_count || 0);
+    if (kept) text += ` · ${kept} candidate${kept === 1 ? '' : 's'}`;
+    return text;
+  }
+  if (item.candidate_count == null) return '';
+  const count = Number(item.candidate_count);
+  return ` · ${count} result${count === 1 ? '' : 's'}`;
+}
+function diagnosticRowHtml(item) {
+  const status = diagnosticStatusLabels[item.status] || item.status || 'unknown';
+  const count = diagnosticResultCount(item);
+  const remote = item.remote_id ? ` · #${esc(item.remote_id)}` : '';
+  const technical = item.code ? ` <code>${esc(item.code)}</code>` : '';
+  const message = item.message ? `: ${esc(item.message)}` : '';
+  const icon = diagnosticStatusIcons[item.status] || 'info';
+  return `<li class="diagnostic-row diagnostic-${esc(item.status || 'unknown')}"><i class="diagnostic-icon" data-lucide="${icon}"></i><span><strong>${esc(item.provider || 'unknown')}</strong> · ${esc(status)}${count}${remote}${technical}${message}</span></li>`;
+}
 function diagnosticRowsHtml(diagnostics) {
   if (!diagnostics.length) return '<li>No provider diagnostics were recorded.</li>';
-  return diagnostics.map(item => {
-    const stage = diagnosticStageLabels[item.stage] || item.stage || 'provider';
-    const status = diagnosticStatusLabels[item.status] || item.status || 'unknown';
-    const count = item.candidate_count != null ? ` · ${Number(item.candidate_count)} result${Number(item.candidate_count) === 1 ? '' : 's'}` : '';
-    const remote = item.remote_id ? ` · #${esc(item.remote_id)}` : '';
-    const technical = item.code ? ` <code>${esc(item.code)}</code>` : '';
-    const message = item.message ? `: ${esc(item.message)}` : '';
-    const icon = diagnosticStatusIcons[item.status] || 'info';
-    return `<li class="diagnostic-row diagnostic-${esc(item.status || 'unknown')}"><i class="diagnostic-icon" data-lucide="${icon}"></i><span><strong>${esc(item.provider || 'unknown')}</strong> · ${esc(stage)} · ${esc(status)}${count}${remote}${technical}${message}</span></li>`;
+  const order = ['metadata', 'exact_search', 'exact_download', 'perceptual_search'];
+  const byStage = new Map();
+  diagnostics.forEach(item => {
+    const stage = item.stage || 'provider';
+    if (!byStage.has(stage)) byStage.set(stage, []);
+    byStage.get(stage).push(item);
+  });
+  const stages = [...byStage.keys()].sort((a, b) => {
+    const ia = order.indexOf(a), ib = order.indexOf(b);
+    return (ia === -1 ? order.length : ia) - (ib === -1 ? order.length : ib);
+  });
+  return stages.map(stage => {
+    const heading = diagnosticStageHeadings[stage] || stage;
+    return `<li class="diagnostic-stage">${esc(heading)}</li>`
+      + byStage.get(stage).map(diagnosticRowHtml).join('');
   }).join('');
 }
 
-function toast(message, error = false) {
+function toast(message, variant = false) {
   const node = document.querySelector('#toast');
   const savebar = document.querySelector('.builder-savebar');
   node.style.bottom = savebar ? `${window.innerHeight-savebar.getBoundingClientRect().top+10}px` : '';
   node.textContent = message;
-  node.className = `toast visible${error ? ' error' : ''}`;
+  const tone = variant === true ? ' error' : variant === 'warn' ? ' warn' : '';
+  node.className = `toast visible${tone}`;
   clearTimeout(toast.timer);
   toast.timer = setTimeout(() => node.className = 'toast', 2600);
 }
@@ -823,7 +864,7 @@ function openMediaLightbox({contentUrl, type = 'image', title = '', candidates =
   icons();
 }
 
-function reviewAttemptHtml(attempt) {
+function reviewAttemptHtml(attempt, latest = false) {
   const details = attempt.details || {};
   const diagnostics = historyDiagnostics(details);
   const candidateCount = Number(details.candidate_count || 0);
@@ -838,9 +879,10 @@ function reviewAttemptHtml(attempt) {
   if (details.source_url) facts.push(details.source_url);
   const message = attempt.message ? `<p>${esc(attempt.message)}</p>` : '';
   const diagnosticsBlock = diagnostics.length
-    ? `<details class="history-diagnostics"><summary>Provider details (${diagnostics.length})</summary><ul>${diagnosticRowsHtml(diagnostics)}</ul></details>`
+    ? `<details class="history-diagnostics"${latest ? ' open' : ''}><summary>Provider details (${diagnostics.length})</summary><ul>${diagnosticRowsHtml(diagnostics)}</ul></details>`
     : '';
-  return `<article class="review-log-entry"><header><strong>${esc(outcome)}</strong>${badges ? `<span class="source-badges">${badges}</span>` : ''}<time>${esc(formatDateTime(attempt.created_at))}</time></header>${facts.length ? `<small>${esc(facts.join(' · '))}</small>` : ''}${message}${diagnosticsBlock}</article>`;
+  // Older rechecks stay collapsed so the newest answer is the one in view.
+  return `<details class="review-log-entry"${latest ? ' open' : ''}><summary><strong>${esc(outcome)}</strong>${badges ? `<span class="source-badges">${badges}</span>` : ''}<time>${esc(formatDateTime(attempt.created_at))}</time></summary>${facts.length ? `<small>${esc(facts.join(' · '))}</small>` : ''}${message}${diagnosticsBlock}</details>`;
 }
 
 function openReviewSearchLog(reviewId, title = 'Search results') {
@@ -857,7 +899,7 @@ function openReviewSearchLog(reviewId, title = 'Search results') {
   api(`/api/v1/review-items/${reviewId}/search-log`).then(data => {
     const items = data.items || [];
     node.querySelector('.review-log-body').innerHTML = items.length
-      ? items.map(reviewAttemptHtml).join('')
+      ? items.map((item, index) => reviewAttemptHtml(item, index === items.length - 1)).join('')
       : '<div class="empty">No searches were recorded for this card.</div>';
     icons();
   }).catch(error => {
@@ -1784,6 +1826,19 @@ async function showSettingsPage() {
   const addRule=(source='gif',target='mp4')=>{const row=document.createElement('div');row.className='format-rule';row.innerHTML=`<select class="control rule-source">${sourceFormats.map(value=>`<option value="${value}" ${value===source?'selected':''}>.${value}</option>`).join('')}</select><i data-lucide="arrow-right"></i><select class="control rule-target"></select><button class="icon-btn danger" type="button" title="Remove conversion"><i data-lucide="trash-2"></i></button>`;const sourceNode=row.querySelector('.rule-source');const targetNode=row.querySelector('.rule-target');const renderTargets=selected=>{const targets=targetsFor(sourceNode.value);targetNode.innerHTML=targets.map(value=>`<option value="${value}" ${value===selected?'selected':''}>.${value}</option>`).join('');};renderTargets(target);sourceNode.onchange=()=>renderTargets();row.querySelector('button').onclick=()=>row.remove();rulesNode.append(row);icons();};
   Object.entries(data.export_format_rules||{}).forEach(([source,target])=>addRule(source,target));
   document.querySelector('#addExportFormatRule').onclick=()=>addRule();
+  // A saved account with only one half of a credential pair silently disables
+  // the features that need both, so saving warns instead of staying quiet.
+  const incompleteCredentialWarning = form => {
+    const has = (name, saved) => Boolean(String(form.get(name) || '').trim()) || Boolean(saved);
+    const pairs = [
+      ['Danbooru', has('danbooru_login', data.danbooru_login), has('danbooru_api_key', data.danbooru_api_key_configured)],
+      ['e621', has('e621_login', data.e621_login), has('e621_api_key', data.e621_api_key_configured)],
+      ['Gelbooru', has('gelbooru_user_id', data.gelbooru_user_id), has('gelbooru_api_key', data.gelbooru_api_key_configured)],
+      ['Rule34', has('rule34_user_id', data.rule34_user_id), has('rule34_api_key', data.rule34_api_key_configured)],
+      ['FurAffinity', has('furaffinity_cookie_a', data.furaffinity_cookie_a_configured), has('furaffinity_cookie_b', data.furaffinity_cookie_b_configured)],
+    ];
+    return pairs.filter(([, first, second]) => first !== second).map(([label]) => label).join(', ');
+  };
   document.querySelector('#settingsForm').onsubmit = async event => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -1796,7 +1851,7 @@ async function showSettingsPage() {
       const [canonical, rawAliases] = line.split('=', 2);
       if (canonical?.trim() && rawAliases != null) aliases[canonical.trim()] = rawAliases.split(',').map(value => value.trim()).filter(Boolean);
     }
-     try { await Promise.all([api('/api/v1/settings',{method:'PATCH',body:JSON.stringify(payload)}),api('/api/v1/tag-rules',{method:'PUT',body:JSON.stringify({preferred:lines('preferred_tags'),blocked:lines('blocked_tags'),aliases})})]); data.background_model=payload.background_model; data.background_device=payload.background_device; if(payload.huggingface_token){data.huggingface_token_configured=true;document.querySelector('#huggingFaceStatus').textContent='A token is saved.';} updateHuggingFaceTestButton(); toast('Settings saved'); document.querySelector('#settingsState').textContent='Settings saved'; }
+     try { await Promise.all([api('/api/v1/settings',{method:'PATCH',body:JSON.stringify(payload)}),api('/api/v1/tag-rules',{method:'PUT',body:JSON.stringify({preferred:lines('preferred_tags'),blocked:lines('blocked_tags'),aliases})})]); data.background_model=payload.background_model; data.background_device=payload.background_device; if(payload.huggingface_token){data.huggingface_token_configured=true;document.querySelector('#huggingFaceStatus').textContent='A token is saved.';} updateHuggingFaceTestButton(); const accountWarning=incompleteCredentialWarning(form); toast(accountWarning?`Settings saved — incomplete account: ${accountWarning}`:'Settings saved', accountWarning?'warn':false); document.querySelector('#settingsState').textContent='Settings saved'; }
     catch(error) { toast(error.message,true); }
   };
   const huggingFaceInput=document.querySelector('#setting-huggingface_token');
@@ -1812,7 +1867,17 @@ async function showSettingsPage() {
     catch(error) { status.classList.add('error');status.textContent=`Access denied: ${error.message}`;toast(error.message,true); }
     finally { updateHuggingFaceTestButton(); }
   };
-  document.querySelectorAll('.test-source').forEach(node => node.onclick = async () => { try { await api(`/api/v1/settings/source-providers/${node.dataset.provider}/test`,{method:'POST'});toast('Connection successful'); } catch(error) { toast(error.message,true); } });
+  document.querySelectorAll('.test-source').forEach(node => node.onclick = async () => {
+    try {
+      const result = await api(`/api/v1/settings/source-providers/${node.dataset.provider}/test`,{method:'POST'});
+      // A metadata check can pass while the account needed for the
+      // authenticated reverse search is still missing.
+      const note = result.reverse_search === 'needs_credentials'
+        ? ` — reverse search off: ${(result.missing_credentials || ['credentials']).join(' + ')} missing`
+        : result.reverse_search === 'not_supported' ? ' — this source has no reverse-image search' : '';
+      toast(`Connection successful${note}`, note ? 'warn' : false);
+    } catch(error) { toast(error.message,true); }
+  });
   const implicitTagsButton = document.querySelector('#backfillImplicitTags');
   if (implicitTagsButton) implicitTagsButton.onclick = async () => {
     implicitTagsButton.disabled = true;

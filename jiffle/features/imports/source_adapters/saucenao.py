@@ -48,6 +48,7 @@ TAG = re.compile(r"<[^>]+>")
 
 class SaucenaoReverseSearch:
     provider_name = "saucenao"
+    supports_reverse_search = True
     endpoint = SAUCENAO_ENDPOINT
     timeout = SAUCENAO_TIMEOUT
 

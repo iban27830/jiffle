@@ -24,6 +24,7 @@ MAX_RETRY_AFTER_SECONDS = 30.0
 
 class E621SourceProvider:
     provider_name = "e621"
+    supports_reverse_search = True
     # An account widens the search (higher limits and the reverse-search
     # endpoint is authenticated-only); the reverse search reports itself as
     # not configured when no credentials are saved.
@@ -40,6 +41,15 @@ class E621SourceProvider:
         self.request_interval = max(0.0, float(request_interval))
         self._last_request = 0.0
         self._rate_lock = threading.Lock()
+
+    def reverse_search_readiness(self):
+        """Return ``(ready, missing_fields)`` for the authenticated reverse search."""
+        missing = []
+        if not self.login:
+            missing.append("login")
+        if not self.api_key:
+            missing.append("api_key")
+        return (not missing), missing
 
     def can_handle(self, url):
         parsed = urlparse(url)

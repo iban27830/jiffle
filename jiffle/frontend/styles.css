@@ -222,11 +222,16 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
 .diagnostic-row.diagnostic-network_error .diagnostic-icon,
 .diagnostic-row.diagnostic-unavailable .diagnostic-icon,
 .diagnostic-row.diagnostic-timeout .diagnostic-icon { color: var(--bad); }
+.diagnostic-stage { margin: 9px 0 2px; list-style: none; font-weight: 700; font-size: .8em; letter-spacing: .03em; text-transform: uppercase; color: var(--text); }
+.diagnostic-stage:first-child { margin-top: 2px; }
 .review-log-window { width: min(760px,100%); }
 .review-log-body { display: grid; gap: 10px; max-height: calc(100vh - 160px); padding: 12px 13px; overflow: auto; background: var(--surface-2); }
 .review-log-entry { padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
-.review-log-entry header { display: flex; align-items: baseline; gap: 8px; }
-.review-log-entry header time { margin-left: auto; color: var(--muted); font-size: .78em; white-space: nowrap; }
+.review-log-entry > summary { display: flex; align-items: baseline; gap: 8px; cursor: pointer; list-style: none; }
+.review-log-entry > summary::-webkit-details-marker { display: none; }
+.review-log-entry > summary::before { content: '▸'; color: var(--muted); }
+.review-log-entry[open] > summary::before { content: '▾'; }
+.review-log-entry > summary time { margin-left: auto; color: var(--muted); font-size: .78em; white-space: nowrap; }
 .review-log-entry small { display: block; margin-top: 3px; color: var(--muted); word-break: break-word; }
 .review-log-entry p { margin: 6px 0 0; font-size: .88em; }
 .media-lightbox-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 10px 13px; border-top: 1px solid var(--line); background: var(--surface); }
@@ -405,6 +410,7 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
 .toast { position: fixed; z-index: 20; right: 16px; bottom: 42px; max-width: min(390px,calc(100vw - 32px)); padding: 10px 13px; border-radius: 6px; color: #fff; background: #263038; box-shadow: 0 5px 20px rgba(0,0,0,.22); opacity: 0; transform: translateY(8px); pointer-events: none; transition: .18s; }
 .toast.visible { opacity: 1; transform: none; }
 .toast.error { background: var(--bad); }
+.toast.warn { background: var(--warn); }
 .settings-grid { display: grid; grid-template-columns: minmax(180px,240px) minmax(260px,620px); gap: 18px; }
 .settings-grid .form-row { padding-bottom: 12px; border-bottom: 1px solid var(--line); }
 .size-options { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 6px; }

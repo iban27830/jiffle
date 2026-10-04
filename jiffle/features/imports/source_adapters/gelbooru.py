@@ -10,6 +10,7 @@ from jiffle.features.imports.source_adapters.platform_tags import add_platform_t
 
 class GelbooruSourceProvider:
     provider_name = "gelbooru"
+    supports_reverse_search = False
     credentials_improve_results = True
     domains = {"gelbooru.com", "safebooru.org"}
 

@@ -186,7 +186,20 @@ def test_source_provider(provider_name: str):
         return _error(error.code, error.message, 502)
     except (requests.RequestException, ValueError, AttributeError):
         return _error("providers.connection_failed", "The source provider could not be authenticated.", 502)
-    return jsonify({"status": "ok", "provider": provider.provider_name})
+    payload = {"status": "ok", "provider": provider.provider_name}
+    # A successful metadata check does not prove the account can run the
+    # authenticated reverse search, so the answer names each capability.
+    if not getattr(provider, "supports_reverse_search", True):
+        payload["reverse_search"] = "not_supported"
+    elif getattr(provider, "reverse_search_requires_auth", False):
+        readiness = getattr(provider, "reverse_search_readiness", None)
+        ready, missing = readiness() if callable(readiness) else (False, ["login", "api_key"])
+        payload["reverse_search"] = "ready" if ready else "needs_credentials"
+        if missing:
+            payload["missing_credentials"] = list(missing)
+    else:
+        payload["reverse_search"] = "ready"
+    return jsonify(payload)
 
 
 @settings_blueprint.post("/api/v1/settings/furaffinity/open-login")

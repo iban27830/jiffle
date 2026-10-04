@@ -23,6 +23,7 @@ DOMAIN = "rule34.xxx"
 
 class Rule34SourceProvider:
     provider_name = "rule34"
+    supports_reverse_search = False
     credentials_improve_results = True
     domains = {"rule34.xxx", "www.rule34.xxx", "api.rule34.xxx"}
 

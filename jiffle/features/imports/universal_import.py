@@ -899,6 +899,9 @@ def _record_provider_diagnostic(
     message: str | None = None,
     duration_ms: int | None = None,
     remote_id: str | None = None,
+    raw_count: int | None = None,
+    above_threshold: int | None = None,
+    min_confidence: float | None = None,
 ) -> None:
     """Append a safe, UI-friendly result for one provider and resolution stage."""
     if target is None:
@@ -920,6 +923,12 @@ def _record_provider_diagnostic(
         item["duration_ms"] = max(0, int(duration_ms))
     if remote_id not in (None, ""):
         item["remote_id"] = str(remote_id)
+    if raw_count is not None:
+        item["raw_count"] = max(0, int(raw_count))
+    if above_threshold is not None:
+        item["above_threshold"] = max(0, int(above_threshold))
+    if min_confidence is not None:
+        item["min_confidence"] = round(float(min_confidence), 2)
     target.append(item)
 
 
@@ -1043,12 +1052,23 @@ def _reverse_similar(image_path, providers, diagnostics=None):
     for provider in list(providers) + [_iqdb_reverse_search(), _saucenao_reverse_search()]:
         if provider is None or not callable(getattr(provider, "search_similar", None)):
             continue
+        name = (
+            getattr(provider, "provider_name", None)
+            or provider.__class__.__name__.lower()
+        )
+        # A provider that answers exact MD5 lookups may still have no reverse
+        # search at all.  Report that honestly once instead of listing it as a
+        # service that was queried and found nothing.
+        if not getattr(provider, "supports_reverse_search", True):
+            if diagnostics is not None:
+                _record_provider_diagnostic(
+                    diagnostics, "perceptual_search", name, "not_supported", 0,
+                    "import.reverse_search_unsupported",
+                    f"{name} has no reverse-image search.",
+                )
+            continue
         if not _reverse_provider_available(provider):
             if diagnostics is not None:
-                name = (
-                    getattr(provider, "provider_name", None)
-                    or provider.__class__.__name__.lower()
-                )
                 # Surface the skipped source so the user knows that signing in
                 # could widen the search instead of seeing a silent no-result.
                 _record_provider_diagnostic(
@@ -1099,11 +1119,23 @@ def _reverse_similar(image_path, providers, diagnostics=None):
     # discarded, so the caller must not wait for their threads either.
     executor.shutdown(wait=False)
 
-    resolved: list[object] = []
+    collected: list[object] = []
     for result in raw_results:
         provider_name = str(result["provider"])
         error = result.get("error")
         raw_matches = list(result.get("matches") or [])
+        accepted = [
+            raw for raw in raw_matches
+            if (_reverse_confidence(raw) or 0) >= MIN_SIMILAR_CONFIDENCE
+        ]
+        resolved = [
+            _resolve_reverse_candidate(raw, providers) for raw in accepted
+        ]
+        kept = [
+            match
+            for match in (_coerce_match(item, "perceptual") for item in resolved)
+            if match is not None
+        ]
         if diagnostics is not None:
             if error:
                 _record_provider_diagnostic(
@@ -1114,20 +1146,14 @@ def _reverse_similar(image_path, providers, diagnostics=None):
             else:
                 _record_provider_diagnostic(
                     diagnostics, "perceptual_search", provider_name,
-                    "matched" if raw_matches else "no_result", len(raw_matches),
+                    "matched" if raw_matches else "no_result", len(kept),
                     duration_ms=result["duration_ms"],
+                    raw_count=len(raw_matches),
+                    above_threshold=len(accepted),
+                    min_confidence=MIN_SIMILAR_CONFIDENCE,
                 )
-        for raw in raw_matches:
-            confidence = _reverse_confidence(raw)
-            if confidence is None or confidence < MIN_SIMILAR_CONFIDENCE:
-                continue
-            resolved.append(_resolve_reverse_candidate(raw, providers))
-    matches = [
-        match
-        for match in (_coerce_match(item, "perceptual") for item in resolved)
-        if match is not None
-    ]
-    return _unique_similar(matches)[:MAX_REVERSE_CANDIDATES]
+        collected.extend(kept)
+    return _unique_similar(collected)[:MAX_REVERSE_CANDIDATES]
 
 
 def _iqdb_reverse_search():

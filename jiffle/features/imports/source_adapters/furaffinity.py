@@ -10,6 +10,7 @@ from jiffle.features.imports.source_adapters.platform_tags import add_platform_t
 
 class FurAffinitySourceProvider:
     provider_name = "furaffinity"
+    supports_reverse_search = False
     credentials_improve_results = True
     domains = {"furaffinity.net", "www.furaffinity.net"}
 

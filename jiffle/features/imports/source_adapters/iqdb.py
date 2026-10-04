@@ -31,6 +31,7 @@ IGNORED_LINK_PARTS = (
 
 class IqdbReverseSearch:
     provider_name = "iqdb"
+    supports_reverse_search = True
     endpoint = "https://iqdb.org/"
     timeout = 15
 

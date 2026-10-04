@@ -13,6 +13,7 @@ from jiffle.features.imports.source_adapters.platform_tags import add_platform_t
 
 class TbibSourceProvider:
     provider_name = "tbib"
+    supports_reverse_search = False
     domains = {"tbib.org", "www.tbib.org"}
     api_hosts = ("tbib.org", "www.tbib.org")
     max_attempts = 3
