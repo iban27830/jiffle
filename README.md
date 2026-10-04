@@ -208,7 +208,7 @@ For an e621 or e926 post set, Jiffle first checks the complete set (using the sa
 - Images assigned to a family show a relatives marker in the Library. Open an item to see its relatives and select any relative to open it; the family can contain two or more images.
 - Open **Duplicates**, choose a similarity threshold from 70% to 100%, and select **Scan** to find similar files. Lower values find more approximate matches; higher values restrict results to nearly identical images. Scan progress remains visible in the status bar while fingerprints and image pairs are processed.
 - When two similar images are related variations rather than a duplicate to remove, select **Family**. Both files remain in the library and are linked as relatives. Repeating this action with another match adds that image to the same family when the pairs overlap.
-- Open **Editor** to find images with removable empty margins. Use **Find crop candidates** for a background scan with progress and cancellation, or select an image in **Library** and choose **Open in Editor**.
+- Open **Editor** to find images with removable empty margins. **Editor** is split into **Crop**, **Background**, and **Videos & animations** tabs, each with its own list, page size, and **Previous** / **Next** paging, so one long queue does not push the other sections off the screen. Use **Find crop candidates** for a background scan with progress and cancellation, or select an image in **Library** and choose **Open in Editor**.
 - Use the library button beside a crop candidate or in the crop review screen to return to that image in **Library** with its details open.
 - Completed scans remember images that produced no crop candidate, including skipped animations. Repeating a scan with the same detector settings skips their image analysis; changing minimum area, padding, or detector sensitivity makes them eligible for analysis again.
 - Navigation state such as library filters, the selected image, editor status, crop coordinates, zoom, scroll position, and expanded Settings sections survives page refreshes for the current browser session. Unsaved Settings values are not stored.
@@ -230,11 +230,13 @@ family, and is exported as a standalone file.
 
 - Select a video or an animation in **Library** and choose **Open in Editor**, or open **Editor** and use **Videos and animations to review**. The full-size trim editor is always available from **Library**, whether or not the review queue is enabled.
 - In the trim editor, drag the two markers on the timeline under the video, or park the player and use **Set start here** / **Set end here**; **Jump to end** goes straight to the marked end. The highlighted band shows the exact range, and the **Start** and **End** fields accept `mm:ss.d` (for example `0:56.0`) or plain seconds. Playback never continues past the marked end, so **Preview range** stops on it. Select **Add segment**, and repeat for every part you need. Segments must not overlap and must each last at least 0.2 s.
+- Long clips zoom in for precise trimming. Scroll over the timeline to zoom toward the pointer, or use the zoom slider, **Zoom in** / **Zoom out**, **Fit all**, and **Fit selection**; the arrows pan, and dragging the empty track seeks. Shift and drag to pan the visible range. The zoom level and the segments you are editing are kept for the current browser session, so refreshing the page reopens the same trim editor with your work in place.
 - If the clip is still waiting for review and has no fragments yet, select **Keep original, no trim** to confirm it as-is from inside the editor. The clip leaves the review queue without creating any fragments.
-- Select **Save fragments**. Jiffle creates one MP4 file per segment under the media folder and links it to the original; the original keeps its place in the library.
+- Select **Save fragments**. Jiffle creates one MP4 file per segment under the media folder and links it to the original; the original keeps its place in the library. Each row shows its own state while saving (**Queued**, **Encoding**) and a **Saved** check when its fragment is written, so you can see that every part finished.
 - Open a fragment to see **Part N of Media #X** and return to its source. **Open in Editor** on a fragment reopens the same trim editor with its existing segments, where you can add, change, or remove parts. Existing fragments keep their identity, so collections that already contain them stay valid.
 - When a clip has fragments it is marked in the library and left out of automatic collection assembly by tags; the fragments are picked instead. The original can still be added to a collection manually.
-- **Settings → Import and limits → Review videos and animations for trimming** (off by default) sends every imported video and animated image, including the ones already in the library, to the Editor review queue. Confirm a clip with **Looks good** or split it with **Trim**. The new-tab button on a candidate opens the source media file by itself for a closer look before you decide.
+- **Settings → Import and limits → Review videos and animations for trimming** (off by default) sends every imported video and animated image, including the ones already in the library, to the Editor review queue. Confirm a clip with **Looks good** or split it with **Trim**. The new-tab button on a candidate opens the source media file by itself for a closer look before you decide. Candidates are shown as preview cards; **Move to end** rotates a clip you do not want to decide on yet to the back of the queue, while newly imported clips always join at the front.
+- **Settings → Import and limits → Block exporting unreviewed clips** (off by default) leaves clips that still wait for trim review out of automatic collection assembly and refuses to export a collection that still contains one, so an unreviewed original cannot be delivered before you confirm or split it. You can still add such a clip to a collection by hand; export asks you to review it first.
 - Trimming re-encodes each segment, so it needs FFmpeg (already required for collection exports) and takes a little time on large files.
 
 ### Import and review
@@ -257,6 +259,16 @@ verification** means every returned file was unavailable or failed the exact
 hash check. Older history entries that predate these diagnostics still show
 their recorded provider errors and timings.
 
+Both Import history and each Review card summarise a search with small badges so
+a partial result is never shown as a plain "not found". A green check marks a
+found candidate, a key marks sources that were skipped because they need an
+account, a softer badge marks a source that answered anonymously and might
+return more when you sign in, an alert marks a source that errored, and a
+search-crossed badge appears only when every configured source was checked and
+none matched. The badges combine, so a card can show found candidates together
+with an error on another source, and each source row in the expanded search log
+carries the matching status icon.
+
 Review shows its waiting items as a card grid like **Library**. Each card keeps only
 the preview and a row of actions: **Open full size**, **Run import again**, and
 **Reject**. A card never confirms a file by itself: **Open full size** opens the
@@ -277,7 +289,7 @@ resolution method, providers checked, and the URL that supplied the accepted fil
 Use the category buttons at the top of Review to narrow the list: **All**, **Source
 found** for cards where a recheck already produced source candidates, and **Needs
 source** for cards that still have none. A card with a found source is highlighted in
-green, and a rechecked card keeps a **Checked** marker even after the page reopens.
+green, and a rechecked card keeps its search badges even after the page reopens.
 **Run import again** stays available on both kinds of card, because a source can appear
 after a provider is added or reconfigured; select it to search that one card, or tick
 several cards and select **Recheck selected** at the top. A running card is outlined
