@@ -247,17 +247,24 @@ imported, Waiting for review, or Import failed. Repeated imports of the same fil
 do not create another pending Review item.
 
 Open the closed diagnostics disclosure in an Import history entry to see each
-provider stage (metadata, exact search, candidate download, and perceptual
-search), its status, result count, technical code, and a safe error message.
-**Exact source not found** means providers answered successfully without an
-exact match. **TBIB unavailable over the network** or another network status
-means a provider did not answer. **Source requires authorization** means saved
-credentials are missing or rejected. **TBIB returned a post, but the file could
-not be downloaded** means a post matched but its CDN failed (or returned bytes
-with the wrong MD5). A summary such as **Found N candidates, but none passed
-verification** means every returned file was unavailable or failed the exact
-hash check. Older history entries that predate these diagnostics still show
-their recorded provider errors and timings.
+provider grouped by stage (metadata, **Exact search (MD5)**, **Candidate
+download**, and **Similarity search (reverse image)**), with its status, result
+count, technical code, and a safe error message. A provider that supports both
+lookups appears once per stage on purpose: the exact search uses the file hash
+and works anonymously, while the similarity search uploads a preview and may
+need an account. **Exact source not found** means providers answered
+successfully without an exact match. **TBIB unavailable over the network** or
+another network status means a provider did not answer. **Source requires
+authorization** means saved credentials are missing or rejected. **TBIB
+returned a post, but the file could not be downloaded** means a post matched
+but its CDN failed (or returned bytes with the wrong MD5). **Not supported**
+means the source has no reverse-image search at all, so it was not queried.
+Similarity rows report the raw hits and how many reached the kept threshold, for
+example **16 found, 0 at ≥80%**, so a match below the 80% similarity gate is
+not mistaken for a candidate. A summary such as **Found N candidates, but none
+passed verification** means every returned file was unavailable or failed the
+exact hash check. Older history entries that predate these diagnostics still
+show their recorded provider errors and timings.
 
 Both Import history and each Review card summarise a search with small badges so
 a partial result is never shown as a plain "not found". A green check marks a
@@ -299,8 +306,10 @@ while its search is in progress and its button is disabled only for that request
 you start another search while one card is still searching, that card joins a queue: it
 gets a waiting outline and is searched automatically when the current search finishes.
 Select the log button on the card to open the full search
-results for that card, including the outcome, provider details, and why a source was
-not found; the log is removed when the card is confirmed or rejected. **Select all
+results for that card, grouped by stage, with the newest recheck expanded and
+older rechecks collapsed; each row shows the outcome, provider details, and why
+a source was not found. The log is removed when the card is confirmed or
+rejected. **Select all
 on screen** ticks every card on the current page. Rechecking runs the normal import resolution again, so a file
 that only had a metadata match can now combine tags from one provider with the file
 bytes from another. When no byte-identical copy exists, the recheck also runs the
@@ -319,7 +328,7 @@ Set access uses the `e621_login` and `e621_api_key` values saved under **Setting
 
 ### Configure sources
 
-Open **Settings** to configure source accounts, library display options, storage folders, and tag rules. Under **Sources**, add a Danbooru login and API key, an e621/e926 username and API key, a Gelbooru or Rule34.xxx User ID and API key, or FurAffinity session cookies, then use **Test** to check the connection.
+Open **Settings** to configure source accounts, library display options, storage folders, and tag rules. Under **Sources**, add a Danbooru login and API key, an e621/e926 username and API key, a Gelbooru or Rule34.xxx User ID and API key, or FurAffinity session cookies, then use **Test** to check the connection. The Test result names each capability: it can succeed for metadata while reporting that the reverse search is off because Danbooru or e621 still needs both the login and the API key. Jiffle also warns after **Save settings** when only one half of a credential pair is filled.
 
 For Gelbooru and Rule34.xxx you can paste the account line exactly as the site shows it (`&api_key=...&user_id=...`) into either the User ID or the API key field and select **Save settings**; Jiffle fills both fields from it.
 
