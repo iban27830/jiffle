@@ -19,6 +19,7 @@ let reviewSearching = false;
 let reviewSelection = new Set();
 let reviewSearchQueue = [];
 let reviewSearchActive = new Set();
+const reviewAccepting = new Set();
 let reviewSearchApiWarned = false;
 const reviewLocalSearches = new Map();
 let selectedMedia = null;
@@ -725,6 +726,7 @@ function reviewCardHtml(item) {
   const selected = reviewSelection.has(item.id) ? ' checked' : '';
   const candidateCount = (item.source_candidates || []).length;
   const found = candidateCount > 0;
+  const accepting = reviewAccepting.has(Number(item.id));
   // The server keeps the searched state; the local map covers a search that
   // just finished while an older backend has not been restarted yet.
   const search = (item.search && Number(item.search.count || 0) > 0)
@@ -745,8 +747,11 @@ function reviewCardHtml(item) {
     : 'Run the source search again';
   const recheck = `<button type="button" class="icon-btn" data-review-reimport="${item.id}" title="${esc(recheckTitle)}"><i data-lucide="refresh-cw"></i></button>`;
   const log = searched ? `<button type="button" class="icon-btn" data-review-log="${item.id}" title="View the search results for this card"><i data-lucide="scroll-text"></i></button>` : '';
-  const cardClass = ['media-card', 'review-card', found ? 'review-card-source-found' : '', searched ? 'review-card-already-searched' : ''].filter(Boolean).join(' ');
-  return `<article class="${cardClass}" data-review-kind="candidate" data-review-id="${item.id}"><div class="review-card-preview" data-open-review="${item.id}" title="Open full size"><img loading="lazy" src="${esc(item.thumbnail_url)}" alt="">${reason}${verdictBadges}<label class="review-card-select" title="Select for recheck"><input type="checkbox" data-review-select="${item.id}"${selected}></label></div><div class="review-card-actions"><button type="button" class="icon-btn" data-open-review="${item.id}" title="Open full size to choose a source"><i data-lucide="maximize-2"></i></button>${recheck}${log}<button type="button" class="icon-btn danger" data-review-reject="${item.id}" title="Reject"><i data-lucide="trash-2"></i></button></div></article>`;
+  // A card stays visibly busy while its source is being applied, so a slow
+  // accept cannot be mistaken for "nothing happened" and clicked again.
+  const acceptingBadge = accepting ? '<span class="review-card-accepting-badge"><i data-lucide="refresh-cw" class="spin"></i>Applying source…</span>' : '';
+  const cardClass = ['media-card', 'review-card', found ? 'review-card-source-found' : '', searched ? 'review-card-already-searched' : '', accepting ? 'review-card-accepting' : ''].filter(Boolean).join(' ');
+  return `<article class="${cardClass}" data-review-kind="candidate" data-review-id="${item.id}"><div class="review-card-preview" data-open-review="${item.id}" title="Open full size"><img loading="lazy" src="${esc(item.thumbnail_url)}" alt="">${reason}${verdictBadges}${acceptingBadge}<label class="review-card-select" title="Select for recheck"><input type="checkbox" data-review-select="${item.id}"${selected}></label></div><div class="review-card-actions"><button type="button" class="icon-btn" data-open-review="${item.id}" title="Open full size to choose a source"><i data-lucide="maximize-2"></i></button>${recheck}${log}<button type="button" class="icon-btn danger" data-review-reject="${item.id}" title="Reject"><i data-lucide="trash-2"></i></button></div></article>`;
 }
 
 function lightboxCandidateMedia(candidate) {
@@ -807,7 +812,7 @@ function openMediaLightbox({contentUrl, type = 'image', title = '', candidates =
   // Accepting is only offered inside the opened preview so a card click can never
   // confirm a file without the source the user meant to keep.
   const actions = reviewId
-    ? `<div class="media-lightbox-actions"><button type="button" class="btn accept-lightbox-item" title="Keep the staged file and do not use any of the listed source candidates"><i data-lucide="check"></i>Accept without choosing a source</button>${compare ? '<button type="button" class="btn primary use-lightbox-candidate"><i data-lucide="check"></i>Use this source</button>' : ''}</div>`
+    ? `<div class="media-lightbox-actions"><span class="media-lightbox-progress" hidden><i data-lucide="refresh-cw" class="spin"></i>Applying source…</span><button type="button" class="btn accept-lightbox-item" title="Keep the staged file and do not use any of the listed source candidates"><i data-lucide="check"></i>Accept without choosing a source</button>${compare ? '<button type="button" class="btn primary use-lightbox-candidate"><i data-lucide="check"></i>Use this source</button>' : ''}</div>`
     : '';
   const node = document.createElement('div');
   node.className = `media-lightbox${compare ? ' media-lightbox-compare' : ''}`;
@@ -848,22 +853,35 @@ function openMediaLightbox({contentUrl, type = 'image', title = '', candidates =
     node.querySelector('.compare-next').onclick = () => step(1);
     showCandidate();
   }
-  node.querySelectorAll('.use-lightbox-candidate').forEach(element => element.onclick = async () => {
+  // One in-flight accept per review item: the buttons lock and the card shows a
+  // busy badge until the server finishes, so repeated clicks cannot queue
+  // duplicate requests against an already-resolved review.
+  const accept = async (url, successMessage) => {
+    const id = Number(reviewId);
+    if (reviewAccepting.has(id)) return;
+    reviewAccepting.add(id);
+    applyAcceptStates();
+    try {
+      await api(url, {method:'POST'});
+      reviewSelection.delete(id);
+      toast(successMessage);
+    } catch(error) {
+      toast(error.message, true);
+    } finally {
+      reviewAccepting.delete(id);
+      applyAcceptStates();
+      close();
+      await refreshCounts().catch(() => {});
+      if (currentView === 'review') await showReview();
+    }
+  };
+  node.querySelectorAll('.use-lightbox-candidate').forEach(element => element.onclick = () => {
     const candidateId = element.dataset.candidateId;
-    if (!candidateId) return;
-    try {
-      await api(`/api/v1/review-items/${reviewId}/source-candidates/${candidateId}/accept`,{method:'POST'});
-      reviewSelection.delete(Number(reviewId));
-      close(); toast('Source selected'); showReview();
-    } catch(error) { toast(error.message,true); }
+    if (candidateId) accept(`/api/v1/review-items/${reviewId}/source-candidates/${candidateId}/accept`, 'Source selected');
   });
-  node.querySelectorAll('.accept-lightbox-item').forEach(element => element.onclick = async () => {
+  node.querySelectorAll('.accept-lightbox-item').forEach(element => element.onclick = () => {
     if (candidates.length && !confirm(`This file has ${candidates.length} source candidate${candidates.length === 1 ? '' : 's'}. Accept it anyway without choosing one?`)) return;
-    try {
-      await api(`/api/v1/review-items/${reviewId}/accept`,{method:'POST'});
-      reviewSelection.delete(Number(reviewId));
-      close(); toast('File accepted'); await refreshCounts(); showReview();
-    } catch(error) { toast(error.message,true); }
+    accept(`/api/v1/review-items/${reviewId}/accept`, 'File accepted');
   });
   icons();
 }
@@ -980,7 +998,7 @@ async function showReview() {
     openMediaLightbox({contentUrl:node.dataset.openReviewContent, type:node.dataset.reviewType || 'image', title:node.dataset.reviewTitle || 'Preview'});
   });
   meta.textContent = `${data.page.total} awaiting review`;
-  updateSelectionUi(); applySearchStates(); await refreshCounts();
+  updateSelectionUi(); applySearchStates(); applyAcceptStates(); await refreshCounts();
 }
 
 // A recheck that is running or waiting in the queue gets a visible state and a
@@ -1007,6 +1025,27 @@ function applySearchStates() {
       ? `<i data-lucide="refresh-cw" class="spin"></i>${reviewSearchQueue.length ? `Queued (${reviewSearchQueue.length})` : 'Rechecking...'}`
       : `<i data-lucide="refresh-cw"></i>Recheck selected${selectedCount ? ` (${selectedCount})` : ''}`;
   }
+  icons();
+}
+
+// Accepting a source can download/encode for a few seconds.  Every card that
+// is being applied gets a busy badge and locked controls, and the open
+// comparison view shows the same progress instead of looking frozen.
+function applyAcceptStates() {
+  document.querySelectorAll('.review-card[data-review-id]').forEach(card => {
+    const id = Number(card.dataset.reviewId);
+    const accepting = reviewAccepting.has(id);
+    card.classList.toggle('review-card-accepting', accepting);
+    card.querySelectorAll('button').forEach(button => { button.disabled = accepting; });
+  });
+  const lightbox = document.querySelector('.media-lightbox');
+  if (!lightbox) return;
+  const busy = reviewAccepting.size > 0;
+  lightbox.querySelectorAll('.use-lightbox-candidate, .accept-lightbox-item, .manual-lightbox-source').forEach(button => {
+    button.disabled = busy;
+  });
+  const progress = lightbox.querySelector('.media-lightbox-progress');
+  if (progress) progress.hidden = !busy;
   icons();
 }
 
