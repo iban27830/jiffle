@@ -712,21 +712,38 @@ function lightboxCandidateMedia(candidate) {
   return `<img src="${esc(source)}" alt="" loading="lazy">`;
 }
 
+function candidateTagChips(values, extraClass = '') {
+  const tags = (Array.isArray(values) ? values : []).map(value => String(value).trim()).filter(Boolean);
+  if (!tags.length) return '';
+  return `<div class="candidate-tag-list">${tags.map(tag => `<span class="candidate-tag${extraClass}">${esc(tag)}</span>`).join('')}</div>`;
+}
+
 function lightboxCandidateInfo(candidate) {
   const metadata = candidate.source_metadata || {};
   const heading = [candidate.provider, metadata.remote_id ? `#${metadata.remote_id}` : ''].filter(Boolean).join(' ');
-  const details = [];
-  if (candidate.width || candidate.height) details.push(`${candidate.width || '?'}×${candidate.height || '?'}`);
-  if (candidate.match_method) details.push(String(candidate.match_method).replaceAll('_', ' '));
-  if (candidate.confidence != null) details.push(`${Math.round(Number(candidate.confidence))}% match`);
+  // The side panel repeats every fact that helps tell similar candidates apart:
+  // author, size, match quality, source domain, tags, and characters.
+  const facts = [];
+  if (candidate.width || candidate.height) facts.push(['Size', `${candidate.width || '?'}×${candidate.height || '?'}`]);
+  if (candidate.file_size) facts.push(['File size', formatBytes(candidate.file_size)]);
+  if (candidate.match_method) facts.push(['Match', String(candidate.match_method).replaceAll('_', ' ')]);
+  if (candidate.confidence != null) facts.push(['Confidence', `${Math.round(Number(candidate.confidence))}%`]);
+  if (metadata.domain) facts.push(['Source', metadata.domain]);
+  if (metadata.parent_id) facts.push(['Parent', String(metadata.parent_id)]);
+  if (metadata.content_md5) facts.push(['MD5', String(metadata.content_md5)]);
+  const factRows = facts.map(([label, value]) => `<div class="candidate-fact"><span>${esc(label)}</span><strong title="${esc(value)}">${esc(value)}</strong></div>`).join('');
+  const tags = candidateTagChips(metadata.tags);
+  const characters = candidateTagChips(metadata.character_tags, ' candidate-tag-character');
   // Every candidate keeps a link to the page it was taken from, so the match can be
   // checked in the original gallery before it is confirmed.
   const link = metadata.canonical_url
     ? `<a class="compare-source-link" href="${esc(metadata.canonical_url)}" target="_blank" rel="noopener" title="Open the page this candidate was taken from"><i data-lucide="external-link"></i>Open source${metadata.domain ? ` on ${esc(metadata.domain)}` : ''}</a>`
     : '';
-  return `<strong>${esc(heading || 'Source candidate')}</strong>` +
-    `<span class="compare-author">${metadata.author ? esc(metadata.author) : 'Unknown author'}</span>` +
-    `<small>${details.join(' · ')}</small>${link}`;
+  return `<div class="candidate-head"><strong>${esc(heading || 'Source candidate')}</strong><span class="candidate-author">${metadata.author ? esc(metadata.author) : 'Unknown author'}</span></div>` +
+    (factRows ? `<div class="candidate-facts">${factRows}</div>` : '') +
+    (tags ? `<section class="candidate-section"><span class="candidate-section-label">Tags</span><div class="candidate-tags-scroll">${tags}</div></section>` : '') +
+    (characters ? `<section class="candidate-section"><span class="candidate-section-label">Characters</span><div class="candidate-tags-scroll">${characters}</div></section>` : '') +
+    (link ? `<div class="candidate-footer">${link}</div>` : '');
 }
 
 function openMediaLightbox({contentUrl, type = 'image', title = '', candidates = [], reviewId = null}) {
@@ -736,10 +753,11 @@ function openMediaLightbox({contentUrl, type = 'image', title = '', candidates =
     : `<img src="${esc(contentUrl)}" alt="">`;
   const manual = reviewId ? `<button type="button" class="btn manual-lightbox-source"><i data-lucide="link"></i>Add source URL</button>` : '';
   // A card with candidates opens as a side-by-side comparison: the staged file on the
-  // left, the selected candidate on the right, switched with the arrows or keyboard.
+  // left, the selected candidate in the middle, and its details on the right, switched
+  // with the arrows or keyboard. Both image panes stay equal so neither is favoured.
   const compare = Boolean(reviewId && candidates.length);
   const body = compare
-    ? `<div class="compare-grid"><section class="compare-pane compare-mine"><header><span>Your file</span></header><div class="compare-media">${media}</div></section><section class="compare-pane compare-candidate"><header><span>Source candidate</span><span class="compare-position"></span></header><div class="compare-media"><div class="compare-candidate-media"></div><button type="button" class="compare-nav compare-prev" title="Previous candidate"><i data-lucide="chevron-left"></i></button><button type="button" class="compare-nav compare-next" title="Next candidate"><i data-lucide="chevron-right"></i></button></div><div class="compare-candidate-info"></div></section></div>`
+    ? `<div class="compare-grid"><section class="compare-pane compare-mine"><header><span>Your file</span></header><div class="compare-media">${media}</div></section><section class="compare-pane compare-candidate"><header><span>Source candidate</span><span class="compare-position"></span></header><div class="compare-media"><div class="compare-candidate-media"></div><button type="button" class="compare-nav compare-prev" title="Previous candidate"><i data-lucide="chevron-left"></i></button><button type="button" class="compare-nav compare-next" title="Next candidate"><i data-lucide="chevron-right"></i></button></div></section><aside class="compare-candidate-info" aria-label="Candidate details"></aside></div>`
     : `<div class="media-lightbox-body">${media}</div>`;
   // Accepting is only offered inside the opened preview so a card click can never
   // confirm a file without the source the user meant to keep.

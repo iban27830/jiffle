@@ -274,11 +274,13 @@ the preview and a row of actions: **Open full size**, **Run import again**, and
 **Reject**. A card never confirms a file by itself: **Open full size** opens the
 original in a full-screen viewer, and confirming is done there. When several source
 pages matched at 80% or more, that viewer opens as a side-by-side comparison: your
-staged file on the left and the matched candidate on the right. Use the left and
-right arrows (or the keyboard arrow keys) to switch between candidates; each one
-shows its provider and remote ID, author, match method, confidence, and dimensions,
-along with an **Open source** link to the page it was taken from so you can check it
-in the original gallery. Select **Use this source** to keep the candidate that is
+staged file on the left and the matched candidate in the middle, with a details panel
+on the right. Both images keep the same size, so the extra panel helps compare similar
+matches without covering either picture. Use the left and right arrows (or the keyboard
+arrow keys) to switch between candidates; the details panel shows the provider and
+remote ID, author, source domain, dimensions, file size, match method, confidence, tags,
+and character tags, along with an **Open source** link to the page it was taken from so
+you can check it in the original gallery. Select **Use this source** to keep the candidate that is
 currently shown together with its metadata; the other staged files are removed. The
 viewer also offers **Add source URL** as a manual fallback when no usable source was
 found, and **Accept without choosing a source** to keep the staged file when you do
