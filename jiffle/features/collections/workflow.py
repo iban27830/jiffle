@@ -438,8 +438,12 @@ def _matching_candidates(
         # A video or animation still waiting for the trim review must not be
         # picked automatically while the user has not decided whether to split
         # it.  Confirming it ("Looks good") clears the pending status.
+        # COALESCE keeps the check NULL-safe: images have no trim status, and a
+        # bare ``trim_review_status='pending'`` would evaluate to NULL and drop
+        # every image instead of only the pending clips.
         clauses.append(
-            "NOT (item.trim_review_status='pending' AND item.derived_from_media_id IS NULL)"
+            "NOT (COALESCE(item.trim_review_status, '')='pending' "
+            "AND item.derived_from_media_id IS NULL)"
         )
     for tag in included_tags:
         values = expand_tag_aliases(tag, aliases)
