@@ -62,7 +62,24 @@ def accept_review_item(
         ).fetchone()
         if existing_source:
             media_item_id = int(existing_source[0])
-            if file_source:
+            if not _same_file(connection, media_item_id, row["content_hash"]):
+                # The user imported a file that is not byte-identical to the
+                # library copy of this source (a crop or a re-encode).  Folding
+                # the review into the older item would silently drop the upload,
+                # so keep it as a related variant instead.
+                media_item_id = _keep_upload_as_variant(
+                    connection, settings, staged,
+                    media_type=row["media_type"], width=row["width"],
+                    height=row["height"], file_size=row["file_size"],
+                    content_hash=row["content_hash"], source=source,
+                    existing_media_id=media_item_id,
+                )
+                _history(connection, "review.variant_kept", review_id, {
+                    "media_item_id": media_item_id,
+                    "existing_media_id": int(existing_source[0]),
+                    "source_url": source.canonical_url,
+                })
+            elif file_source:
                 connection.execute(
                     "UPDATE media_items SET file_source_url=? WHERE id=?",
                     (file_source.canonical_url, media_item_id),
@@ -157,13 +174,49 @@ def accept_source_candidate(
     file_source = _candidate_source(row["source_metadata_json"])
     candidate_metadata = _candidate_source(row["candidate_source_metadata_json"])
     source = candidate_metadata or file_source
-    duplicate = connection.execute(
+    source_existing = connection.execute(
         "SELECT id FROM media_items WHERE content_hash=? AND deleted_at IS NULL",
         (row["content_hash"],),
     ).fetchone()
+    input_existing = None
+    if row["input_hash"] and row["input_hash"] != row["content_hash"]:
+        input_existing = connection.execute(
+            "SELECT id FROM media_items WHERE content_hash=? AND deleted_at IS NULL",
+            (row["input_hash"],),
+        ).fetchone()
+    input_path = (
+        _staged_path(settings, row["input_path"]) if row["input_path"] else None
+    )
+    input_available = input_path is not None and input_path.is_file()
     stored_path = None
-    if duplicate:
-        media_item_id = int(duplicate[0])
+    if source_existing and input_available and not _same_file(
+        connection, int(source_existing[0]), row["input_hash"]
+    ):
+        # The chosen source is already in the library, but the user imported a
+        # different file (for example a crop of the same artwork).  Store the
+        # uploaded file as a family variant so it does not silently disappear.
+        media_item_id = _keep_upload_as_variant(
+            connection, settings, input_path,
+            media_type=row["media_type"], width=row["width"],
+            height=row["height"], file_size=row["file_size"],
+            content_hash=row["input_hash"], source=source,
+            existing_media_id=int(source_existing[0]),
+        )
+        _history(connection, "review.variant_kept", review_id, {
+            "media_item_id": media_item_id,
+            "existing_media_id": int(source_existing[0]),
+            "source_url": source.canonical_url if source else None,
+        })
+    elif source_existing or input_existing:
+        media_item_id = int((source_existing or input_existing)[0])
+        if (
+            source_existing
+            and input_existing
+            and int(source_existing[0]) != int(input_existing[0])
+        ):
+            _add_to_family(
+                connection, int(source_existing[0]), int(input_existing[0])
+            )
         if source:
             _store_source(connection, media_item_id, source)
             _store_tags(connection, media_item_id, source.tags)
@@ -669,6 +722,116 @@ def _staged_path(settings: Settings, stored_path: str) -> Path:
     if not candidate.is_relative_to(root):
         raise ReviewFailure("review.file_missing", "The staged file is unavailable.")
     return candidate
+
+
+def _same_file(connection: sqlite3.Connection, media_item_id: int, content_hash: str | None) -> bool:
+    """True when the live media item is byte-identical to the given hash."""
+    if not content_hash:
+        return False
+    row = connection.execute(
+        "SELECT content_hash FROM media_items WHERE id=?", (media_item_id,)
+    ).fetchone()
+    return bool(row and row["content_hash"] == content_hash)
+
+
+def _add_to_family(connection: sqlite3.Connection, *media_ids: int) -> int | None:
+    """Group media items in one family, merging already existing families."""
+    identifiers = [int(value) for value in media_ids]
+    if len(identifiers) < 2:
+        return None
+    placeholders = ", ".join("?" for _ in identifiers)
+    family_ids = {
+        int(row[0])
+        for row in connection.execute(
+            f"SELECT family_id FROM media_items "
+            f"WHERE id IN ({placeholders}) AND family_id IS NOT NULL",
+            identifiers,
+        )
+    }
+    if family_ids:
+        family_id = min(family_ids)
+        if len(family_ids) > 1:
+            existing = ", ".join("?" for _ in family_ids)
+            connection.execute(
+                f"UPDATE media_items SET family_id=? WHERE family_id IN ({existing})",
+                (family_id, *family_ids),
+            )
+            connection.execute(
+                f"DELETE FROM media_families WHERE id IN ({existing}) AND id<>?",
+                (*family_ids, family_id),
+            )
+    else:
+        family_id = int(
+            connection.execute("INSERT INTO media_families DEFAULT VALUES").lastrowid
+        )
+    connection.execute(
+        f"UPDATE media_items SET family_id=? WHERE id IN ({placeholders})",
+        (family_id, *identifiers),
+    )
+    return family_id
+
+
+def _keep_upload_as_variant(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    staged: Path,
+    *,
+    media_type: str,
+    width: int | None,
+    height: int | None,
+    file_size: int | None,
+    content_hash: str,
+    source: SourceMedia | None,
+    existing_media_id: int,
+) -> int:
+    """Store a reviewed upload as a new media item related to an existing one.
+
+    The accepted source already owns the ``media_sources`` row for its URL, so
+    the variant records its metadata on ``media_items`` only and is linked to
+    the older item through a family.  That keeps the user's file visible in the
+    library instead of deleting it during source resolution.
+    """
+    stored_path = atomic_copy(staged, settings.media_path, "media")
+    try:
+        cursor = connection.execute(
+            "INSERT INTO media_items "
+            "(file_path, media_type, source_url, file_source_url, author, domain, "
+            "width, height, file_size, content_hash, parent_id, character_tags_json) "
+            "VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                stored_path,
+                media_type,
+                source.canonical_url if source else None,
+                source.author if source else None,
+                source.domain if source else None,
+                width,
+                height,
+                file_size,
+                content_hash,
+                source.parent_id if source else None,
+                json.dumps(list(source.character_tags)) if source else "[]",
+            ),
+        )
+        media_item_id = int(cursor.lastrowid)
+        create_original_revision(connection, media_item_id)
+        if media_type == "image":
+            try:
+                with Image.open(settings.media_path / stored_path) as image:
+                    connection.execute(
+                        "INSERT INTO media_fingerprints (media_item_id, perceptual_hash) "
+                        "VALUES (?, ?)",
+                        (media_item_id, str(imagehash.phash(image))),
+                    )
+            except (OSError, ValueError):
+                pass
+        if source:
+            _store_tags(connection, media_item_id, source.tags)
+        _add_to_family(connection, media_item_id, existing_media_id)
+    except Exception:
+        (settings.media_path / stored_path).unlink(missing_ok=True)
+        connection.rollback()
+        raise
+    return media_item_id
 
 
 def _complete_review(connection, review_id, candidate_id, media_item_id, source, file_source=None):
