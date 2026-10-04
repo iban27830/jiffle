@@ -11,6 +11,12 @@ from jiffle.configuration.settings import Settings
 from jiffle.infrastructure.database.connection import connect_database
 
 
+# Confidence at which two images are treated as the same picture when a media
+# item is created outside a full scan (for example by accepting a review
+# source).  It matches the Duplicates page default so both surfaces agree.
+DEFAULT_MATCH_THRESHOLD = 90.0
+
+
 def create_duplicate_scan_job(connection: sqlite3.Connection, threshold: float) -> int:
     cursor = connection.execute(
         "INSERT INTO background_jobs (job_type, status, result_json) "
@@ -173,6 +179,69 @@ def _hash_to_int(raw) -> int | None:
         return int(str(raw), 16)
     except (TypeError, ValueError):
         return None
+
+
+def find_similar_media(
+    connection: sqlite3.Connection,
+    perceptual_hash: str,
+    threshold: float = DEFAULT_MATCH_THRESHOLD,
+    exclude_media_id: int | None = None,
+) -> list[tuple[int, float]]:
+    """Return live images whose cached fingerprint is close to ``perceptual_hash``.
+
+    Results are ordered best first as ``(media_id, confidence)``.  Only cached
+    fingerprints are read, so this never decodes the library; items without a
+    fingerprint are skipped until a scan or import fills them.
+    """
+    wanted = _hash_to_int(perceptual_hash)
+    if wanted is None:
+        return []
+    rows = connection.execute(
+        "SELECT media.id AS id, fp.perceptual_hash AS perceptual_hash "
+        "FROM media_fingerprints fp "
+        "JOIN media_items media ON media.id=fp.media_item_id "
+        "WHERE media.media_type='image' AND media.deleted_at IS NULL"
+    ).fetchall()
+    bits = 64
+    # confidence = 100 * (bits - distance) / bits  =>  distance <= bits * (100 - threshold) / 100
+    max_distance = int(math.floor(bits * (100.0 - threshold) / 100.0))
+    matches: list[tuple[int, float]] = []
+    for row in rows:
+        media_id = int(row["id"])
+        if exclude_media_id is not None and media_id == int(exclude_media_id):
+            continue
+        candidate = _hash_to_int(row["perceptual_hash"])
+        if candidate is None:
+            continue
+        distance = (wanted ^ candidate).bit_count()
+        if distance > max_distance:
+            continue
+        confidence = 100.0 * (bits - distance) / bits
+        if confidence < threshold:
+            continue
+        matches.append((media_id, round(confidence, 2)))
+    matches.sort(key=lambda item: item[1], reverse=True)
+    return matches
+
+
+def register_pending_match(
+    connection: sqlite3.Connection,
+    left_media_id: int,
+    right_media_id: int,
+    confidence: float,
+) -> None:
+    """Record a pending perceptual duplicate pair for the Duplicates page."""
+    left, right = sorted((int(left_media_id), int(right_media_id)))
+    if left == right:
+        return
+    connection.execute(
+        "INSERT INTO duplicate_matches "
+        "(left_media_id, right_media_id, match_method, confidence) "
+        "VALUES (?, ?, 'perceptual', ?) "
+        "ON CONFLICT(left_media_id, right_media_id, match_method) "
+        "DO UPDATE SET confidence=excluded.confidence",
+        (left, right, round(float(confidence), 2)),
+    )
 
 
 def _fingerprint_for(settings: Settings, stored_path: str) -> int | None:

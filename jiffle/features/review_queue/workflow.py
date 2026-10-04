@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
+from typing import NamedTuple
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -10,6 +11,12 @@ import imagehash
 from PIL import Image
 
 from jiffle.configuration.settings import Settings
+from jiffle.features.duplicates.scan import (
+    DEFAULT_MATCH_THRESHOLD,
+    find_similar_media,
+    register_pending_match,
+)
+from jiffle.features.imports.history import finalize_review_history
 from jiffle.features.imports.local_import import atomic_copy, inspect_media
 from jiffle.features.imports.source_adapters.contracts import SourceMedia, SourceProvider
 from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
@@ -37,13 +44,21 @@ class ReviewFailure(Exception):
         self.message = message
 
 
+class ReviewAcceptance(NamedTuple):
+    """What accepting a review item did to the library."""
+
+    media_item_id: int
+    outcome: str  # "created" | "merged" | "duplicate_pending"
+    duplicate_of: int | None = None
+
+
 def accept_review_item(
     connection: sqlite3.Connection,
     settings: Settings,
     review_id: int,
     source: SourceMedia | None = None,
     file_source: SourceMedia | None | object = _UNSET,
-) -> int:
+) -> ReviewAcceptance:
     row = _pending_review(connection, review_id)
     source = source or _candidate_source(row["source_metadata_json"])
     if file_source is _UNSET:
@@ -61,53 +76,32 @@ def accept_review_item(
             (source.canonical_url,),
         ).fetchone()
         if existing_source:
+            # The source post is already in the library.  Keep the single item
+            # and merge its metadata; the stored file is never replaced.
             media_item_id = int(existing_source[0])
-            if not _same_file(connection, media_item_id, row["content_hash"]):
-                # The user imported a file that is not byte-identical to the
-                # library copy of this source (a crop or a re-encode).  Folding
-                # the review into the older item would silently drop the upload,
-                # so keep it as a related variant instead.
-                media_item_id = _keep_upload_as_variant(
-                    connection, settings, staged,
-                    media_type=row["media_type"], width=row["width"],
-                    height=row["height"], file_size=row["file_size"],
-                    content_hash=row["content_hash"], source=source,
-                    existing_media_id=media_item_id,
-                )
-                _history(connection, "review.variant_kept", review_id, {
-                    "media_item_id": media_item_id,
-                    "existing_media_id": int(existing_source[0]),
-                    "source_url": source.canonical_url,
-                })
-            elif file_source:
-                connection.execute(
-                    "UPDATE media_items SET file_source_url=? WHERE id=?",
-                    (file_source.canonical_url, media_item_id),
-                )
+            _merge_source_into_existing(connection, media_item_id, source, file_source)
             _complete_review(
-                connection, review_id, row["candidate_id"], media_item_id, source, file_source
+                connection, review_id, row["candidate_id"], media_item_id,
+                source, file_source, outcome="merged", duplicate_of=media_item_id,
             )
             staged.unlink(missing_ok=True)
             _cleanup_source_candidates(connection, settings, review_id)
-            return media_item_id
+            return ReviewAcceptance(media_item_id, "merged", media_item_id)
 
     duplicate = connection.execute(
-        "SELECT id FROM media_items WHERE content_hash = ?", (row["content_hash"],)
+        "SELECT id FROM media_items WHERE content_hash = ? AND deleted_at IS NULL",
+        (row["content_hash"],),
     ).fetchone()
     if duplicate:
         media_item_id = int(duplicate[0])
-        if source:
-            _store_source(connection, media_item_id, source)
-            _store_tags(connection, media_item_id, source.tags)
-        if file_source:
-            connection.execute(
-                "UPDATE media_items SET file_source_url=? WHERE id=?",
-                (file_source.canonical_url, media_item_id),
-            )
-        _complete_review(connection, review_id, row["candidate_id"], media_item_id, source, file_source)
+        _merge_source_into_existing(connection, media_item_id, source, file_source)
+        _complete_review(
+            connection, review_id, row["candidate_id"], media_item_id,
+            source, file_source, outcome="merged", duplicate_of=media_item_id,
+        )
         staged.unlink(missing_ok=True)
         _cleanup_source_candidates(connection, settings, review_id)
-        return media_item_id
+        return ReviewAcceptance(media_item_id, "merged", media_item_id)
 
     stored_path = atomic_copy(staged, settings.media_path, "media")
     try:
@@ -132,17 +126,26 @@ def accept_review_item(
         )
         media_item_id = int(cursor.lastrowid)
         create_original_revision(connection, media_item_id)
+        perceptual_hash = _store_new_fingerprint(
+            connection, media_item_id, row["media_type"],
+            settings.media_path / stored_path,
+        )
         if source:
             _store_source(connection, media_item_id, source)
             _store_tags(connection, media_item_id, source.tags)
-        _complete_review(connection, review_id, row["candidate_id"], media_item_id, source, file_source)
+        duplicate_of = _register_new_duplicates(connection, media_item_id, perceptual_hash)
+        outcome = "duplicate_pending" if duplicate_of is not None else "created"
+        _complete_review(
+            connection, review_id, row["candidate_id"], media_item_id,
+            source, file_source, outcome=outcome, duplicate_of=duplicate_of,
+        )
     except Exception:
         (settings.media_path / stored_path).unlink(missing_ok=True)
         connection.rollback()
         raise
     staged.unlink(missing_ok=True)
     _cleanup_source_candidates(connection, settings, review_id)
-    return media_item_id
+    return ReviewAcceptance(media_item_id, outcome, duplicate_of)
 
 
 def accept_source_candidate(
@@ -150,7 +153,7 @@ def accept_source_candidate(
     settings: Settings,
     review_id: int,
     candidate_id: int,
-) -> int:
+) -> ReviewAcceptance:
     """Accept one staged external source candidate and discard its siblings."""
     row = connection.execute(
         "SELECT review.status, review.import_candidate_id, candidate.content_hash AS input_hash, "
@@ -184,47 +187,14 @@ def accept_source_candidate(
             "SELECT id FROM media_items WHERE content_hash=? AND deleted_at IS NULL",
             (row["input_hash"],),
         ).fetchone()
-    input_path = (
-        _staged_path(settings, row["input_path"]) if row["input_path"] else None
-    )
-    input_available = input_path is not None and input_path.is_file()
-    stored_path = None
-    if source_existing and input_available and not _same_file(
-        connection, int(source_existing[0]), row["input_hash"]
-    ):
-        # The chosen source is already in the library, but the user imported a
-        # different file (for example a crop of the same artwork).  Store the
-        # uploaded file as a family variant so it does not silently disappear.
-        media_item_id = _keep_upload_as_variant(
-            connection, settings, input_path,
-            media_type=row["media_type"], width=row["width"],
-            height=row["height"], file_size=row["file_size"],
-            content_hash=row["input_hash"], source=source,
-            existing_media_id=int(source_existing[0]),
-        )
-        _history(connection, "review.variant_kept", review_id, {
-            "media_item_id": media_item_id,
-            "existing_media_id": int(source_existing[0]),
-            "source_url": source.canonical_url if source else None,
-        })
-    elif source_existing or input_existing:
+
+    if source_existing or input_existing:
+        # The accepted file is already stored byte-for-byte.  Merge the source
+        # metadata into that item; its file and revisions are never replaced.
         media_item_id = int((source_existing or input_existing)[0])
-        if (
-            source_existing
-            and input_existing
-            and int(source_existing[0]) != int(input_existing[0])
-        ):
-            _add_to_family(
-                connection, int(source_existing[0]), int(input_existing[0])
-            )
-        if source:
-            _store_source(connection, media_item_id, source)
-            _store_tags(connection, media_item_id, source.tags)
-        if file_source:
-            connection.execute(
-                "UPDATE media_items SET file_source_url=? WHERE id=?",
-                (file_source.canonical_url, media_item_id),
-            )
+        _merge_source_into_existing(connection, media_item_id, source, file_source)
+        outcome = "merged"
+        duplicate_of = media_item_id
     else:
         stored_path = atomic_copy(selected_path, settings.media_path, "media")
         try:
@@ -240,18 +210,15 @@ def accept_source_candidate(
             )
             media_item_id = int(cursor.lastrowid)
             create_original_revision(connection, media_item_id)
-            if row["media_type"] == "image":
-                try:
-                    with Image.open(selected_path) as image:
-                        connection.execute(
-                            "INSERT INTO media_fingerprints (media_item_id, perceptual_hash) VALUES (?, ?)",
-                            (media_item_id, str(imagehash.phash(image))),
-                        )
-                except (OSError, ValueError):
-                    pass
+            perceptual_hash = _store_new_fingerprint(
+                connection, media_item_id, row["media_type"],
+                settings.media_path / stored_path,
+            )
             if source:
                 _store_source(connection, media_item_id, source)
                 _store_tags(connection, media_item_id, source.tags)
+            duplicate_of = _register_new_duplicates(connection, media_item_id, perceptual_hash)
+            outcome = "duplicate_pending" if duplicate_of is not None else "created"
         except Exception:
             (settings.media_path / stored_path).unlink(missing_ok=True)
             connection.rollback()
@@ -273,11 +240,14 @@ def accept_source_candidate(
         "source_candidate_id": candidate_id,
         "source_url": source.canonical_url if source else None,
         "file_source_url": file_source.canonical_url if file_source else None,
+        "outcome": outcome,
+        "duplicate_of": duplicate_of,
     })
+    finalize_review_history(connection, review_id, outcome, media_item_id, duplicate_of)
     _delete_review_search_attempts(connection, review_id)
     connection.commit()
     _remove_review_staging(connection, settings, review_id, keep=None, primary_path=row["input_path"])
-    return media_item_id
+    return ReviewAcceptance(media_item_id, outcome, duplicate_of)
 
 
 def reject_review_item(
@@ -298,6 +268,7 @@ def reject_review_item(
             (review_id,),
         )
         _history(connection, "review.rejected", review_id, {})
+        finalize_review_history(connection, review_id, "rejected")
         _delete_review_search_attempts(connection, review_id)
         connection.commit()
     except Exception:
@@ -342,10 +313,12 @@ def run_manual_source_job(
         )
         connection.commit()
         source = provider.fetch(source_url)
-        media_item_id = accept_review_item(connection, settings, review_id, source, source)
+        acceptance = accept_review_item(connection, settings, review_id, source, source)
         result = json.dumps({
             "outcome": "accepted", "review_item_id": review_id,
-            "media_item_id": media_item_id,
+            "media_item_id": acceptance.media_item_id,
+            "review_outcome": acceptance.outcome,
+            "duplicate_of": acceptance.duplicate_of,
         })
         connection.execute(
             "UPDATE background_jobs SET status='completed', progress=100, result_json=?, "
@@ -510,13 +483,15 @@ def _reimport_review_item(
             metadata_match = _select_metadata_source(matches) or file_match
             source = _match_to_source(metadata_match)
             file_source = _match_to_source(file_match)
-            media_item_id = accept_review_item(
+            acceptance = accept_review_item(
                 connection, settings, review_id, source, file_source
             )
             return {
                 "review_item_id": review_id,
                 "status": "accepted",
-                "media_item_id": media_item_id,
+                "media_item_id": acceptance.media_item_id,
+                "review_outcome": acceptance.outcome,
+                "duplicate_of": acceptance.duplicate_of,
                 "provider": source.provider,
                 "file_provider": file_source.provider,
                 "source_url": source.canonical_url,
@@ -553,13 +528,15 @@ def _reimport_review_item(
                 "provider_diagnostics": diagnostics,
             }
         source = _match_to_source(metadata_match)
-        media_item_id = accept_review_item(
+        acceptance = accept_review_item(
             connection, settings, review_id, source, None
         )
         return {
             "review_item_id": review_id,
             "status": "accepted",
-            "media_item_id": media_item_id,
+            "media_item_id": acceptance.media_item_id,
+            "review_outcome": acceptance.outcome,
+            "duplicate_of": acceptance.duplicate_of,
             "provider": source.provider,
             "metadata_only": True,
             "source_url": source.canonical_url,
@@ -724,117 +701,164 @@ def _staged_path(settings: Settings, stored_path: str) -> Path:
     return candidate
 
 
-def _same_file(connection: sqlite3.Connection, media_item_id: int, content_hash: str | None) -> bool:
-    """True when the live media item is byte-identical to the given hash."""
-    if not content_hash:
-        return False
-    row = connection.execute(
-        "SELECT content_hash FROM media_items WHERE id=?", (media_item_id,)
-    ).fetchone()
-    return bool(row and row["content_hash"] == content_hash)
-
-
-def _add_to_family(connection: sqlite3.Connection, *media_ids: int) -> int | None:
-    """Group media items in one family, merging already existing families."""
-    identifiers = [int(value) for value in media_ids]
-    if len(identifiers) < 2:
-        return None
-    placeholders = ", ".join("?" for _ in identifiers)
-    family_ids = {
-        int(row[0])
-        for row in connection.execute(
-            f"SELECT family_id FROM media_items "
-            f"WHERE id IN ({placeholders}) AND family_id IS NOT NULL",
-            identifiers,
-        )
-    }
-    if family_ids:
-        family_id = min(family_ids)
-        if len(family_ids) > 1:
-            existing = ", ".join("?" for _ in family_ids)
-            connection.execute(
-                f"UPDATE media_items SET family_id=? WHERE family_id IN ({existing})",
-                (family_id, *family_ids),
-            )
-            connection.execute(
-                f"DELETE FROM media_families WHERE id IN ({existing}) AND id<>?",
-                (*family_ids, family_id),
-            )
-    else:
-        family_id = int(
-            connection.execute("INSERT INTO media_families DEFAULT VALUES").lastrowid
-        )
-    connection.execute(
-        f"UPDATE media_items SET family_id=? WHERE id IN ({placeholders})",
-        (family_id, *identifiers),
-    )
-    return family_id
-
-
-def _keep_upload_as_variant(
-    connection: sqlite3.Connection,
-    settings: Settings,
-    staged: Path,
-    *,
-    media_type: str,
-    width: int | None,
-    height: int | None,
-    file_size: int | None,
-    content_hash: str,
-    source: SourceMedia | None,
-    existing_media_id: int,
-) -> int:
-    """Store a reviewed upload as a new media item related to an existing one.
-
-    The accepted source already owns the ``media_sources`` row for its URL, so
-    the variant records its metadata on ``media_items`` only and is linked to
-    the older item through a family.  That keeps the user's file visible in the
-    library instead of deleting it during source resolution.
-    """
-    stored_path = atomic_copy(staged, settings.media_path, "media")
+def _decode_json_list(raw) -> tuple[str, ...]:
     try:
-        cursor = connection.execute(
-            "INSERT INTO media_items "
-            "(file_path, media_type, source_url, file_source_url, author, domain, "
-            "width, height, file_size, content_hash, parent_id, character_tags_json) "
-            "VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                stored_path,
-                media_type,
-                source.canonical_url if source else None,
-                source.author if source else None,
-                source.domain if source else None,
-                width,
-                height,
-                file_size,
-                content_hash,
-                source.parent_id if source else None,
-                json.dumps(list(source.character_tags)) if source else "[]",
-            ),
+        values = json.loads(raw or "[]")
+    except (TypeError, ValueError):
+        return ()
+    if not isinstance(values, list):
+        return ()
+    return tuple(str(value) for value in values if str(value).strip())
+
+
+def _merge_source_into_existing(
+    connection: sqlite3.Connection,
+    media_item_id: int,
+    source: SourceMedia | None,
+    file_source: SourceMedia | None = None,
+) -> None:
+    """Add source metadata to an existing item without replacing its file.
+
+    Only missing fields are filled and tags/characters are unioned, so merging a
+    duplicate never rewrites the user's author, source, file or revisions.  A
+    second source URL cannot be recorded because ``media_sources.canonical_url``
+    is unique; the existing row is kept in that case.
+    """
+    if source is not None and source.tags:
+        _store_tags(connection, media_item_id, source.tags)
+    item = connection.execute(
+        "SELECT author, domain, source_url, character_tags_json FROM media_items WHERE id=?",
+        (media_item_id,),
+    ).fetchone()
+    if item is None:
+        return
+    item_updates: dict[str, object] = {}
+    if source is not None:
+        if not item["author"] and source.author:
+            item_updates["author"] = source.author
+        if not item["domain"] and source.domain:
+            item_updates["domain"] = source.domain
+        if not item["source_url"] and source.canonical_url:
+            item_updates["source_url"] = source.canonical_url
+    item_characters = set(_decode_json_list(item["character_tags_json"]))
+    merged_characters = set(item_characters)
+    if source is not None:
+        merged_characters |= {str(value) for value in source.character_tags}
+    if sorted(merged_characters) != sorted(item_characters):
+        item_updates["character_tags_json"] = json.dumps(sorted(merged_characters))
+    if item_updates:
+        assignments = ", ".join(f"{field}=?" for field in item_updates)
+        connection.execute(
+            f"UPDATE media_items SET {assignments} WHERE id=?",
+            (*item_updates.values(), media_item_id),
         )
-        media_item_id = int(cursor.lastrowid)
-        create_original_revision(connection, media_item_id)
-        if media_type == "image":
-            try:
-                with Image.open(settings.media_path / stored_path) as image:
-                    connection.execute(
-                        "INSERT INTO media_fingerprints (media_item_id, perceptual_hash) "
-                        "VALUES (?, ?)",
-                        (media_item_id, str(imagehash.phash(image))),
-                    )
-            except (OSError, ValueError):
-                pass
-        if source:
-            _store_tags(connection, media_item_id, source.tags)
-        _add_to_family(connection, media_item_id, existing_media_id)
-    except Exception:
-        (settings.media_path / stored_path).unlink(missing_ok=True)
-        connection.rollback()
-        raise
-    return media_item_id
+    if source is not None:
+        _merge_media_sources(connection, media_item_id, source)
+    if file_source is not None and getattr(file_source, "canonical_url", None):
+        connection.execute(
+            "UPDATE media_items SET file_source_url=? "
+            "WHERE id=? AND (file_source_url IS NULL OR TRIM(file_source_url)='')",
+            (file_source.canonical_url, media_item_id),
+        )
 
 
-def _complete_review(connection, review_id, candidate_id, media_item_id, source, file_source=None):
+def _merge_media_sources(
+    connection: sqlite3.Connection, media_item_id: int, source: SourceMedia
+) -> None:
+    existing = connection.execute(
+        "SELECT canonical_url, direct_media_url, author, domain, parent_id, character_tags_json "
+        "FROM media_sources WHERE media_item_id=?",
+        (media_item_id,),
+    ).fetchone()
+    if existing is None:
+        try:
+            connection.execute(
+                "INSERT INTO media_sources "
+                "(media_item_id, canonical_url, direct_media_url, provider, remote_id, author, domain, parent_id, character_tags_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    media_item_id, source.canonical_url, source.direct_media_url,
+                    source.provider, source.remote_id, source.author, source.domain,
+                    source.parent_id, json.dumps(list(source.character_tags)),
+                ),
+            )
+        except sqlite3.IntegrityError:
+            # The URL already belongs to another (possibly deleted) item; the
+            # stored metadata is a bonus, not a reason to fail the acceptance.
+            pass
+        return
+    updates: dict[str, object] = {}
+    if not existing["direct_media_url"] and source.direct_media_url:
+        updates["direct_media_url"] = source.direct_media_url
+    if not existing["author"] and source.author:
+        updates["author"] = source.author
+    if not existing["domain"] and source.domain:
+        updates["domain"] = source.domain
+    if not existing["parent_id"] and source.parent_id:
+        updates["parent_id"] = source.parent_id
+    current_characters = set(_decode_json_list(existing["character_tags_json"]))
+    merged = current_characters | {str(value) for value in source.character_tags}
+    if sorted(merged) != sorted(current_characters):
+        updates["character_tags_json"] = json.dumps(sorted(merged))
+    if updates:
+        assignments = ", ".join(f"{field}=?" for field in updates)
+        connection.execute(
+            f"UPDATE media_sources SET {assignments} WHERE media_item_id=?",
+            (*updates.values(), media_item_id),
+        )
+
+
+def _store_new_fingerprint(
+    connection: sqlite3.Connection,
+    media_item_id: int,
+    media_type: str,
+    path: Path,
+) -> str | None:
+    """Cache the pHash of a newly stored image and return it as hex."""
+    if media_type != "image" or path is None or not path.is_file():
+        return None
+    try:
+        with Image.open(path) as image:
+            fingerprint = str(imagehash.phash(image))
+    except (OSError, ValueError):
+        return None
+    connection.execute(
+        "INSERT INTO media_fingerprints (media_item_id, perceptual_hash) VALUES (?, ?) "
+        "ON CONFLICT(media_item_id) DO UPDATE SET "
+        "perceptual_hash=excluded.perceptual_hash, updated_at=CURRENT_TIMESTAMP",
+        (media_item_id, fingerprint),
+    )
+    return fingerprint
+
+
+def _register_new_duplicates(
+    connection: sqlite3.Connection,
+    media_item_id: int,
+    perceptual_hash: str | None,
+) -> int | None:
+    """Queue pending Duplicates pairs for a freshly accepted image."""
+    if not perceptual_hash:
+        return None
+    matches = find_similar_media(
+        connection, perceptual_hash, DEFAULT_MATCH_THRESHOLD,
+        exclude_media_id=media_item_id,
+    )
+    for other_media_id, confidence in matches:
+        register_pending_match(connection, media_item_id, other_media_id, confidence)
+    return matches[0][0] if matches else None
+
+
+def _complete_review(
+    connection,
+    review_id,
+    candidate_id,
+    media_item_id,
+    source,
+    file_source=None,
+    *,
+    outcome="created",
+    duplicate_of=None,
+):
     connection.execute(
         "UPDATE import_candidates SET status='accepted', media_item_id=? WHERE id=?",
         (media_item_id, candidate_id),
@@ -851,7 +875,10 @@ def _complete_review(connection, review_id, candidate_id, media_item_id, source,
         "media_item_id": media_item_id,
         "source_url": source.canonical_url if source else None,
         "file_source_url": file_source.canonical_url if file_source else None,
+        "outcome": outcome,
+        "duplicate_of": duplicate_of,
     })
+    finalize_review_history(connection, review_id, outcome, media_item_id, duplicate_of)
     _delete_review_search_attempts(connection, review_id)
     connection.commit()
 

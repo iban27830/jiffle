@@ -175,14 +175,19 @@ def accept_review(review_id: int):
     try:
         candidate_id = payload.get("source_candidate_id")
         if candidate_id is not None:
-            media_item_id = accept_source_candidate(
+            acceptance = accept_source_candidate(
                 get_database(), settings, review_id, int(candidate_id)
             )
         else:
-            media_item_id = accept_review_item(get_database(), settings, review_id)
+            acceptance = accept_review_item(get_database(), settings, review_id)
     except ReviewFailure as error:
         return _review_error(error)
-    return jsonify({"status": "accepted", "media_item_id": media_item_id})
+    return jsonify({
+        "status": "accepted",
+        "media_item_id": acceptance.media_item_id,
+        "outcome": acceptance.outcome,
+        "duplicate_of": acceptance.duplicate_of,
+    })
 
 
 @review_blueprint.post("/api/v1/review-items/<int:review_id>/reject")
@@ -231,10 +236,17 @@ def get_source_candidate_content(review_id: int, candidate_id: int):
 def accept_source_candidate_route(review_id: int, candidate_id: int):
     settings: Settings = current_app.config["JIFFLE_SETTINGS"]
     try:
-        media_item_id = accept_source_candidate(get_database(), settings, review_id, candidate_id)
+        acceptance = accept_source_candidate(
+            get_database(), settings, review_id, candidate_id
+        )
     except ReviewFailure as error:
         return _review_error(error)
-    return jsonify({"status": "accepted", "media_item_id": media_item_id})
+    return jsonify({
+        "status": "accepted",
+        "media_item_id": acceptance.media_item_id,
+        "outcome": acceptance.outcome,
+        "duplicate_of": acceptance.duplicate_of,
+    })
 
 
 @review_blueprint.post("/api/v1/review-items/<int:review_id>/source")
