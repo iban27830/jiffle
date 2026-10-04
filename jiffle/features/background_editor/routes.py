@@ -168,15 +168,35 @@ def list_candidates():
         )
     except BackgroundFailure as error:
         return _background_error(error)
-    rows = get_database().execute(
+    connection = get_database()
+    where = (
+        "WHERE m.deleted_at IS NULL AND m.media_type='image' "
+        "AND r.parameter_signature=? AND r.candidate_found=1"
+    )
+    signature = detector_signature(parameters)
+    total = connection.execute(
+        "SELECT COUNT(*) FROM background_candidate_results r JOIN media_items m "
+        "ON m.id=r.media_item_id AND m.active_revision_id=r.revision_id " + where,
+        (signature,),
+    ).fetchone()[0]
+    page = ""
+    params: tuple[object, ...] = (signature,)
+    if request.args.get("limit") is not None:
+        try:
+            limit = max(1, min(100, int(request.args.get("limit"))))
+            offset = max(0, int(request.args.get("offset", 0)))
+        except ValueError:
+            return _error("background.invalid_query", "Pagination values must be integers.", 400)
+        page = " LIMIT ? OFFSET ?"
+        params = (signature, limit, offset)
+    rows = connection.execute(
         "SELECT r.* FROM background_candidate_results r JOIN media_items m "
         "ON m.id=r.media_item_id AND m.active_revision_id=r.revision_id "
-        "WHERE m.deleted_at IS NULL AND m.media_type='image' "
-        "AND r.parameter_signature=? AND r.candidate_found=1 "
-        "ORDER BY r.confidence DESC,r.background_area_percent DESC,r.media_item_id",
-        (detector_signature(parameters),),
+        + where + " "
+        "ORDER BY r.confidence DESC,r.background_area_percent DESC,r.media_item_id" + page,
+        params,
     ).fetchall()
-    return jsonify({"items": [_serialize_candidate(row) for row in rows]})
+    return jsonify({"items": [_serialize_candidate(row) for row in rows], "total": int(total)})
 
 
 @background_blueprint.post("/api/v1/background-scan-jobs")

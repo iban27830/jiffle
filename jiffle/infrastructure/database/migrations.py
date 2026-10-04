@@ -754,6 +754,24 @@ def migration_32(connection: sqlite3.Connection) -> None:
     )
 
 
+def migration_33(connection: sqlite3.Connection) -> None:
+    """Order the video/animation trim review queue for manual deferral.
+
+    New eligible clips keep ``trim_deferred_at`` NULL and therefore stay at the
+    front of the queue (newest first).  ``Move to end`` stamps the row so it
+    sinks below every clip that has not been deferred, while already deferred
+    rows keep the oldest stamp first.  The column is additive and safe on both
+    an empty and a populated database.
+    """
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(media_items)")}
+    if "trim_deferred_at" not in columns:
+        connection.execute("ALTER TABLE media_items ADD COLUMN trim_deferred_at TEXT")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS media_items_trim_deferred_idx "
+        "ON media_items(trim_review_status, trim_deferred_at)"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -787,6 +805,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (30, migration_30),
     (31, migration_31),
     (32, migration_32),
+    (33, migration_33),
 )
 
 

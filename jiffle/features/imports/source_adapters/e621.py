@@ -24,6 +24,11 @@ MAX_RETRY_AFTER_SECONDS = 30.0
 
 class E621SourceProvider:
     provider_name = "e621"
+    # An account widens the search (higher limits and the reverse-search
+    # endpoint is authenticated-only); the reverse search reports itself as
+    # not configured when no credentials are saved.
+    credentials_improve_results = True
+    reverse_search_requires_auth = True
     domains = {"e621.net", "e926.net"}
     page_limit = 320
     _transient_statuses = {408, 429, 500, 502, 503, 504}

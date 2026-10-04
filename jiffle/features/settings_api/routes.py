@@ -46,6 +46,7 @@ def update_settings():
         "max_items_per_author", "max_image_export_size_bytes",
         "max_video_export_size_bytes", "export_format_rules", "block_previously_deleted",
         "trim_review_enabled",
+        "trim_block_unreviewed_export",
         "crop_vision_url", "crop_vision_key", "crop_vision_model", "crop_vision_format",
         "crop_min_area_percent", "crop_padding_percent", "crop_background_tolerance", "crop_selected_analysis",
         "background_model", "background_device",
@@ -309,6 +310,10 @@ def _validated_update(settings, payload):
         values["trim_review_enabled"], bool
     ):
         raise ValueError("trim_review_enabled must be boolean.")
+    if "trim_block_unreviewed_export" in values and not isinstance(
+        values["trim_block_unreviewed_export"], bool
+    ):
+        raise ValueError("trim_block_unreviewed_export must be boolean.")
     if "collection_export_mode" in values:
         values["collection_export_mode"] = collection_export_mode_value(
             values["collection_export_mode"]
@@ -365,6 +370,7 @@ def _public_settings(settings):
         "export_format_rules": dict(settings.export_format_rules),
         "block_previously_deleted": settings.block_previously_deleted,
         "trim_review_enabled": settings.trim_review_enabled,
+        "trim_block_unreviewed_export": settings.trim_block_unreviewed_export,
         "crop_vision_url": settings.crop_vision_url,
         "crop_vision_model": settings.crop_vision_model,
         "crop_vision_format": settings.crop_vision_format,

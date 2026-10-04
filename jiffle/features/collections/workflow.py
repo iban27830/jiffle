@@ -112,12 +112,16 @@ def build_collection_preview(
     max_items_per_author: int,
     excluded_ids: tuple[int, ...] = (),
     variant_count: int = 32,
+    block_unreviewed: bool = False,
 ) -> CollectionComposition:
     if not included_tags:
         raise CollectionFailure("collections.tags_required", "At least one included tag is required.")
     if not 1 <= requested_count <= 1000:
         raise CollectionFailure("collections.invalid_count", "Requested count must be from 1 to 1000.")
-    candidates = _matching_candidates(connection, included_tags, excluded_tags, excluded_ids)
+    candidates = _matching_candidates(
+        connection, included_tags, excluded_tags, excluded_ids,
+        block_unreviewed=block_unreviewed,
+    )
     available_count = len(candidates)
     target = min(requested_count, available_count)
     histories = _collection_histories(connection, included_tags, excluded_tags)
@@ -208,6 +212,13 @@ def preview_export(
             warnings.append("author_limit_exceeded")
     if not rows:
         violations.append("collection_empty")
+    if settings.trim_block_unreviewed_export and any(
+        row["trim_review_status"] == "pending" and row["derived_from_media_id"] is None
+        for row in rows
+    ):
+        # The collection can still be exported after the waiting clips are
+        # confirmed or split; this is a warning so the builder can explain why.
+        warnings.append("unreviewed_trim")
     return ExportPreview(len(rows), total_size, author_counts, tuple(violations), tuple(warnings))
 
 
@@ -251,6 +262,17 @@ def export_collection_directory(
         raise CollectionFailure("exports.constraints_failed", ", ".join(preview.violations))
     collection = _collection(connection, collection_id)
     rows = _collection_media(connection, collection_id)
+    if settings.trim_block_unreviewed_export:
+        blocked = [
+            row for row in rows
+            if row["trim_review_status"] == "pending" and row["derived_from_media_id"] is None
+        ]
+        if blocked:
+            raise CollectionFailure(
+                "exports.unreviewed_media",
+                f"{len(blocked)} clip(s) still wait for trim review. "
+                "Confirm or split them before exporting this collection.",
+            )
     exported_items = []
     for index, row in enumerate(rows, start=1):
         source = _media_path(settings.media_path, row["file_path"])
@@ -399,7 +421,9 @@ def _collection_media(connection, collection_id):
     ).fetchall()
 
 
-def _matching_candidates(connection, included_tags, excluded_tags, excluded_ids):
+def _matching_candidates(
+    connection, included_tags, excluded_tags, excluded_ids, block_unreviewed=False,
+):
     aliases = build_tag_alias_map(connection)
 
     clauses = ["item.deleted_at IS NULL"]
@@ -410,6 +434,13 @@ def _matching_candidates(connection, included_tags, excluded_tags, excluded_ids)
         "NOT EXISTS (SELECT 1 FROM media_items fragment "
         "WHERE fragment.derived_from_media_id=item.id AND fragment.deleted_at IS NULL)"
     )
+    if block_unreviewed:
+        # A video or animation still waiting for the trim review must not be
+        # picked automatically while the user has not decided whether to split
+        # it.  Confirming it ("Looks good") clears the pending status.
+        clauses.append(
+            "NOT (item.trim_review_status='pending' AND item.derived_from_media_id IS NULL)"
+        )
     for tag in included_tags:
         values = expand_tag_aliases(tag, aliases)
         clauses.append("EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_item_id=item.id AND LOWER(mt.tag) IN (" + ",".join("?" for _ in values) + "))")

@@ -23,6 +23,7 @@ DOMAIN = "rule34.xxx"
 
 class Rule34SourceProvider:
     provider_name = "rule34"
+    credentials_improve_results = True
     domains = {"rule34.xxx", "www.rule34.xxx", "api.rule34.xxx"}
 
     def __init__(self, user_id=None, api_key=None):

@@ -10,6 +10,7 @@ from jiffle.features.imports.source_adapters.platform_tags import add_platform_t
 
 class FurAffinitySourceProvider:
     provider_name = "furaffinity"
+    credentials_improve_results = True
     domains = {"furaffinity.net", "www.furaffinity.net"}
 
     def __init__(self, cookie_a=None, cookie_b=None):

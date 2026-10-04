@@ -121,6 +121,7 @@ def create_collection_preview():
         preview = build_collection_preview(
             get_database(), included, excluded, count, settings.max_items_per_author,
             tuple(excluded_ids),
+            block_unreviewed=settings.trim_block_unreviewed_export,
         )
     except CollectionFailure as error:
         return _collection_error(error)
@@ -156,6 +157,7 @@ def replace_collection_preview_item():
         preview = build_collection_preview(
             get_database(), included, excluded, 1, settings.max_items_per_author,
             tuple(dict.fromkeys((*current_ids, *rejected_ids))),
+            block_unreviewed=settings.trim_block_unreviewed_export,
         )
         if not preview.items:
             raise CollectionFailure("collections.replacement_unavailable", "No replacement is available.")

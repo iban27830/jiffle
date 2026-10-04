@@ -54,8 +54,17 @@ def active_scan():
 def list_analyses():
     status=request.args.get("status","pending")
     where="" if status=="all" else "WHERE a.status=?"; params=() if status=="all" else (status,)
-    rows=get_database().execute(f"SELECT a.*,r.width media_width,r.height media_height FROM crop_analyses a JOIN media_revisions r ON r.id=a.revision_id {where} ORDER BY a.confidence DESC,a.removed_area DESC",params).fetchall()
-    return jsonify({"items":[_serialize(r) for r in rows]})
+    connection=get_database()
+    total=connection.execute(f"SELECT COUNT(*) FROM crop_analyses a JOIN media_revisions r ON r.id=a.revision_id {where}",params).fetchone()[0]
+    page=""; page_params=params
+    if request.args.get("limit") is not None:
+        try:
+            limit=max(1,min(100,int(request.args.get("limit")))); offset=max(0,int(request.args.get("offset",0)))
+        except ValueError:
+            return _error("crop.invalid_query","Pagination values must be integers.",400)
+        page=" LIMIT ? OFFSET ?"; page_params=(*params,limit,offset)
+    rows=connection.execute(f"SELECT a.*,r.width media_width,r.height media_height FROM crop_analyses a JOIN media_revisions r ON r.id=a.revision_id {where} ORDER BY a.confidence DESC,a.removed_area DESC"+page,page_params).fetchall()
+    return jsonify({"items":[_serialize(r) for r in rows],"total":int(total)})
 
 @crop_blueprint.get("/api/v1/crop-analyses/<int:analysis_id>")
 def get_analysis(analysis_id):

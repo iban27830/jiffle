@@ -127,6 +127,80 @@ const diagnosticStatusLabels = {
   authorization_error: 'authorization required', unavailable: 'unavailable',
   timeout: 'timed out', skipped: 'skipped', not_configured: 'not configured',
 };
+// Sources whose account credentials widen the search: they either need a login
+// outright or answer fewer results while anonymous.  Used to explain an empty
+// search instead of claiming that nothing exists anywhere.
+const AUTH_CAPABLE_PROVIDERS = new Set(['danbooru','e621','e926','gelbooru','rule34','furaffinity']);
+const ERROR_DIAGNOSTIC_STATUSES = new Set(['network_error','timeout','unavailable','skipped']);
+const diagnosticStatusIcons = {
+  matched: 'check-circle', no_result: 'minus-circle', network_error: 'triangle-alert',
+  authorization_error: 'key-round', unavailable: 'triangle-alert',
+  timeout: 'clock', skipped: 'circle-slash', not_configured: 'key-round',
+};
+function diagnosticCapabilities(diagnostics) {
+  const list = (Array.isArray(diagnostics) ? diagnostics : []).filter(item => item && item.stage);
+  const authProviders = new Set();
+  const limitedProviders = new Set();
+  const errorProviders = new Set();
+  let checked = 0;
+  const checkedStatuses = new Set(['matched','no_result','not_configured','authorization_error','network_error','timeout','unavailable','skipped']);
+  list.forEach(item => {
+    const name = String(item.provider || 'unknown').toLowerCase();
+    const status = String(item.status || '');
+    const code = String(item.code || '');
+    if (checkedStatuses.has(status)) checked += 1;
+    const authRelated = status === 'authorization_error' || status === 'not_configured'
+      || /auth|credential|access_denied/i.test(code);
+    if (authRelated) authProviders.add(name);
+    else if (status === 'no_result' && AUTH_CAPABLE_PROVIDERS.has(name)) limitedProviders.add(name);
+    if (ERROR_DIAGNOSTIC_STATUSES.has(status)
+      || /candidate_unavailable|hash_mismatch|source_link_unresolved/i.test(code)) {
+      errorProviders.add(name);
+    }
+  });
+  return {authProviders, limitedProviders, errorProviders, checked};
+}
+function sourceBadge(tone, icon, text, title) {
+  return `<span class="source-badge source-badge-${tone}" title="${esc(title)}"><i data-lucide="${icon}"></i>${text ? `<span>${esc(text)}</span>` : ''}</span>`;
+}
+function sourceVerdictBadges({found = false, count = 0, diagnostics = [], outcome = ''} = {}) {
+  const caps = diagnosticCapabilities(diagnostics);
+  const badges = [];
+  if (found) {
+    badges.push(sourceBadge('found', 'check-circle', count ? String(count) : '',
+      count ? `Source found: ${count} candidate${count === 1 ? '' : 's'} to confirm` : 'Source found'));
+  }
+  if (caps.authProviders.size) {
+    badges.push(sourceBadge('auth', 'key-round', '',
+      `Not checked without authorization: ${[...caps.authProviders].join(', ')}. Add credentials in Settings to search them.`));
+  } else if (caps.limitedProviders.size) {
+    badges.push(sourceBadge('limited', 'shield-question', '',
+      `Searched anonymously on ${[...caps.limitedProviders].join(', ')}; signing in may find more.`));
+  }
+  if (caps.errorProviders.size) {
+    badges.push(sourceBadge('error', 'triangle-alert', '',
+      `Source error while checking: ${[...caps.errorProviders].join(', ')}. Open the search log for details.`));
+  }
+  const clean = !found && !caps.authProviders.size && !caps.limitedProviders.size && !caps.errorProviders.size;
+  if (clean && (outcome === 'no_source' || caps.checked)) {
+    badges.push(sourceBadge('none', 'search-x', '',
+      'No source found: every configured source was checked.'));
+  }
+  return badges.join('');
+}
+function sourceOutcomeLabel(outcome, diagnostics) {
+  const caps = diagnosticCapabilities(diagnostics);
+  if (outcome === 'accepted') return 'Source found and verified';
+  if (outcome === 'candidates') return 'Source candidates found';
+  if (outcome === 'unavailable') return 'Search could not be completed';
+  const errors = caps.errorProviders.size > 0;
+  if (caps.authProviders.size) {
+    return errors ? 'Not found · sign-in needed · source errors' : 'Not found · sign-in needed';
+  }
+  if (errors) return 'Checked, but a source did not answer';
+  if (caps.limitedProviders.size) return 'Not found anonymously';
+  return 'No source found · every source checked';
+}
 function historyDiagnostics(details) {
   const diagnostics = Array.isArray(details.provider_diagnostics) ? details.provider_diagnostics.map(item => ({...item})) : [];
   if (diagnostics.length) return diagnostics;
@@ -137,6 +211,7 @@ function historyDiagnostics(details) {
 }
 function historyDiagnosticSummary(details, diagnostics) {
   const status = details.search_status || details.search_state || details.search_outcome || (diagnostics.some(item => item.status === 'authorization_error') ? 'authorization_error' : diagnostics.some(item => item.status === 'network_error') ? 'network_error' : diagnostics.some(item => item.status === 'unavailable') ? 'candidate_download_failed' : 'no_result');
+  const caps = diagnosticCapabilities(diagnostics);
   const tbibDownload = diagnostics.some(item => String(item.provider || '').toLowerCase() === 'tbib' && item.stage === 'exact_download' && item.status === 'unavailable');
   const tbibNetwork = diagnostics.some(item => {
     if (String(item.provider || '').toLowerCase() !== 'tbib') return false;
@@ -147,9 +222,10 @@ function historyDiagnosticSummary(details, diagnostics) {
     const count = Number(details.exact_candidates_checked || 0);
     return count ? `Found ${count} candidates, but none passed verification` : 'A source was found, but its file could not be downloaded';
   }
-  if (status === 'authorization_error') return 'Source requires authorization';
-  if (status === 'network_error') return tbibNetwork ? 'TBIB unavailable over the network' : 'A source was unavailable over the network';
+  if (status === 'authorization_error' || caps.authProviders.size) return 'Source requires authorization';
+  if (status === 'network_error' || caps.errorProviders.size) return tbibNetwork ? 'TBIB unavailable over the network' : 'A source was unavailable over the network';
   if (status === 'resolved') return 'Source found and verified';
+  if (caps.limitedProviders.size) return 'Exact source not found anonymously - sign in for more';
   return 'Exact source not found';
 }
 function historyDiagnosticsHtml(details, item) {
@@ -171,7 +247,8 @@ function diagnosticRowsHtml(diagnostics) {
     const remote = item.remote_id ? ` · #${esc(item.remote_id)}` : '';
     const technical = item.code ? ` <code>${esc(item.code)}</code>` : '';
     const message = item.message ? `: ${esc(item.message)}` : '';
-    return `<li><strong>${esc(item.provider || 'unknown')}</strong> · ${esc(stage)} · ${esc(status)}${count}${remote}${technical}${message}</li>`;
+    const icon = diagnosticStatusIcons[item.status] || 'info';
+    return `<li class="diagnostic-row diagnostic-${esc(item.status || 'unknown')}"><i class="diagnostic-icon" data-lucide="${icon}"></i><span><strong>${esc(item.provider || 'unknown')}</strong> · ${esc(stage)} · ${esc(status)}${count}${remote}${technical}${message}</span></li>`;
   }).join('');
 }
 
@@ -578,7 +655,8 @@ function reviewSearchLabel(search) {
   return Number(search.count) > 1 ? `${label} ×${Number(search.count)}` : label;
 }
 function reviewSearchTitle(search) {
-  const parts = [reviewSearchLabel(search)];
+  const diagnostics = (search.last_details || {}).provider_diagnostics || [];
+  const parts = [sourceOutcomeLabel(search.last_outcome, diagnostics)];
   if (search.last_message) parts.push(search.last_message);
   if (search.last_at) parts.push(formatDateTime(search.last_at));
   return parts.join(' · ');
@@ -608,18 +686,22 @@ function reviewCardHtml(item) {
     ? item.search
     : (reviewLocalSearches.get(Number(item.id)) || {});
   const searched = Number(search.count || 0) > 0;
-  const candidates = found ? `<span class="review-card-candidates">${candidateCount} source${candidateCount === 1 ? '' : 's'} found</span>` : '';
   // A rechecked card stays marked even after reopening the page, so the user
-  // can see that a search already ran. The button stays enabled: a source may
-  // have appeared since, and re-running the search must not be blocked.
-  const searchedBadge = searched ? `<span class="review-card-searched" title="${esc(reviewSearchTitle(search))}"><i data-lucide="search-check"></i>${esc(reviewSearchLabel(search))}</span>` : '';
+  // can see that a search already ran. The badges combine "found", "needs
+  // sign-in", "anonymous only", "source error", and "nothing found" so a card
+  // can be understood without opening the log. The recheck button stays
+  // enabled because a source may have appeared since.
+  const diagnostics = (search.last_details || {}).provider_diagnostics || [];
+  const verdictBadges = searched
+    ? `<span class="review-card-badges" title="${esc(reviewSearchTitle(search))}">${sourceVerdictBadges({found, count:candidateCount, diagnostics, outcome:search.last_outcome})}</span>`
+    : (found ? `<span class="review-card-badges">${sourceVerdictBadges({found, count:candidateCount})}</span>` : '');
   const recheckTitle = found
     ? 'Search again - a new source may have appeared since'
     : 'Run the source search again';
   const recheck = `<button type="button" class="icon-btn" data-review-reimport="${item.id}" title="${esc(recheckTitle)}"><i data-lucide="refresh-cw"></i></button>`;
   const log = searched ? `<button type="button" class="icon-btn" data-review-log="${item.id}" title="View the search results for this card"><i data-lucide="scroll-text"></i></button>` : '';
   const cardClass = ['media-card', 'review-card', found ? 'review-card-source-found' : '', searched ? 'review-card-already-searched' : ''].filter(Boolean).join(' ');
-  return `<article class="${cardClass}" data-review-kind="candidate" data-review-id="${item.id}"><div class="review-card-preview" data-open-review="${item.id}" title="Open full size"><img loading="lazy" src="${esc(item.thumbnail_url)}" alt="">${reason}${candidates}${searchedBadge}<label class="review-card-select" title="Select for recheck"><input type="checkbox" data-review-select="${item.id}"${selected}></label></div><div class="review-card-actions"><button type="button" class="icon-btn" data-open-review="${item.id}" title="Open full size to choose a source"><i data-lucide="maximize-2"></i></button>${recheck}${log}<button type="button" class="icon-btn danger" data-review-reject="${item.id}" title="Reject"><i data-lucide="trash-2"></i></button></div></article>`;
+  return `<article class="${cardClass}" data-review-kind="candidate" data-review-id="${item.id}"><div class="review-card-preview" data-open-review="${item.id}" title="Open full size"><img loading="lazy" src="${esc(item.thumbnail_url)}" alt="">${reason}${verdictBadges}<label class="review-card-select" title="Select for recheck"><input type="checkbox" data-review-select="${item.id}"${selected}></label></div><div class="review-card-actions"><button type="button" class="icon-btn" data-open-review="${item.id}" title="Open full size to choose a source"><i data-lucide="maximize-2"></i></button>${recheck}${log}<button type="button" class="icon-btn danger" data-review-reject="${item.id}" title="Reject"><i data-lucide="trash-2"></i></button></div></article>`;
 }
 
 function lightboxCandidateMedia(candidate) {
@@ -726,9 +808,12 @@ function openMediaLightbox({contentUrl, type = 'image', title = '', candidates =
 function reviewAttemptHtml(attempt) {
   const details = attempt.details || {};
   const diagnostics = historyDiagnostics(details);
-  const outcomes = {no_source: 'No source found', candidates: 'Source candidates found', unavailable: 'Search unavailable'};
-  const outcome = outcomes[attempt.outcome] || String(attempt.outcome || 'Search').replaceAll('_', ' ');
   const candidateCount = Number(details.candidate_count || 0);
+  const found = attempt.outcome === 'candidates' || attempt.outcome === 'accepted';
+  const outcome = found
+    ? (attempt.outcome === 'accepted' ? 'Source found and verified' : 'Source candidates found')
+    : sourceOutcomeLabel(attempt.outcome, diagnostics);
+  const badges = sourceVerdictBadges({found, count:candidateCount, diagnostics, outcome:attempt.outcome});
   const facts = [];
   if (candidateCount) facts.push(`${candidateCount} candidate${candidateCount === 1 ? '' : 's'} downloaded`);
   if (details.provider) facts.push(`Provider: ${details.provider}`);
@@ -737,7 +822,7 @@ function reviewAttemptHtml(attempt) {
   const diagnosticsBlock = diagnostics.length
     ? `<details class="history-diagnostics"><summary>Provider details (${diagnostics.length})</summary><ul>${diagnosticRowsHtml(diagnostics)}</ul></details>`
     : '';
-  return `<article class="review-log-entry"><header><strong>${esc(outcome)}</strong><time>${esc(formatDateTime(attempt.created_at))}</time></header>${facts.length ? `<small>${esc(facts.join(' · '))}</small>` : ''}${message}${diagnosticsBlock}</article>`;
+  return `<article class="review-log-entry"><header><strong>${esc(outcome)}</strong>${badges ? `<span class="source-badges">${badges}</span>` : ''}<time>${esc(formatDateTime(attempt.created_at))}</time></header>${facts.length ? `<small>${esc(facts.join(' · '))}</small>` : ''}${message}${diagnosticsBlock}</article>`;
 }
 
 function openReviewSearchLog(reviewId, title = 'Search results') {
@@ -963,41 +1048,56 @@ async function showDuplicates() {
 }
 
 async function showEditor() {
-  setHeader('Editor', 'Crop and backgrounds');
+  setHeader('Editor', 'Crop, backgrounds, and trimming');
   const editorState=viewState('editor');
   let cropSettings=await api('/api/v1/settings');
-  const render = async (status=editorState.status || 'pending') => {
-    saveViewState('editor',{status,analysisId:null,targetMediaId:null,backgroundOpen:false});
-    const savedBackgroundState=viewState('editor');
-    const backgroundTolerance=Math.min(80,Math.max(5,Number(savedBackgroundState.backgroundTolerance)||24));
-    const backgroundMinimumArea=Math.min(95,Math.max(5,Number(savedBackgroundState.backgroundMinimumArea)||25));
-    const candidateQuery=`tolerance=${backgroundTolerance}&min_background_percent=${backgroundMinimumArea}`;
-    const [data,backgroundData,trimData]=await Promise.all([api(`/api/v1/crop-analyses?status=${status}`),api(`/api/v1/background-candidates?${candidateQuery}`),api('/api/v1/trim-reviews?status=pending')]);
-    const trimItems=trimData.items || [];
-    const trimEnabled=Boolean(cropSettings.trim_review_enabled);
-    const backgroundItems=backgroundData.items || [];
-    const asPercent=value=>{const number=Number(value)||0;return number<=1?number*100:number};
-    const colorCss=value=>{
-      if(Array.isArray(value)&&value.length>=3)return `rgb(${value.slice(0,3).map(channel=>Math.max(0,Math.min(255,Number(channel)||0))).join(',')})`;
-      return /^#[0-9a-f]{6}$/i.test(String(value||''))?String(value):'#dfe4e6';
-    };
-    workspace.innerHTML=`<div class="page editor-page">
-      <div class="editor-toolbar"><select id="cropStatus" class="control"><option value="pending">Pending</option><option value="cropped">Cropped</option><option value="no_crop_needed">No crop needed</option><option value="failed">Failed</option><option value="all">All</option></select><label>Minimum area <input id="cropArea" class="control" type="number" min="1" max="50" value="10"></label><label>Padding <input id="cropPadding" class="control" type="number" min="0" max="10" step=".5" value="2"></label><button id="scanSelected" class="btn"><i data-lucide="scan-line"></i>Selected</button><button id="scanAll" class="btn primary"><i data-lucide="scan-search"></i>Find crop candidates</button></div>
-      <div class="page-head"><h2>Crop candidates</h2><span class="badge">${data.items.length}</span></div>
-      <div class="item-list">${data.items.map(item=>`<article class="queue-item"><img src="${item.thumbnail_url}" alt=""><div><strong>Media #${item.media_id}</strong><small>${esc(item.status)} · ${Number(item.confidence).toFixed(0)}% confidence · removes ${Number(item.removed_area).toFixed(1)}%</small></div><div class="actions"><button class="icon-btn open-library" data-media-id="${item.media_id}" title="Open in Library"><i data-lucide="images"></i></button>${item.status==='pending'?`<button class="btn open-crop" data-id="${item.id}"><i data-lucide="scan-line"></i>Review</button>`:`<button class="btn reset-crop" data-id="${item.id}"><i data-lucide="rotate-ccw"></i>Reopen review</button>`}</div></article>`).join('')||'<div class="empty">No items for this status</div>'}</div>
-      <section class="background-candidates-section">
-        <div class="page-head"><h2>Background candidates</h2><span class="badge">${backgroundItems.length}</span></div>
-        <div class="background-scan-toolbar"><label>Edge tolerance <input id="backgroundTolerance" class="control" type="number" min="5" max="80" value="${backgroundTolerance}"></label><label>Minimum background, % <input id="backgroundMinimumArea" class="control" type="number" min="5" max="95" value="${backgroundMinimumArea}"></label><button id="analyzeSelectedBackground" class="btn"><i data-lucide="scan-line"></i>Analyze selected</button><button id="scanBackgrounds" class="btn primary"><i data-lucide="scan-search"></i>Find background candidates</button></div>
-        <div class="item-list background-candidate-list">${backgroundItems.map(item=>`<article class="queue-item background-candidate"><img src="${item.thumbnail_url}" alt=""><div><strong>Media #${item.media_id}</strong><small><span class="background-color-swatch" style="background:${colorCss(item.background_color)}"></span>${asPercent(item.confidence).toFixed(0)}% confidence · ${asPercent(item.background_area_percent).toFixed(1)}% background</small></div><div class="actions"><button class="icon-btn open-background-library" data-media-id="${item.media_id}" title="Open in Library"><i data-lucide="images"></i></button><button class="btn open-background-editor" data-media-id="${item.media_id}"><i data-lucide="image-plus"></i>Replace background</button></div></article>`).join('')||'<div class="empty">No background candidates</div>'}</div>
-      </section>
-      <section class="trim-candidates-section">
-        <div class="page-head"><h2>Videos and animations to review</h2><span class="badge">${trimItems.length}</span></div>
-        <div class="trim-scan-toolbar"><button id="scanTrims" class="btn primary" ${(trimEnabled||trimItems.length)?'':'hidden'}><i data-lucide="scan-search"></i>Find videos and animations</button><span class="muted">${(trimEnabled||trimItems.length)?'Approve a clip or split it into fragments. Fragments replace it in automatic collections.':'Enable "Review videos and animations for trimming" in Settings to build this queue.'}</span></div>
-        <div class="item-list trim-candidate-list">${trimItems.map(item=>`<article class="queue-item trim-candidate"><img src="${item.thumbnail_url}" alt=""><div><strong>Media #${item.media_id}</strong><small>${esc(item.type==='video'?'Video':'Animation')} ? ${item.width||'?'}?${item.height||'?'} ? ${formatBytes(item.file_size)}</small></div><div class="actions"><a class="icon-btn trim-open-source" href="${item.content_url}" target="_blank" rel="noopener" title="Open the source file in a new tab" aria-label="Open the source file in a new tab"><i data-lucide="external-link"></i></a><button class="icon-btn trim-open-library" data-media-id="${item.media_id}" title="Open in Library"><i data-lucide="images"></i></button><button class="btn trim-approve" data-media-id="${item.media_id}"><i data-lucide="check"></i>Looks good</button><button class="btn primary trim-open" data-media-id="${item.media_id}"><i data-lucide="scissors"></i>Trim</button></div></article>`).join('')||'<div class="empty">Nothing to review</div>'}</div>
-      </section>
-    </div>`;
-    document.querySelector('#cropStatus').value=status; document.querySelector('#cropStatus').onchange=e=>render(e.target.value);
-    document.querySelector('#cropStatus').insertAdjacentHTML('afterend','<label>Preset <select id="cropPreset" class="control"><option value="14">Cautious</option><option value="20">Normal</option><option value="28">Sensitive</option></select></label><label>Selected analysis <select id="cropSelectedMethod" class="control"><option value="local">Local</option><option value="vision">Vision model</option></select></label>');
+
+  // The Editor used to stack three long lists on one page.  It is now split
+  // into tabs with independent pagination so a long queue no longer pushes the
+  // other sections off the screen.
+  const EDITOR_PREFS_KEY='jiffle-editor-preferences';
+  const EDITOR_PAGE_SIZES=[20,40,60,100];
+  const editorPrefs=()=>{try{const saved=JSON.parse(localStorage.getItem(EDITOR_PREFS_KEY)||'{}');const pageSize=EDITOR_PAGE_SIZES.includes(Number(saved.pageSize))?Number(saved.pageSize):40;const tab=['crop','background','trim'].includes(saved.tab)?saved.tab:'crop';return {...saved,pageSize,tab};}catch{return {pageSize:40,tab:'crop'};}};
+  const saveEditorPrefs=changes=>{try{localStorage.setItem(EDITOR_PREFS_KEY,JSON.stringify({...editorPrefs(),...changes}));}catch{}};
+  const asPercent=value=>{const number=Number(value)||0;return number<=1?number*100:number};
+  const colorCss=value=>{
+    if(Array.isArray(value)&&value.length>=3)return `rgb(${value.slice(0,3).map(channel=>Math.max(0,Math.min(255,Number(channel)||0))).join(',')})`;
+    return /^#[0-9a-f]{6}$/i.test(String(value||''))?String(value):'#dfe4e6';
+  };
+  const pageSizeControl=(pageSize,name)=>`<label class="toolbar-count" title="Items per page"><span>Per page</span><select class="control compact-control" data-page-size="${name}">${EDITOR_PAGE_SIZES.map(size=>`<option value="${size}" ${size===pageSize?'selected':''}>${size}</option>`).join('')}</select></label>`;
+  const pagerHtml=(offset,total,pageSize,name)=>{const from=total?offset+1:0;const to=Math.min(offset+pageSize,total);return `<div class="pager"><span class="page-range">${from}-${to} of ${total}</span><button class="btn" data-page-prev="${name}" ${offset===0?'disabled':''}><i data-lucide="chevron-left"></i>Previous</button><button class="btn" data-page-next="${name}" ${offset+pageSize>=total?'disabled':''}>Next<i data-lucide="chevron-right"></i></button></div>`;};
+  const bindEditorPager=(name,offset,pageSize,onOffset,onSize)=>{
+    const prev=document.querySelector(`[data-page-prev="${name}"]`);const next=document.querySelector(`[data-page-next="${name}"]`);
+    if(prev)prev.onclick=()=>onOffset(Math.max(0,offset-pageSize));
+    if(next)next.onclick=()=>onOffset(offset+pageSize);
+    const sizeSelect=document.querySelector(`[data-page-size="${name}"]`);
+    if(sizeSelect)sizeSelect.onchange=event=>onSize(Number(event.target.value));
+  };
+
+  const renderCropTab=async()=>{
+    const pane=document.querySelector('#editorPane');
+    const pageSize=editorPrefs().pageSize;
+    let status=viewState('editor').cropStatus||viewState('editor').status||'pending';
+    let offset=Math.max(0,Number(viewState('editor').cropOffset)||0);
+    const load=()=>api(`/api/v1/crop-analyses?status=${encodeURIComponent(status)}&limit=${pageSize}&offset=${offset}`);
+    let data=await load();let total=Number(data.total)||0;
+    if(!data.items.length&&total>0&&offset>0){offset=Math.max(0,(Math.ceil(total/pageSize)-1)*pageSize);data=await load();total=Number(data.total)||0;}
+    saveViewState('editor',{cropStatus:status,cropOffset:offset});
+    const items=data.items||[];
+    pane.innerHTML=`<div class="editor-toolbar crop-toolbar">
+      <label>Status <select id="cropStatus" class="control"><option value="pending">Pending</option><option value="cropped">Cropped</option><option value="no_crop_needed">No crop needed</option><option value="failed">Failed</option><option value="all">All</option></select></label>
+      <label>Preset <select id="cropPreset" class="control"><option value="14">Cautious</option><option value="20">Normal</option><option value="28">Sensitive</option></select></label>
+      <label>Minimum area <input id="cropArea" class="control" type="number" min="1" max="50" value="10"></label>
+      <label>Padding <input id="cropPadding" class="control" type="number" min="0" max="10" step=".5" value="2"></label>
+      <label>Selected analysis <select id="cropSelectedMethod" class="control"><option value="local">Local</option><option value="vision">Vision model</option></select></label>
+      <button id="scanSelected" class="btn"><i data-lucide="scan-line"></i>Selected</button>
+      <button id="scanAll" class="btn primary"><i data-lucide="scan-search"></i>Find crop candidates</button>
+      ${pageSizeControl(pageSize,'crop')}
+    </div>
+    <div class="page-head"><h2>Crop candidates</h2><span class="badge">${total}</span></div>
+    <div class="item-list">${items.map(item=>`<article class="queue-item"><img src="${item.thumbnail_url}" alt=""><div><strong>Media #${item.media_id}</strong><small>${esc(item.status)} · ${Number(item.confidence).toFixed(0)}% confidence · removes ${Number(item.removed_area).toFixed(1)}%</small></div><div class="actions"><button class="icon-btn open-library" data-media-id="${item.media_id}" title="Open in Library"><i data-lucide="images"></i></button>${item.status==='pending'?`<button class="btn open-crop" data-id="${item.id}"><i data-lucide="scan-line"></i>Review</button>`:`<button class="btn reset-crop" data-id="${item.id}"><i data-lucide="rotate-ccw"></i>Reopen review</button>`}</div></article>`).join('')||'<div class="empty">No items for this status</div>'}</div>
+    ${pagerHtml(offset,total,pageSize,'crop')}`;
+    const statusSelect=document.querySelector('#cropStatus');statusSelect.value=status;statusSelect.onchange=event=>{saveViewState('editor',{cropStatus:event.target.value,cropOffset:0});renderCropTab();};
     document.querySelector('#cropPreset').value=String(cropSettings.crop_background_tolerance);document.querySelector('#cropArea').value=String(cropSettings.crop_min_area_percent);document.querySelector('#cropPadding').value=String(cropSettings.crop_padding_percent);document.querySelector('#cropSelectedMethod').value=cropSettings.crop_selected_analysis;
     const persistCropSettings=async()=>{cropSettings=await api('/api/v1/settings',{method:'PATCH',body:JSON.stringify({crop_background_tolerance:Number(document.querySelector('#cropPreset').value),crop_min_area_percent:Number(document.querySelector('#cropArea').value),crop_padding_percent:Number(document.querySelector('#cropPadding').value),crop_selected_analysis:document.querySelector('#cropSelectedMethod').value})});toast('Crop settings saved')};
     ['cropPreset','cropArea','cropPadding','cropSelectedMethod'].forEach(id=>document.querySelector(`#${id}`).onchange=persistCropSettings);
@@ -1005,20 +1105,86 @@ async function showEditor() {
     document.querySelector('#scanSelected').onclick=async()=>{if(!selectedMedia){toast('Select an image in Library first',true);return}try{const method=document.querySelector('#cropSelectedMethod').value;const result=method==='vision'?await api(`/api/v1/media/${selectedMedia.id}/crop-vision-analysis`,{method:'POST'}):await api('/api/v1/crop-analyses',{method:'POST',body:JSON.stringify({media_id:selectedMedia.id,...options()})});if(result.id){openCrop(result.id)}else{toast('No removable margins found')}}catch(error){toast(error.message,true)}};
     document.querySelector('#scanAll').onclick=async()=>{try{const created=await api('/api/v1/crop-scan-jobs',{method:'POST',body:JSON.stringify(options())});monitorCropScan({id:created.job_id,status_url:created.status_url,progress:0,scanned:0,total:'?',candidates:0});toast('Crop scan started')}catch(error){toast(error.message,true)}};
     document.querySelectorAll('.open-library').forEach(n=>n.onclick=()=>openMediaInLibrary(Number(n.dataset.mediaId)));
-    const backgroundOptions=()=>({tolerance:Number(document.querySelector('#backgroundTolerance').value),min_background_percent:Number(document.querySelector('#backgroundMinimumArea').value)});
-    const saveBackgroundOptions=()=>{const values=backgroundOptions();saveViewState('editor',{backgroundTolerance:values.tolerance,backgroundMinimumArea:values.min_background_percent});return values};
-    ['backgroundTolerance','backgroundMinimumArea'].forEach(id=>document.querySelector(`#${id}`).onchange=saveBackgroundOptions);
+    document.querySelectorAll('.open-crop').forEach(n=>n.onclick=()=>openCrop(Number(n.dataset.id)));
+    document.querySelectorAll('.reset-crop').forEach(n=>n.onclick=async()=>{await api(`/api/v1/crop-analyses/${n.dataset.id}/reset`,{method:'POST'});renderCropTab()});
+    bindEditorPager('crop',offset,pageSize,newOffset=>{saveViewState('editor',{cropOffset:newOffset});renderCropTab()},newSize=>{saveEditorPrefs({pageSize:newSize});saveViewState('editor',{cropOffset:0});renderCropTab()});
+    if(status==='pending')document.querySelector('#cropCount').textContent=total||'';
+    icons();
+  };
+
+  const renderBackgroundTab=async()=>{
+    const pane=document.querySelector('#editorPane');
+    const pageSize=editorPrefs().pageSize;
+    const savedState=viewState('editor');
+    const tolerance=Math.min(80,Math.max(5,Number(savedState.backgroundTolerance)||24));
+    const minimumArea=Math.min(95,Math.max(5,Number(savedState.backgroundMinimumArea)||25));
+    let offset=Math.max(0,Number(viewState('editor').backgroundOffset)||0);
+    const load=()=>api(`/api/v1/background-candidates?tolerance=${tolerance}&min_background_percent=${minimumArea}&limit=${pageSize}&offset=${offset}`);
+    let data=await load();let total=Number(data.total)||0;
+    if(!data.items.length&&total>0&&offset>0){offset=Math.max(0,(Math.ceil(total/pageSize)-1)*pageSize);data=await load();total=Number(data.total)||0;}
+    saveViewState('editor',{backgroundTolerance:tolerance,backgroundMinimumArea:minimumArea,backgroundOffset:offset});
+    const items=data.items||[];
+    pane.innerHTML=`<div class="background-scan-toolbar"><label>Edge tolerance <input id="backgroundTolerance" class="control" type="number" min="5" max="80" value="${tolerance}"></label><label>Minimum background, % <input id="backgroundMinimumArea" class="control" type="number" min="5" max="95" value="${minimumArea}"></label><button id="analyzeSelectedBackground" class="btn"><i data-lucide="scan-line"></i>Analyze selected</button><button id="scanBackgrounds" class="btn primary"><i data-lucide="scan-search"></i>Find background candidates</button>${pageSizeControl(pageSize,'background')}</div>
+    <div class="page-head"><h2>Background candidates</h2><span class="badge">${total}</span></div>
+    <div class="item-list background-candidate-list">${items.map(item=>`<article class="queue-item background-candidate"><img src="${item.thumbnail_url}" alt=""><div><strong>Media #${item.media_id}</strong><small><span class="background-color-swatch" style="background:${colorCss(item.background_color)}"></span>${asPercent(item.confidence).toFixed(0)}% confidence · ${asPercent(item.background_area_percent).toFixed(1)}% background</small></div><div class="actions"><button class="icon-btn open-background-library" data-media-id="${item.media_id}" title="Open in Library"><i data-lucide="images"></i></button><button class="btn open-background-editor" data-media-id="${item.media_id}"><i data-lucide="image-plus"></i>Replace background</button></div></article>`).join('')||'<div class="empty">No background candidates</div>'}</div>
+    ${pagerHtml(offset,total,pageSize,'background')}`;
+    const saveBackgroundOptions=()=>{const values={tolerance:Number(document.querySelector('#backgroundTolerance').value),min_background_percent:Number(document.querySelector('#backgroundMinimumArea').value)};saveViewState('editor',{backgroundTolerance:values.tolerance,backgroundMinimumArea:values.min_background_percent,backgroundOffset:0});return values};
+    ['backgroundTolerance','backgroundMinimumArea'].forEach(id=>document.querySelector(`#${id}`).onchange=()=>{saveBackgroundOptions();renderBackgroundTab()});
     document.querySelector('#analyzeSelectedBackground').onclick=async()=>{if(!selectedMedia||selectedMedia.type!=='image'){toast('Select an image in Library first',true);return}try{const result=await api(`/api/v1/media/${selectedMedia.id}/background-analysis`,{method:'POST',body:JSON.stringify(saveBackgroundOptions())});if(result.status==='candidate'){saveViewState('editor',{targetMediaId:selectedMedia.id,analysisId:null,backgroundOpen:true});await openMediaEditor(selectedMedia.id)}else{toast('No replaceable background found')}}catch(error){toast(error.message,true)}};
     document.querySelector('#scanBackgrounds').onclick=async()=>{try{const created=await api('/api/v1/background-scan-jobs',{method:'POST',body:JSON.stringify(saveBackgroundOptions())});monitorBackgroundScan({id:created.job_id,status_url:created.status_url,progress:0,scanned:0,total:'?',candidates:0});toast('Background scan started')}catch(error){toast(error.message,true)}};
     document.querySelectorAll('.open-background-library').forEach(n=>n.onclick=()=>openMediaInLibrary(Number(n.dataset.mediaId)));
     document.querySelectorAll('.open-background-editor').forEach(n=>n.onclick=()=>{saveViewState('editor',{targetMediaId:Number(n.dataset.mediaId),analysisId:null,backgroundOpen:true});openMediaEditor(Number(n.dataset.mediaId))});
-    reloadBackgroundCandidates=()=>{if(currentView==='editor'&&!Number(viewState('editor').targetMediaId))render(status)};
-    document.querySelectorAll('.open-crop').forEach(n=>n.onclick=()=>openCrop(Number(n.dataset.id)));document.querySelectorAll('.reset-crop').forEach(n=>n.onclick=async()=>{await api(`/api/v1/crop-analyses/${n.dataset.id}/reset`,{method:'POST'});render(status)}); icons(); document.querySelector('#cropCount').textContent=status==='pending'?(data.items.length||''):document.querySelector('#cropCount').textContent;
+    bindEditorPager('background',offset,pageSize,newOffset=>{saveViewState('editor',{backgroundOffset:newOffset});renderBackgroundTab()},newSize=>{saveEditorPrefs({pageSize:newSize});saveViewState('editor',{backgroundOffset:0});renderBackgroundTab()});
+    icons();
+  };
+
+  const renderTrimTab=async()=>{
+    const pane=document.querySelector('#editorPane');
+    const pageSize=editorPrefs().pageSize;
+    const trimEnabled=Boolean(cropSettings.trim_review_enabled);
+    let offset=Math.max(0,Number(viewState('editor').trimOffset)||0);
+    const load=()=>api(`/api/v1/trim-reviews?status=pending&limit=${pageSize}&offset=${offset}`);
+    let data=await load();let total=Number(data.total)||0;
+    if(!data.items.length&&total>0&&offset>0){offset=Math.max(0,(Math.ceil(total/pageSize)-1)*pageSize);data=await load();total=Number(data.total)||0;}
+    saveViewState('editor',{trimOffset:offset});
+    const items=data.items||[];
+    const cards=items.map(item=>{
+      const kind=item.type==='video'?'Video':'Animation';
+      const icon=item.type==='video'?'film':'image';
+      return `<article class="media-card trim-card" data-trim-card="${item.media_id}">
+        <div class="trim-card-preview" data-trim-open="${item.media_id}" title="Open the trim editor"><img loading="lazy" src="${esc(item.thumbnail_url)}" alt=""><span class="trim-card-kind"><i data-lucide="${icon}"></i>${kind}</span>${item.deferred?'<span class="trim-card-deferred" title="Moved to the end of the queue"><i data-lucide="clock"></i></span>':''}${item.fragment_count?`<span class="fragment-count-marker"><i data-lucide="scissors"></i>${item.fragment_count}</span>`:''}</div>
+        <div class="trim-card-info"><strong>Media #${item.media_id}</strong><small>${item.width||'?'}×${item.height||'?'} · ${formatBytes(item.file_size)}</small></div>
+        <div class="trim-card-actions"><a class="icon-btn" href="${esc(item.content_url)}" target="_blank" rel="noopener" title="Open the file in a new tab"><i data-lucide="maximize-2"></i></a><button type="button" class="icon-btn" data-trim-library="${item.media_id}" title="Open in Library"><i data-lucide="images"></i></button><button type="button" class="icon-btn" data-trim-defer="${item.media_id}" title="Move to the end of the queue"><i data-lucide="arrow-down-to-line"></i></button><button type="button" class="btn" data-trim-approve="${item.media_id}"><i data-lucide="check"></i>Looks good</button><button type="button" class="btn primary" data-trim-open="${item.media_id}"><i data-lucide="scissors"></i>Trim</button></div>
+      </article>`;
+    }).join('');
+    pane.innerHTML=`<div class="trim-scan-toolbar"><button id="scanTrims" class="btn primary" ${(trimEnabled||total)?'':'hidden'}><i data-lucide="scan-search"></i>Find videos and animations</button><span class="muted">${(trimEnabled||total)?'Approve a clip or split it into fragments. Fragments replace it in automatic collections.':'Enable "Review videos and animations for trimming" in Settings to build this queue.'}</span>${pageSizeControl(pageSize,'trim')}</div>
+    <div class="page-head"><h2>Videos and animations to review</h2><span class="badge">${total}</span></div>
+    <div class="gallery review-gallery trim-card-grid">${cards||'<div class="empty">Nothing to review</div>'}</div>
+    ${pagerHtml(offset,total,pageSize,'trim')}`;
     const scanTrims=document.querySelector('#scanTrims');
-    if(scanTrims)scanTrims.onclick=async()=>{try{await runJob(()=>api('/api/v1/trim-scan-jobs',{method:'POST'}));toast('Review scan finished');render('pending')}catch(error){toast(error.message,true)}};
-    document.querySelectorAll('.trim-approve').forEach(n=>n.onclick=async()=>{try{await api(`/api/v1/trim-reviews/${n.dataset.mediaId}/approve`,{method:'POST'});toast('Marked as reviewed');render(status)}catch(error){toast(error.message,true)}});
-    document.querySelectorAll('.trim-open').forEach(n=>n.onclick=()=>openTrim(Number(n.dataset.mediaId)));
-    document.querySelectorAll('.trim-open-library').forEach(n=>n.onclick=()=>openMediaInLibrary(Number(n.dataset.mediaId)));
+    if(scanTrims)scanTrims.onclick=async()=>{try{await runJob(()=>api('/api/v1/trim-scan-jobs',{method:'POST'}));toast('Review scan finished');renderTrimTab()}catch(error){toast(error.message,true)}};
+    document.querySelectorAll('[data-trim-open]').forEach(n=>n.onclick=()=>openTrim(Number(n.dataset.trimOpen)));
+    document.querySelectorAll('[data-trim-library]').forEach(n=>n.onclick=()=>openMediaInLibrary(Number(n.dataset.trimLibrary)));
+    document.querySelectorAll('[data-trim-approve]').forEach(n=>n.onclick=async()=>{try{await api(`/api/v1/trim-reviews/${n.dataset.trimApprove}/approve`,{method:'POST'});toast('Marked as reviewed');await refreshCounts();renderTrimTab()}catch(error){toast(error.message,true)}});
+    document.querySelectorAll('[data-trim-defer]').forEach(n=>n.onclick=async()=>{n.disabled=true;try{await api(`/api/v1/trim-reviews/${n.dataset.trimDefer}/defer`,{method:'POST'});toast('Moved to the end of the queue');renderTrimTab()}catch(error){toast(error.message,true);n.disabled=false}});
+    bindEditorPager('trim',offset,pageSize,newOffset=>{saveViewState('editor',{trimOffset:newOffset});renderTrimTab()},newSize=>{saveEditorPrefs({pageSize:newSize});saveViewState('editor',{trimOffset:0});renderTrimTab()});
+    document.querySelector('#trimCount').textContent=total||'';
+    icons();
+  };
+
+  const render=async options=>{
+    if(typeof options==='string')options={cropStatus:options};
+    options=options||{};
+    saveViewState('editor',{analysisId:null,targetMediaId:null,backgroundOpen:false,...(options.cropStatus?{cropStatus:options.cropStatus,status:options.cropStatus}:{})});
+    const tab=options.tab||editorPrefs().tab;
+    saveEditorPrefs({tab});
+    const tabs=[{value:'crop',label:'Crop',icon:'crop'},{value:'background',label:'Background',icon:'image-plus'},{value:'trim',label:'Videos & animations',icon:'scissors'}];
+    workspace.innerHTML=`<div class="page editor-page"><div class="editor-tabs" role="tablist">${tabs.map(item=>`<button type="button" role="tab" class="editor-tab${item.value===tab?' active':''}" data-editor-tab="${item.value}"><i data-lucide="${item.icon}"></i><span>${item.label}</span></button>`).join('')}</div><div id="editorPane"><div class="empty">Loading...</div></div></div>`;
+    document.querySelectorAll('[data-editor-tab]').forEach(node=>node.onclick=()=>{if(node.dataset.editorTab!==tab){saveEditorPrefs({tab:node.dataset.editorTab});render()}});
+    reloadBackgroundCandidates=()=>{if(currentView==='editor'&&!Number(viewState('editor').targetMediaId)&&editorPrefs().tab==='background')renderBackgroundTab()};
+    if(tab==='background')await renderBackgroundTab();
+    else if(tab==='trim')await renderTrimTab();
+    else await renderCropTab();
   };
   const openMediaEditor = async mediaId => {
     saveViewState('editor',{targetMediaId:mediaId,analysisId:null,box:null,backgroundMediaId:mediaId});
@@ -1172,19 +1338,43 @@ async function showEditor() {
   const openTrim = async mediaId => {
     const state=await api(`/api/v1/media/${mediaId}/trim-state`);
     const source=state.source; let durationMs=Number(state.duration_ms)||0;
-    let segments=(state.segments||[]).map(segment=>({start_ms:Number(segment.start_ms),end_ms:Number(segment.end_ms),media_item_id:segment.media_item_id,index:segment.index}));
+    const editorKey=Number(source.id);
+    // Persist the open clip and the in-progress draft so a refresh reopens the
+    // same trim editor with its segments and zoom instead of the Editor list.
+    saveViewState('editor',{targetMediaId:editorKey,trimTarget:true,trimMediaId:editorKey,analysisId:null,backgroundOpen:false});
+    const draft=(viewState('editor').trimDrafts||{})[String(editorKey)]||null;
+    const serverRanges=new Map((state.segments||[]).map(segment=>[`${Number(segment.start_ms)}:${Number(segment.end_ms)}`,segment]));
+    let segments=(draft&&Array.isArray(draft.segments))
+      ?draft.segments.map(segment=>{const start=Number(segment.start_ms)||0,end=Number(segment.end_ms)||0;const server=serverRanges.get(`${start}:${end}`);return {start_ms:start,end_ms:end,state:server?'saved':'new',media_item_id:server?.media_item_id,index:server?.index};})
+      :(state.segments||[]).map(segment=>({start_ms:Number(segment.start_ms),end_ms:Number(segment.end_ms),media_item_id:segment.media_item_id,index:segment.index,state:'saved'}));
     const isVideo=source.media_type==='video';
     // A pending clip with no fragments can be confirmed as-is from inside the
     // editor, without going back to the review list to use "Looks good".
     const canConfirmOriginal=!state.derived_from_media_id&&state.review_status==='pending'&&!(state.segments||[]).length;
     const MIN_RANGE_MS=200;
-    let pendingStartMs=0,pendingEndMs=Math.max(0,durationMs),rangeTouched=false;
+    let pendingStartMs=Math.max(0,Number(draft?.startMs)||0);
+    let pendingEndMs=Math.max(pendingStartMs+MIN_RANGE_MS,Number(draft?.endMs)||Math.max(0,durationMs));
+    let rangeTouched=Boolean(draft?.rangeTouched);
+    const savedView=Array.isArray(draft?.view)&&draft.view.length===2?draft.view.map(Number):null;
     workspace.innerHTML=`<div class="page editor-page trim-editor-page">
       <div class="page-head"><button class="btn" id="backEditor"><i data-lucide="chevron-left"></i>Editor</button><button class="icon-btn" id="trimOpenLibrary" title="Open in Library"><i data-lucide="images"></i></button><h2>Trim ${isVideo?'video':'animation'}</h2><span class="badge">Media #${source.id}</span>${state.derived_from_media_id?`<span class="badge">Part ${state.trim_index||'?'}</span>`:''}</div>
       <div class="trim-layout">
         <div class="trim-stage">
           <div class="trim-preview">${isVideo?`<video id="trimSource" src="${source.content_url}" controls preload="metadata" playsinline></video>`:`<img id="trimSource" src="${source.content_url}" alt="">`}</div>
-          ${isVideo?`<div class="trim-timeline" id="trimTimeline"><div class="trim-ruler" id="trimRuler"></div><div class="trim-track" id="trimTrack"><div class="trim-band" id="trimBand"></div><div class="trim-segments-lane" id="trimSegmentsLane"></div><div class="trim-handle trim-handle-start" id="trimHandleStart" role="slider" tabindex="0" aria-label="Range start" aria-valuemin="0"></div><div class="trim-handle trim-handle-end" id="trimHandleEnd" role="slider" tabindex="0" aria-label="Range end" aria-valuemin="0"></div><div class="trim-playhead" id="trimPlayhead"></div></div></div>`:''}
+          ${isVideo?`<div class="trim-timeline-wrap">
+            <div class="trim-zoom-bar">
+              <button type="button" class="icon-btn" id="trimZoomOut" title="Zoom out"><i data-lucide="zoom-out"></i></button>
+              <input id="trimZoom" type="range" min="1" max="64" step="1" value="1" aria-label="Timeline zoom">
+              <button type="button" class="icon-btn" id="trimZoomIn" title="Zoom in"><i data-lucide="zoom-in"></i></button>
+              <span class="trim-zoom-value" id="trimZoomValue">1×</span>
+              <button type="button" class="btn" id="trimFitAll">Fit all</button>
+              <button type="button" class="btn" id="trimFitSelection">Fit selection</button>
+              <button type="button" class="icon-btn" id="trimPanLeft" title="Pan left"><i data-lucide="chevron-left"></i></button>
+              <button type="button" class="icon-btn" id="trimPanRight" title="Pan right"><i data-lucide="chevron-right"></i></button>
+            </div>
+            <div class="trim-timeline" id="trimTimeline"><div class="trim-ruler" id="trimRuler"></div><div class="trim-track" id="trimTrack"><div class="trim-band" id="trimBand"></div><div class="trim-segments-lane" id="trimSegmentsLane"></div><div class="trim-handle trim-handle-start" id="trimHandleStart" role="slider" tabindex="0" aria-label="Range start" aria-valuemin="0"></div><div class="trim-handle trim-handle-end" id="trimHandleEnd" role="slider" tabindex="0" aria-label="Range end" aria-valuemin="0"></div><div class="trim-playhead" id="trimPlayhead"></div></div></div>
+            <p class="muted trim-zoom-hint">Scroll to zoom, Shift+drag or the arrows to move, drag the track to seek.</p>
+          </div>`:''}
         </div>
         <div class="trim-controls">
           <p class="muted">${isVideo?'Drag the markers or park the player and use the buttons to mark a range, add it to the list, then repeat for every fragment. The original file stays in the library.':'Mark a range, add it to the list, then repeat for every fragment. The original file stays in the library.'}</p>
@@ -1205,33 +1395,61 @@ async function showEditor() {
     const playhead=document.querySelector('#trimPlayhead'),segmentsLane=document.querySelector('#trimSegmentsLane'),ruler=document.querySelector('#trimRuler');
     const maxMs=()=>durationMs||(video&&Number.isFinite(video.duration)?Math.round(video.duration*1000):0);
     const clampMs=value=>{const top=maxMs();const number=Math.max(0,Math.round(Number(value)||0));return top?Math.min(top,number):number;};
-    const percent=value=>{const top=maxMs();return top?Math.max(0,Math.min(100,value/top*100)):0;};
+    let viewStartMs=0,viewEndMs=0;
+    const minSpanMs=()=>Math.max(MIN_RANGE_MS,Math.round((maxMs()||MIN_RANGE_MS)/64));
+    const viewPercent=value=>{const span=(viewEndMs-viewStartMs)||1;return Math.max(0,Math.min(100,(value-viewStartMs)/span*100));};
+    const segmentStateLabel=state=>({saved:'Saved',encoding:'Encoding',queued:'Queued',error:'Failed',new:'Not saved'}[state]||'Not saved');
+    const saveTrimDraft=()=>{
+      const drafts={...(viewState('editor').trimDrafts||{})};
+      drafts[String(editorKey)]={segments:segments.map(segment=>({start_ms:segment.start_ms,end_ms:segment.end_ms})),startMs:pendingStartMs,endMs:pendingEndMs,rangeTouched,view:[viewStartMs,viewEndMs]};
+      saveViewState('editor',{trimDrafts:drafts});
+    };
+    const clearTrimDraft=()=>{const drafts={...(viewState('editor').trimDrafts||{})};delete drafts[String(editorKey)];saveViewState('editor',{trimDrafts:drafts});};
+    const renderZoomValue=()=>{const top=maxMs();const span=(viewEndMs-viewStartMs)||1;const factor=top?Math.max(1,Math.round(top/span)):1;const zoomInput=document.querySelector('#trimZoom');if(zoomInput)zoomInput.value=String(Math.min(64,factor));const label=document.querySelector('#trimZoomValue');if(label)label.textContent=`${factor}×`;};
     const syncRangeUI=()=>{
       startTime.value=formatTimecode(pendingStartMs);endTime.value=formatTimecode(pendingEndMs);
       if(!timeline)return;
-      const startPct=percent(pendingStartMs),endPct=percent(pendingEndMs);
+      const startPct=viewPercent(pendingStartMs),endPct=viewPercent(pendingEndMs);
       band.style.left=`${startPct}%`;band.style.width=`${Math.max(0,endPct-startPct)}%`;
       handleStart.style.left=`${startPct}%`;handleEnd.style.left=`${endPct}%`;
       handleStart.setAttribute('aria-valuemax',String(Math.max(0,pendingEndMs-MIN_RANGE_MS)));handleStart.setAttribute('aria-valuenow',String(pendingStartMs));handleStart.setAttribute('aria-valuetext',formatTimecode(pendingStartMs));
       handleEnd.setAttribute('aria-valuemin',String(pendingStartMs+MIN_RANGE_MS));handleEnd.setAttribute('aria-valuenow',String(pendingEndMs));handleEnd.setAttribute('aria-valuetext',formatTimecode(pendingEndMs));
       timeline.classList.toggle('disabled',!maxMs());
     };
-    const renderPlayhead=()=>{if(playhead&&video)playhead.style.left=`${percent(video.currentTime*1000)}%`;};
+    const renderPlayhead=()=>{
+      if(!playhead||!video)return;
+      const ms=video.currentTime*1000;const span=viewEndMs-viewStartMs;
+      if(span>0&&(ms<viewStartMs||ms>viewEndMs))setView(ms-span*0.1,ms+span*0.9,{persist:false});
+      playhead.style.left=`${viewPercent(ms)}%`;
+    };
     const seekTo=value=>{if(!video)return;const top=maxMs();const seconds=Math.max(0,top?Math.min(top,value):value)/1000;try{video.currentTime=seconds}catch{}};
     const setStart=value=>{rangeTouched=true;pendingStartMs=Math.max(0,Math.min(clampMs(value),pendingEndMs-MIN_RANGE_MS));syncRangeUI();};
     const setEnd=value=>{rangeTouched=true;const top=maxMs();pendingEndMs=clampMs(Math.max(value,pendingStartMs+MIN_RANGE_MS));if(top&&pendingEndMs>top)pendingEndMs=top;if(pendingEndMs<pendingStartMs+MIN_RANGE_MS)pendingEndMs=pendingStartMs+MIN_RANGE_MS;syncRangeUI();};
-    const tickStepMs=()=>{const top=maxMs();if(top<=30000)return 5000;if(top<=120000)return 10000;if(top<=600000)return 60000;return 300000;};
+    const tickStepMs=span=>{if(span<=5000)return 500;if(span<=15000)return 1000;if(span<=30000)return 2000;if(span<=60000)return 5000;if(span<=180000)return 15000;if(span<=600000)return 60000;return 300000;};
     const renderTimeline=()=>{
       if(!timeline){syncRangeUI();return}
       const top=maxMs();
+      if(viewEndMs<=viewStartMs){viewStartMs=0;viewEndMs=top||1;}
       ruler.innerHTML='';
-      if(top){const step=tickStepMs();for(let ms=0;ms<=top;ms+=step){const tick=document.createElement('span');tick.className='trim-tick';tick.style.left=`${percent(ms)}%`;tick.textContent=formatTimecode(ms).replace(/\.0$/,'');ruler.appendChild(tick)}}
+      const span=viewEndMs-viewStartMs;
+      if(top){const step=tickStepMs(span);for(let ms=Math.ceil(viewStartMs/step)*step;ms<=viewEndMs;ms+=step){const tick=document.createElement('span');tick.className='trim-tick';tick.style.left=`${viewPercent(ms)}%`;tick.textContent=formatTimecode(ms).replace(/\.0$/,'');ruler.appendChild(tick)}}
       segmentsLane.innerHTML='';
-      segments.forEach((segment,index)=>{const item=document.createElement('button');item.type='button';item.className='trim-segment-band';item.dataset.index=String(index);const left=percent(Number(segment.start_ms)||0),right=percent(Number(segment.end_ms)||0);item.style.left=`${left}%`;item.style.width=`${Math.max(0,right-left)}%`;item.title=describeSegment(segment,index+1);item.onpointerdown=event=>event.stopPropagation();item.onclick=event=>{event.stopPropagation();pendingStartMs=clampMs(segment.start_ms);pendingEndMs=clampMs(segment.end_ms);if(pendingEndMs<pendingStartMs+MIN_RANGE_MS)pendingEndMs=pendingStartMs+MIN_RANGE_MS;rangeTouched=true;syncRangeUI();seekTo(pendingStartMs)};segmentsLane.appendChild(item)});
+      segments.forEach((segment,index)=>{const item=document.createElement('button');item.type='button';item.className=`trim-segment-band${segment.state?' trim-segment-band-'+segment.state:''}`;item.dataset.index=String(index);const left=viewPercent(Number(segment.start_ms)||0),right=viewPercent(Number(segment.end_ms)||0);item.style.left=`${left}%`;item.style.width=`${Math.max(0,right-left)}%`;item.title=`${describeSegment(segment,index+1)} · ${segmentStateLabel(segment.state)}`;item.onpointerdown=event=>event.stopPropagation();item.onclick=event=>{event.stopPropagation();pendingStartMs=clampMs(segment.start_ms);pendingEndMs=clampMs(segment.end_ms);if(pendingEndMs<pendingStartMs+MIN_RANGE_MS)pendingEndMs=pendingStartMs+MIN_RANGE_MS;rangeTouched=true;syncRangeUI();seekTo(pendingStartMs);saveTrimDraft()};segmentsLane.appendChild(item)});
       syncRangeUI();
     };
+    const setView=(start,end,{persist=true}={})=>{
+      const top=maxMs()||1;const minSpan=minSpanMs();
+      const span=Math.max(minSpan,Math.min(top,Number(end)-Number(start)||top));
+      const origin=Math.max(0,Math.min(top-span,Number(start)||0));
+      viewStartMs=origin;viewEndMs=origin+span;
+      renderTimeline();renderZoomValue();
+      if(persist)saveTrimDraft();
+    };
+    const segmentStateIcon=state=>{if(state==='saved')return 'check-circle';if(state==='encoding')return 'loader-circle';if(state==='queued')return 'clock';if(state==='error')return 'triangle-alert';return 'circle-dashed';};
+    const segmentStateHtml=(state,index)=>`<span class="trim-segment-state ${state||'new'}" data-segment-state="${index}"><i data-lucide="${segmentStateIcon(state)}" class="${state==='encoding'?'spin':''}"></i>${segmentStateLabel(state)}</span>`;
+    const updateSegmentState=index=>{const node=document.querySelector(`[data-segment-state="${index}"]`);if(!node)return;const state=segments[index]?.state;node.className=`trim-segment-state ${state||'new'}`;node.innerHTML=segmentStateHtml(state,index);icons();};
     const build=()=>{
-      const list=segments.map((segment,index)=>`<article class="trim-segment"><span><strong>${esc(describeSegment(segment,index+1))}</strong><small>${formatDuration(segmentDurationMs(segment))}</small></span><div class="actions"><button type="button" class="btn trim-edit" data-index="${index}"><i data-lucide="pencil"></i>Edit</button><button type="button" class="icon-btn danger trim-remove" data-index="${index}" title="Remove"><i data-lucide="trash-2"></i></button></div></article>`).join('');
+      const list=segments.map((segment,index)=>`<article class="trim-segment"><span><strong>${esc(describeSegment(segment,index+1))}</strong><small>${formatDuration(segmentDurationMs(segment))}</small></span>${segmentStateHtml(segment.state,index)}<div class="actions"><button type="button" class="btn trim-edit" data-index="${index}"><i data-lucide="pencil"></i>Edit</button><button type="button" class="icon-btn danger trim-remove" data-index="${index}" title="Remove"><i data-lucide="trash-2"></i></button></div></article>`).join('');
       document.querySelector('#trimSegmentList').innerHTML=list||'<div class="empty">No segments yet. Set a range and add it.</div>';
       document.querySelector('#trimSegmentCount').textContent=String(segments.length);
       const saveButton=document.querySelector('#saveTrim');
@@ -1239,50 +1457,75 @@ async function showEditor() {
       saveButton.disabled=!segments.length;
       const keepButton=document.querySelector('#keepTrimOriginal');
       if(keepButton)keepButton.hidden=!canConfirmOriginal||segments.length>0;
-      document.querySelectorAll('.trim-edit').forEach(n=>n.onclick=()=>{const segment=segments[Number(n.dataset.index)];segments.splice(Number(n.dataset.index),1);pendingStartMs=clampMs(segment.start_ms);pendingEndMs=clampMs(segment.end_ms);if(pendingEndMs<pendingStartMs+MIN_RANGE_MS)pendingEndMs=pendingStartMs+MIN_RANGE_MS;rangeTouched=true;seekTo(pendingStartMs);build()});
-      document.querySelectorAll('.trim-remove').forEach(n=>n.onclick=()=>{segments.splice(Number(n.dataset.index),1);build()});
+      document.querySelectorAll('.trim-edit').forEach(n=>n.onclick=()=>{const index=Number(n.dataset.index);const segment=segments[index];segments.splice(index,1);pendingStartMs=clampMs(segment.start_ms);pendingEndMs=clampMs(segment.end_ms);if(pendingEndMs<pendingStartMs+MIN_RANGE_MS)pendingEndMs=pendingStartMs+MIN_RANGE_MS;rangeTouched=true;seekTo(pendingStartMs);build();saveTrimDraft()});
+      document.querySelectorAll('.trim-remove').forEach(n=>n.onclick=()=>{segments.splice(Number(n.dataset.index),1);build();saveTrimDraft()});
       renderTimeline();if(video)renderPlayhead();icons();
     };
     startTime.oninput=()=>startTime.classList.remove('invalid');endTime.oninput=()=>endTime.classList.remove('invalid');
-    startTime.onchange=()=>{const parsed=parseTimecode(startTime.value);if(parsed===null){startTime.classList.add('invalid');toast('Enter the start as mm:ss.d, for example 0:56.0.',true);startTime.value=formatTimecode(pendingStartMs);startTime.classList.remove('invalid');return}setStart(parsed);seekTo(pendingStartMs)};
-    endTime.onchange=()=>{const parsed=parseTimecode(endTime.value);if(parsed===null){endTime.classList.add('invalid');toast('Enter the end as mm:ss.d, for example 0:56.0.',true);endTime.value=formatTimecode(pendingEndMs);endTime.classList.remove('invalid');return}setEnd(parsed);seekTo(pendingEndMs)};
-    document.querySelector('#backEditor').onclick=()=>{saveViewState('editor',{targetMediaId:null,trimTarget:false});render()};
+    startTime.onchange=()=>{const parsed=parseTimecode(startTime.value);if(parsed===null){startTime.classList.add('invalid');toast('Enter the start as mm:ss.d, for example 0:56.0.',true);startTime.value=formatTimecode(pendingStartMs);startTime.classList.remove('invalid');return}setStart(parsed);seekTo(pendingStartMs);saveTrimDraft()};
+    endTime.onchange=()=>{const parsed=parseTimecode(endTime.value);if(parsed===null){endTime.classList.add('invalid');toast('Enter the end as mm:ss.d, for example 0:56.0.',true);endTime.value=formatTimecode(pendingEndMs);endTime.classList.remove('invalid');return}setEnd(parsed);seekTo(pendingEndMs);saveTrimDraft()};
+    document.querySelector('#backEditor').onclick=()=>{saveTrimDraft();saveViewState('editor',{targetMediaId:null,trimTarget:false,trimMediaId:null});render()};
     document.querySelector('#trimOpenLibrary').onclick=()=>openMediaInLibrary(source.id);
     document.querySelector('#previewTrim').onclick=()=>{if(!video)return;rangeTouched=true;seekTo(pendingStartMs);const playing=video.play();if(playing&&playing.catch)playing.catch(()=>{})};
-    document.querySelector('#trimSetStart').onclick=()=>{if(video)setStart(Math.round(video.currentTime*1000))};
-    document.querySelector('#trimSetEnd').onclick=()=>{if(video)setEnd(Math.round(video.currentTime*1000))};
+    document.querySelector('#trimSetStart').onclick=()=>{if(video){setStart(Math.round(video.currentTime*1000));saveTrimDraft()}};
+    document.querySelector('#trimSetEnd').onclick=()=>{if(video){setEnd(Math.round(video.currentTime*1000));saveTrimDraft()}};
     document.querySelector('#trimJumpEnd').onclick=()=>{if(video){video.pause();seekTo(pendingEndMs)}};
-    document.querySelector('#addTrimSegment').onclick=()=>{const check=validateSegment(segments,pendingStartMs,pendingEndMs,maxMs());if(!check.ok){toast(check.message,true);return}segments=segmentsPayload([...segments,{start_ms:pendingStartMs,end_ms:pendingEndMs}]).map((segment,index)=>({...segment,index:index+1}));build()};
-    document.querySelector('#saveTrim').onclick=async()=>{if(!segments.length){toast('Add at least one segment',true);return}try{const job=await runJob(()=>api(`/api/v1/media/${source.id}/trim-jobs`,{method:'POST',body:JSON.stringify({segments:segmentsPayload(segments)})}));const result=job.result||{};toast(`${result.segment_count||segments.length} fragment(s) saved`);await openTrim(source.id)}catch(error){toast(error.message,true)}};
+    document.querySelector('#addTrimSegment').onclick=()=>{const check=validateSegment(segments,pendingStartMs,pendingEndMs,maxMs());if(!check.ok){toast(check.message,true);return}segments=[...segments,{start_ms:pendingStartMs,end_ms:pendingEndMs,state:'new'}].sort((a,b)=>Number(a.start_ms)-Number(b.start_ms)).map((segment,index)=>({...segment,index:index+1}));build();saveTrimDraft()};
+    document.querySelector('#saveTrim').onclick=async()=>{
+      if(!segments.length){toast('Add at least one segment',true);return}
+      const button=document.querySelector('#saveTrim');button.disabled=true;
+      segments.forEach(segment=>{if(segment.state!=='saved')segment.state='queued'});
+      build();
+      try{
+        const created=await api(`/api/v1/media/${source.id}/trim-jobs`,{method:'POST',body:JSON.stringify({segments:segmentsPayload(segments)})});
+        const job=await waitForJob(created.status_url,progress=>{const running=(progress?.result&&progress.result.segments)||[];running.forEach(entry=>{const index=Number(entry.index)-1;if(index>=0&&index<segments.length){segments[index].state=entry.status;updateSegmentState(index)}})});
+        const result=job.result||{};
+        segments.forEach((segment,index)=>{segment.state='saved';if(result.segments&&result.segments[index]&&result.segments[index].media_item_id)segment.media_item_id=result.segments[index].media_item_id;updateSegmentState(index)});
+        toast(`${result.segment_count||segments.length} fragment(s) saved`);
+        clearTrimDraft();
+      }catch(error){segments.forEach((segment,index)=>{if(segment.state!=='saved')segment.state='error';updateSegmentState(index)});toast(error.message,true)}
+      finally{button.disabled=!segments.length}
+    };
     const keepOriginal=document.querySelector('#keepTrimOriginal');
-    if(keepOriginal)keepOriginal.onclick=async()=>{keepOriginal.disabled=true;try{await api(`/api/v1/trim-reviews/${source.id}/approve`,{method:'POST'});toast('Original kept without trimming');saveViewState('editor',{targetMediaId:null,trimTarget:false,trimMediaId:null});await render('pending')}catch(error){toast(error.message,true);keepOriginal.disabled=false}};
+    if(keepOriginal)keepOriginal.onclick=async()=>{keepOriginal.disabled=true;try{await api(`/api/v1/trim-reviews/${source.id}/approve`,{method:'POST'});toast('Original kept without trimming');clearTrimDraft();saveViewState('editor',{targetMediaId:null,trimTarget:false,trimMediaId:null});await render('pending')}catch(error){toast(error.message,true);keepOriginal.disabled=false}};
     if(video){
       const enforceRange=()=>{if(video.paused)return;const top=maxMs();if(!top)return;const time=video.currentTime*1000;if(time>pendingEndMs+30){video.pause();try{video.currentTime=Math.min(pendingEndMs,top)/1000}catch{}}};
       video.addEventListener('timeupdate',()=>{renderPlayhead();enforceRange()});
       video.addEventListener('seeked',renderPlayhead);
       video.addEventListener('play',()=>{const top=maxMs();if(!top)return;const time=video.currentTime*1000;if(time<pendingStartMs-30||time>=pendingEndMs-30)seekTo(pendingStartMs)});
       video.addEventListener('ended',renderPlayhead);
-      video.addEventListener('loadedmetadata',()=>{if(!durationMs&&Number.isFinite(video.duration)&&video.duration>0){durationMs=Math.round(video.duration*1000);if(!rangeTouched)pendingEndMs=durationMs;renderTimeline()}renderPlayhead()});
-      const msFromClientX=clientX=>{const rect=track.getBoundingClientRect();return rect.width?clampMs((clientX-rect.left)/rect.width*maxMs()):0};
+      video.addEventListener('loadedmetadata',()=>{if(!durationMs&&Number.isFinite(video.duration)&&video.duration>0){durationMs=Math.round(video.duration*1000);if(!rangeTouched)pendingEndMs=durationMs;renderTimeline()}renderPlayhead();if(!savedView)setView(0,maxMs(),{persist:false})});
+      const msFromClientX=clientX=>{const rect=track.getBoundingClientRect();const span=viewEndMs-viewStartMs;return rect.width?clampMs(viewStartMs+(clientX-rect.left)/rect.width*span):0};
       let drag=null;
-      const applyDrag=event=>{const value=msFromClientX(event.clientX);if(drag.kind==='start'){setStart(value);seekTo(pendingStartMs)}else if(drag.kind==='end'){setEnd(value);seekTo(pendingEndMs)}else{seekTo(value)}};
-      const beginDrag=(kind,event)=>{if(!maxMs())return;event.preventDefault();drag={kind,pointerId:event.pointerId};try{track.setPointerCapture(event.pointerId)}catch{}applyDrag(event)};
-      track.addEventListener('pointerdown',event=>{if(event.target===handleStart||event.target===handleEnd||event.target.closest('.trim-segment-band'))return;beginDrag('play',event)});
+      const applyDrag=event=>{if(drag.kind==='pan'){const rect=track.getBoundingClientRect();if(!rect.width)return;const span=viewEndMs-viewStartMs;const delta=(event.clientX-drag.startX)/rect.width*span;setView(drag.startView-delta,drag.startView+span-delta,{persist:false});return}const value=msFromClientX(event.clientX);if(drag.kind==='start'){setStart(value);seekTo(pendingStartMs)}else if(drag.kind==='end'){setEnd(value);seekTo(pendingEndMs)}else{seekTo(value)}};
+      const beginDrag=(kind,event)=>{if(!maxMs())return;event.preventDefault();drag={kind,pointerId:event.pointerId};if(kind==='pan'){drag.startX=event.clientX;drag.startView=viewStartMs}try{track.setPointerCapture(event.pointerId)}catch{}applyDrag(event)};
+      track.addEventListener('pointerdown',event=>{if(event.target===handleStart||event.target===handleEnd||event.target.closest('.trim-segment-band'))return;beginDrag(event.shiftKey?'pan':'play',event)});
+      track.addEventListener('wheel',event=>{if(!maxMs())return;event.preventDefault();const rect=track.getBoundingClientRect();if(!rect.width)return;const span=viewEndMs-viewStartMs;const ratio=(event.clientX-rect.left)/rect.width;const anchor=viewStartMs+ratio*span;const factor=event.deltaY<0?1/1.4:1.4;const nextSpan=Math.max(minSpanMs(),Math.min(maxMs(),span*factor));setView(anchor-ratio*nextSpan,anchor-ratio*nextSpan+nextSpan)},{passive:false});
       handleStart.addEventListener('pointerdown',event=>beginDrag('start',event));
       handleEnd.addEventListener('pointerdown',event=>beginDrag('end',event));
       track.addEventListener('pointermove',event=>{if(drag&&event.pointerId===drag.pointerId)applyDrag(event)});
-      const finishDrag=event=>{if(drag&&event.pointerId===drag.pointerId)drag=null};
+      const finishDrag=event=>{if(drag&&event.pointerId===drag.pointerId){drag=null;saveTrimDraft()}};
       track.addEventListener('pointerup',finishDrag);track.addEventListener('pointercancel',finishDrag);
       const nudge=(kind,delta)=>{if(kind==='start'){setStart(pendingStartMs+delta);seekTo(pendingStartMs)}else{setEnd(pendingEndMs+delta);seekTo(pendingEndMs)}};
       handleStart.onkeydown=event=>{const step=event.shiftKey?1000:100;if(event.key==='ArrowLeft'){event.preventDefault();nudge('start',-step)}else if(event.key==='ArrowRight'){event.preventDefault();nudge('start',step)}else if(event.key==='Home'){event.preventDefault();setStart(0);seekTo(0)}else if(event.key==='End'){event.preventDefault();setStart(pendingEndMs-MIN_RANGE_MS);seekTo(pendingEndMs-MIN_RANGE_MS)}};
       handleEnd.onkeydown=event=>{const step=event.shiftKey?1000:100;if(event.key==='ArrowLeft'){event.preventDefault();nudge('end',-step)}else if(event.key==='ArrowRight'){event.preventDefault();nudge('end',step)}else if(event.key==='Home'){event.preventDefault();setEnd(pendingStartMs+MIN_RANGE_MS);seekTo(pendingStartMs+MIN_RANGE_MS)}else if(event.key==='End'){event.preventDefault();setEnd(maxMs());seekTo(maxMs())}};
+      const wireZoomButton=(id,handler)=>{const node=document.querySelector(`#${id}`);if(node)node.onclick=handler};
+      wireZoomButton('trimZoomIn',()=>{const center=(viewStartMs+viewEndMs)/2;const span=(viewEndMs-viewStartMs)/1.5;setView(center-span/2,center+span/2)});
+      wireZoomButton('trimZoomOut',()=>{const center=(viewStartMs+viewEndMs)/2;const span=(viewEndMs-viewStartMs)*1.5;setView(center-span/2,center+span/2)});
+      wireZoomButton('trimFitAll',()=>setView(0,maxMs()));
+      wireZoomButton('trimFitSelection',()=>setView(pendingStartMs,Math.max(pendingEndMs,pendingStartMs+minSpanMs())));
+      wireZoomButton('trimPanLeft',()=>{const span=viewEndMs-viewStartMs;setView(viewStartMs-span*0.3,viewEndMs-span*0.3)});
+      wireZoomButton('trimPanRight',()=>{const span=viewEndMs-viewStartMs;setView(viewStartMs+span*0.3,viewEndMs+span*0.3)});
+      const zoomInput=document.querySelector('#trimZoom');
+      if(zoomInput)zoomInput.oninput=()=>{const factor=Math.max(1,Math.min(64,Number(zoomInput.value)||1));const center=(viewStartMs+viewEndMs)/2;const span=(maxMs()||1)/factor;setView(center-span/2,center+span/2)};
     }
     build();
+    if(isVideo&&maxMs())setView(savedView?savedView[0]:0,savedView?savedView[1]:maxMs(),{persist:false});
   };
   const targetMediaId=Number(editorState.targetMediaId || 0);
   if(targetMediaId){if(editorState.trimTarget||editorState.trimMediaId){try{await openTrim(targetMediaId);return}catch(error){toast(error.message,true);saveViewState('editor',{targetMediaId:null,trimTarget:false})}}try{await openMediaEditor(targetMediaId);return}catch(error){toast(error.message,true);saveViewState('editor',{targetMediaId:null})}}
   if(editorState.analysisId){try{await openCrop(Number(editorState.analysisId));return}catch{saveViewState('editor',{analysisId:null})}}
-  await render(editorState.status || 'pending');
+  await render(editorState.cropStatus || editorState.status ? {cropStatus: editorState.cropStatus || editorState.status} : undefined);
 }
 
 function downloadCollectionArchive(id) {
@@ -1466,7 +1709,7 @@ async function showSettingsPage() {
       <div class="setting-line"><div><label for="libraryCardSize">Card size</label><small>Controls grid density on large screens.</small></div><select id="libraryCardSize" class="control compact-control"><option value="small" ${prefs.cardSize==='small'?'selected':''}>Compact</option><option value="medium" ${prefs.cardSize==='medium'?'selected':''}>Medium</option><option value="large" ${prefs.cardSize==='large'?'selected':''}>Large</option></select></div>
       <label class="setting-line toggle-line"><span><strong>Labels below images</strong><small>Author, source, and resolution are already available in the side panel.</small></span><input id="showCardInfo" type="checkbox" ${prefs.showCardInfo?'checked':''}><span class="toggle" aria-hidden="true"></span></label>
     </div></details>
-    <details class="settings-section" open><summary><span class="section-icon"><i data-lucide="sliders-horizontal"></i></span><span><strong>Import and limits</strong><small>Deleted media, collection, and export rules</small></span><i data-lucide="chevron-down"></i></summary><div class="settings-section-body"><label class="setting-line toggle-line"><span><strong>Never re-import deleted media</strong><small>When enabled, a deleted file is blocked immediately. When disabled, it is sent to Review for confirmation.</small></span><input name="block_previously_deleted" type="checkbox" ${data.block_previously_deleted?'checked':''}><span class="toggle" aria-hidden="true"></span></label><label class="setting-line toggle-line"><span><strong>Review videos and animations for trimming</strong><small>When enabled, imported videos and animated images wait in the Editor queue until you approve or split them. Off by default.</small></span><input name="trim_review_enabled" type="checkbox" ${data.trim_review_enabled?'checked':''}><span class="toggle" aria-hidden="true"></span></label><div class="settings-fields-2">${field('max_items_per_author','Items per author',{type:'number',hint:'Maximum items by one author in a collection.'})}<div class="form-row"><label>Maximum image file, MB</label><small class="field-hint">Per exported image.</small><input class="control" name="max_image_export_size_mb" type="number" min="1" value="${Math.max(1,Math.round(data.max_image_export_size_bytes/1048576))}"></div><div class="form-row"><label>Maximum video file, MB</label><small class="field-hint">Per exported video.</small><input class="control" name="max_video_export_size_mb" type="number" min="1" value="${Math.max(1,Math.round(data.max_video_export_size_bytes/1048576))}"></div></div><div class="form-row"><label for="setting-collection_export_mode">Export destination</label><small class="field-hint">What the Export button delivers: a ZIP download in the browser, a folder on the server, or both.</small><select class="control" id="setting-collection_export_mode" name="collection_export_mode"><option value="download" ${data.collection_export_mode==='download'?'selected':''}>Browser download (ZIP)</option><option value="folder" ${data.collection_export_mode==='folder'?'selected':''}>Server folder</option><option value="both" ${data.collection_export_mode==='both'?'selected':''}>Folder and download</option></select></div><div class="form-row"><label>Export format conversions</label><small class="field-hint">Files are converted only in exported collections; library originals stay unchanged.</small><div id="exportFormatRules" class="format-rules"></div><button id="addExportFormatRule" class="btn" type="button"><i data-lucide="plus"></i>Add conversion</button></div></div></details>
+    <details class="settings-section" open><summary><span class="section-icon"><i data-lucide="sliders-horizontal"></i></span><span><strong>Import and limits</strong><small>Deleted media, collection, and export rules</small></span><i data-lucide="chevron-down"></i></summary><div class="settings-section-body"><label class="setting-line toggle-line"><span><strong>Never re-import deleted media</strong><small>When enabled, a deleted file is blocked immediately. When disabled, it is sent to Review for confirmation.</small></span><input name="block_previously_deleted" type="checkbox" ${data.block_previously_deleted?'checked':''}><span class="toggle" aria-hidden="true"></span></label><label class="setting-line toggle-line"><span><strong>Review videos and animations for trimming</strong><small>When enabled, imported videos and animated images wait in the Editor queue until you approve or split them. Off by default.</small></span><input name="trim_review_enabled" type="checkbox" ${data.trim_review_enabled?'checked':''}><span class="toggle" aria-hidden="true"></span></label><label class="setting-line toggle-line"><span><strong>Block exporting unreviewed clips</strong><small>When enabled, videos and animations that still wait for trim review are left out of automatic collection selection and cannot be exported until you confirm or split them.</small></span><input name="trim_block_unreviewed_export" type="checkbox" ${data.trim_block_unreviewed_export?'checked':''}><span class="toggle" aria-hidden="true"></span></label><div class="settings-fields-2">${field('max_items_per_author','Items per author',{type:'number',hint:'Maximum items by one author in a collection.'})}<div class="form-row"><label>Maximum image file, MB</label><small class="field-hint">Per exported image.</small><input class="control" name="max_image_export_size_mb" type="number" min="1" value="${Math.max(1,Math.round(data.max_image_export_size_bytes/1048576))}"></div><div class="form-row"><label>Maximum video file, MB</label><small class="field-hint">Per exported video.</small><input class="control" name="max_video_export_size_mb" type="number" min="1" value="${Math.max(1,Math.round(data.max_video_export_size_bytes/1048576))}"></div></div><div class="form-row"><label for="setting-collection_export_mode">Export destination</label><small class="field-hint">What the Export button delivers: a ZIP download in the browser, a folder on the server, or both.</small><select class="control" id="setting-collection_export_mode" name="collection_export_mode"><option value="download" ${data.collection_export_mode==='download'?'selected':''}>Browser download (ZIP)</option><option value="folder" ${data.collection_export_mode==='folder'?'selected':''}>Server folder</option><option value="both" ${data.collection_export_mode==='both'?'selected':''}>Folder and download</option></select></div><div class="form-row"><label>Export format conversions</label><small class="field-hint">Files are converted only in exported collections; library originals stay unchanged.</small><div id="exportFormatRules" class="format-rules"></div><button id="addExportFormatRule" class="btn" type="button"><i data-lucide="plus"></i>Add conversion</button></div></div></details>
     <details class="settings-section"><summary><span class="section-icon"><i data-lucide="waypoints"></i></span><span><strong>Sources</strong><small>Booru and FurAffinity credentials</small></span><i data-lucide="chevron-down"></i></summary><div class="settings-section-body settings-sources">
       ${provider('danbooru','Danbooru','Login and API key',[field('danbooru_login','Login'),field('danbooru_api_key','API key',{type:'password',secret:true})])}
       ${provider('e621','e621 / e926','Username and API key',[field('e621_login','Username'),field('e621_api_key','API key',{type:'password',secret:true})])}
@@ -1527,7 +1770,7 @@ async function showSettingsPage() {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const export_format_rules={};document.querySelectorAll('.format-rule').forEach(row=>export_format_rules[row.querySelector('.rule-source').value]=row.querySelector('.rule-target').value);
-    const payload = {media_path:form.get('media_path'),export_path:form.get('export_path'),thumbnail_path:form.get('thumbnail_path'),import_staging_path:form.get('import_staging_path'),max_items_per_author:Number(form.get('max_items_per_author')),max_image_export_size_bytes:Number(form.get('max_image_export_size_mb'))*1048576,max_video_export_size_bytes:Number(form.get('max_video_export_size_mb'))*1048576,export_format_rules,collection_export_mode:form.get('collection_export_mode'),block_previously_deleted:form.has('block_previously_deleted'),trim_review_enabled:form.has('trim_review_enabled'),crop_vision_format:form.get('crop_vision_format'),crop_vision_url:form.get('crop_vision_url')||null,crop_vision_model:form.get('crop_vision_model')||null,crop_min_area_percent:Number(form.get('crop_min_area_percent')),crop_padding_percent:Number(form.get('crop_padding_percent')),crop_background_tolerance:Number(form.get('crop_background_tolerance')),crop_selected_analysis:form.get('crop_selected_analysis'),background_model:form.get('background_model')||'auto',background_device:form.get('background_device')||'auto'};
+    const payload = {media_path:form.get('media_path'),export_path:form.get('export_path'),thumbnail_path:form.get('thumbnail_path'),import_staging_path:form.get('import_staging_path'),max_items_per_author:Number(form.get('max_items_per_author')),max_image_export_size_bytes:Number(form.get('max_image_export_size_mb'))*1048576,max_video_export_size_bytes:Number(form.get('max_video_export_size_mb'))*1048576,export_format_rules,collection_export_mode:form.get('collection_export_mode'),block_previously_deleted:form.has('block_previously_deleted'),trim_review_enabled:form.has('trim_review_enabled'),trim_block_unreviewed_export:form.has('trim_block_unreviewed_export'),crop_vision_format:form.get('crop_vision_format'),crop_vision_url:form.get('crop_vision_url')||null,crop_vision_model:form.get('crop_vision_model')||null,crop_min_area_percent:Number(form.get('crop_min_area_percent')),crop_padding_percent:Number(form.get('crop_padding_percent')),crop_background_tolerance:Number(form.get('crop_background_tolerance')),crop_selected_analysis:form.get('crop_selected_analysis'),background_model:form.get('background_model')||'auto',background_device:form.get('background_device')||'auto'};
     ['huggingface_token','crop_vision_key','danbooru_login','danbooru_api_key','e621_login','e621_api_key','gelbooru_user_id','gelbooru_api_key','rule34_user_id','rule34_api_key','furaffinity_cookie_a','furaffinity_cookie_b'].forEach(key => { if (form.get(key)) payload[key]=form.get(key); });
     const lines = name => String(form.get(name) || '').split(/\r?\n/).map(value => value.trim()).filter(Boolean);
     const aliases = {};

@@ -43,6 +43,11 @@ class Settings:
     export_format_rules: tuple[tuple[str, str], ...] = DEFAULT_EXPORT_FORMAT_RULES
     block_previously_deleted: bool = False
     trim_review_enabled: bool = False
+    # When enabled, media still waiting in the trim review queue are excluded
+    # from automatic collection selection and are never exported.  Manual
+    # additions stay possible in the library, but export skips them so an
+    # unreviewed original cannot leak into a delivered collection.
+    trim_block_unreviewed_export: bool = False
     crop_vision_url: str | None = None
     crop_vision_key: str | None = None
     crop_vision_model: str | None = None
@@ -123,6 +128,7 @@ class Settings:
                 "max_video_export_size_bytes", "export_format_rules",
                 "block_previously_deleted",
                 "trim_review_enabled",
+                "trim_block_unreviewed_export",
                 "crop_vision_url", "crop_vision_key", "crop_vision_model", "crop_vision_format",
                 "crop_min_area_percent", "crop_padding_percent", "crop_background_tolerance", "crop_selected_analysis",
                 "background_model", "background_device",
@@ -183,6 +189,7 @@ def persist_settings(settings: Settings) -> None:
         "export_format_rules": dict(settings.export_format_rules),
         "block_previously_deleted": settings.block_previously_deleted,
         "trim_review_enabled": settings.trim_review_enabled,
+        "trim_block_unreviewed_export": settings.trim_block_unreviewed_export,
         "crop_vision_url": settings.crop_vision_url,
         "crop_vision_key": settings.crop_vision_key,
         "crop_vision_model": settings.crop_vision_model,

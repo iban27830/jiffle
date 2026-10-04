@@ -203,7 +203,10 @@ def resume_review_scans(database_path, settings) -> None:
             start_review_scan(settings, int(row["id"]))
 
 
-def list_review_items(connection, settings, status: str = "pending") -> list[dict]:
+def list_review_items(
+    connection, settings, status: str = "pending",
+    limit: int | None = None, offset: int = 0,
+) -> list[dict]:
     if status == "pending":
         mark_known_queue(connection, settings)
     clauses = [
@@ -215,10 +218,19 @@ def list_review_items(connection, settings, status: str = "pending") -> list[dic
     if status in REVIEW_STATUSES:
         clauses.append("trim_review_status=?")
         parameters.append(status)
+    page = ""
+    if limit is not None:
+        page = " LIMIT ? OFFSET ?"
+        parameters = [*parameters, max(0, int(limit)), max(0, int(offset))]
     rows = connection.execute(
         "SELECT id, media_type, width, height, file_size, created_at, is_animated, "
-        "trim_review_status FROM media_items "
-        f"WHERE {' AND '.join(clauses)} ORDER BY id DESC",
+        "trim_review_status, trim_deferred_at FROM media_items "
+        f"WHERE {' AND '.join(clauses)} "
+        # New eligible clips have no deferral stamp and stay at the front.  A
+        # deferred clip sinks below all of them; the oldest deferral comes first
+        # so "Move to end" behaves like a queue rotation.
+        "ORDER BY (trim_deferred_at IS NOT NULL) ASC, trim_deferred_at ASC, id DESC"
+        + page,
         parameters,
     ).fetchall()
     items = []
@@ -236,6 +248,7 @@ def list_review_items(connection, settings, status: str = "pending") -> list[dic
             "created_at": row["created_at"],
             "is_animated": bool(row["is_animated"]),
             "status": row["trim_review_status"],
+            "deferred": row["trim_deferred_at"] is not None,
             "fragment_count": int(fragment_count),
             "content_url": f"/api/v1/media/{row['id']}/content",
             "thumbnail_url": f"/api/v1/media/{row['id']}/thumbnail",
@@ -243,9 +256,51 @@ def list_review_items(connection, settings, status: str = "pending") -> list[dic
     return items
 
 
+def count_review_items(connection, settings, status: str = "pending") -> int:
+    """Number of clips in a trim review category, for pagination."""
+    if status == "pending":
+        mark_known_queue(connection, settings)
+    clauses = [
+        "deleted_at IS NULL",
+        "derived_from_media_id IS NULL",
+        "trim_review_status IS NOT NULL",
+    ]
+    parameters: list[object] = []
+    if status in REVIEW_STATUSES:
+        clauses.append("trim_review_status=?")
+        parameters.append(status)
+    return int(connection.execute(
+        f"SELECT COUNT(*) FROM media_items WHERE {' AND '.join(clauses)}",
+        parameters,
+    ).fetchone()[0])
+
+
+def defer_review_item(connection, media_id: int) -> None:
+    """Move one pending clip to the end of the trim review queue.
+
+    The clip stays pending and keeps every other property; only its ordering
+    stamp changes, so it is offered again after the clips the user has not
+    deferred yet.
+    """
+    cursor = connection.execute(
+        "UPDATE media_items SET trim_deferred_at=CURRENT_TIMESTAMP "
+        "WHERE id=? AND deleted_at IS NULL AND derived_from_media_id IS NULL "
+        "AND trim_review_status='pending'",
+        (media_id,),
+    )
+    if cursor.rowcount != 1:
+        raise TrimFailure("trim.media_not_found", "Media item is not waiting for review.")
+    connection.execute(
+        "INSERT INTO operation_history (event_type, entity_type, entity_id, details_json) "
+        "VALUES ('trim.deferred', 'media', ?, '{}')",
+        (media_id,),
+    )
+    connection.commit()
+
+
 def approve_review_item(connection, media_id: int) -> None:
     cursor = connection.execute(
-        "UPDATE media_items SET trim_review_status='approved' "
+        "UPDATE media_items SET trim_review_status='approved', trim_deferred_at=NULL "
         "WHERE id=? AND deleted_at IS NULL AND derived_from_media_id IS NULL",
         (media_id,),
     )
@@ -442,13 +497,24 @@ def _copy_tags(connection, source_id: int, fragment_id: int) -> None:
     )
 
 
-def apply_trim(connection, settings, media_id: int, segments) -> dict:
+def apply_trim(connection, settings, media_id: int, segments, progress=None) -> dict:
     source = _source_row(connection, media_id)
     source_path = media_path(settings.media_path, source["file_path"])
     if source_path is None or not source_path.is_file():
         raise TrimFailure("trim.file_missing", "The media file is unavailable.")
     duration_ms = probe_duration_ms(source_path)
     normalized = normalize_segments(segments, duration_ms)
+    total = len(normalized)
+
+    def notify(index, status, fragment_id=None):
+        if progress is None:
+            return
+        try:
+            progress(index, total, status, fragment_id)
+        except Exception:
+            # Progress reporting must never break the encode itself.
+            pass
+
     family_id = _ensure_family(connection, source)
     existing = connection.execute(
         "SELECT * FROM media_items WHERE derived_from_media_id=? AND deleted_at IS NULL "
@@ -471,7 +537,9 @@ def apply_trim(connection, settings, media_id: int, segments) -> dict:
                     and fragment_path is not None
                     and fragment_path.is_file()
                 ):
+                    notify(index, "saved", fragment_id)
                     continue
+                notify(index, "encoding")
                 rendered = _render_fragment(
                     connection, settings, source_path, source, index, start_ms, end_ms,
                     exclude_media_id=fragment_id,
@@ -509,7 +577,13 @@ def apply_trim(connection, settings, media_id: int, segments) -> dict:
                     "DELETE FROM media_fingerprints WHERE media_item_id=?", (fragment_id,)
                 )
                 updated.append(fragment_id)
+                connection.commit()
+                # The file is now referenced by a committed revision; it must
+                # survive a failure while a later segment is encoded.
+                rendered_paths.clear()
+                notify(index, "saved", fragment_id)
             else:
+                notify(index, "encoding")
                 rendered = _render_fragment(
                     connection, settings, source_path, source, index, start_ms, end_ms,
                 )
@@ -535,6 +609,9 @@ def apply_trim(connection, settings, media_id: int, segments) -> dict:
                 create_original_revision(connection, fragment_id)
                 _copy_tags(connection, media_id, fragment_id)
                 created.append(fragment_id)
+                connection.commit()
+                rendered_paths.clear()
+                notify(index, "saved", fragment_id)
         for fragment in existing[len(normalized):]:
             fragment_id = int(fragment["id"])
             connection.execute(
@@ -545,7 +622,8 @@ def apply_trim(connection, settings, media_id: int, segments) -> dict:
             )
             removed.append(fragment_id)
         connection.execute(
-            "UPDATE media_items SET trim_review_status='approved' WHERE id=?", (media_id,)
+            "UPDATE media_items SET trim_review_status='approved', trim_deferred_at=NULL "
+            "WHERE id=?", (media_id,)
         )
         result = {
             "source_media_id": int(media_id),
@@ -584,8 +662,43 @@ def run_trim_job(database_path, settings, job_id: int, media_id: int, segments) 
         )
         connection.commit()
         try:
-            result = apply_trim(connection, settings, media_id, segments)
+            normalized = normalize_segments(segments)
         except TrimFailure as error:
+            _fail_job(connection, job_id, error.code, error.message)
+            return
+        states = [
+            {"index": index, "start_ms": start, "end_ms": end, "status": "queued"}
+            for index, (start, end) in enumerate(normalized, start=1)
+        ]
+        total = len(states)
+
+        def publish(message=None):
+            saved = sum(1 for state in states if state["status"] == "saved")
+            connection.execute(
+                "UPDATE background_jobs SET progress=?, result_json=?, status_message=? WHERE id=?",
+                (
+                    5 + int(90 * saved / max(1, total)),
+                    json.dumps({"outcome": "running", "segments": states}),
+                    message,
+                    job_id,
+                ),
+            )
+            connection.commit()
+
+        def report(index, _count, status, fragment_id=None):
+            if 1 <= index <= len(states):
+                states[index - 1]["status"] = status
+                if fragment_id is not None:
+                    states[index - 1]["media_item_id"] = int(fragment_id)
+            label = "Encoding fragment" if status == "encoding" else "Saved fragment"
+            publish(f"{label} {index} of {total}")
+
+        try:
+            result = apply_trim(
+                connection, settings, media_id, normalized, progress=report
+            )
+        except TrimFailure as error:
+            connection.rollback()
             _fail_job(connection, job_id, error.code, error.message)
             return
         except Exception:
@@ -596,7 +709,7 @@ def run_trim_job(database_path, settings, job_id: int, media_id: int, segments) 
             "UPDATE background_jobs SET status='completed', progress=100, result_json=?, "
             "status_message=?, finished_at=CURRENT_TIMESTAMP WHERE id=?",
             (
-                json.dumps(result),
+                json.dumps({**result, "outcome": "completed", "segments": states}),
                 f"{result['segment_count']} fragment(s) ready",
                 job_id,
             ),

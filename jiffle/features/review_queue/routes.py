@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from threading import Thread
 
@@ -415,7 +416,7 @@ def _review_search_summaries(review_ids):
         return {}
     placeholders = ",".join("?" for _ in unique_ids)
     rows = get_database().execute(
-        "SELECT review_item_id, outcome, code, message, created_at "
+        "SELECT review_item_id, outcome, code, message, details_json, created_at "
         f"FROM review_search_attempts WHERE review_item_id IN ({placeholders}) "
         "ORDER BY id",
         unique_ids,
@@ -425,11 +426,16 @@ def _review_search_summaries(review_ids):
         review_id = int(row["review_item_id"])
         summary = summaries.setdefault(review_id, {"count": 0})
         summary["count"] += 1
+        try:
+            details = json.loads(row["details_json"] or "{}")
+        except (TypeError, ValueError):
+            details = {}
         # Rows are ordered by id, so the last write is the latest attempt.
         summary.update({
             "last_outcome": row["outcome"],
             "last_code": row["code"],
             "last_message": row["message"],
+            "last_details": details,
             "last_at": row["created_at"],
         })
     return summaries

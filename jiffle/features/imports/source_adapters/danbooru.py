@@ -21,6 +21,10 @@ class SourceProviderFailure(Exception):
 
 class DanbooruSourceProvider:
     provider_name = "danbooru"
+    # A Danbooru account raises the tag/search limits and its reverse-search
+    # endpoint is authenticated-only.
+    credentials_improve_results = True
+    reverse_search_requires_auth = True
     domains = {"danbooru.donmai.us", "safebooru.donmai.us"}
 
     def __init__(self, login: str | None = None, api_key: str | None = None):

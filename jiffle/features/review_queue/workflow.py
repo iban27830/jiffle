@@ -548,12 +548,18 @@ def _stage_reverse_candidates(
         key = (match.provider, str(match.remote_id or ""))
         if key in existing:
             continue
-        media_url = match.direct_media_url or match.preview_url
+        # Only a real download from the matched post becomes a confirmable
+        # candidate.  A reverse-search result whose post could not be loaded is
+        # reported instead of staging the service's cropped preview as if it
+        # were the source file.
+        media_url = match.direct_media_url
         if not media_url:
             _record_provider_diagnostic(
                 diagnostics, "perceptual_search", match.provider, "unavailable", 0,
-                "import.candidate_unavailable",
-                "The similar candidate has no media URL.", remote_id=match.remote_id,
+                "import.source_link_unresolved",
+                "A similar source was found, but its post could not be loaded, so "
+                "only a search preview is available. It is not offered as a file.",
+                remote_id=match.remote_id,
             )
             continue
         name = f"candidate-{uuid4().hex}{_extension(media_url)}"

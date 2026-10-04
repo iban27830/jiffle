@@ -85,6 +85,20 @@ def _provider_needs_configuration(provider) -> bool:
     return not configured
 
 
+def _reverse_provider_available(provider) -> bool:
+    """Whether a provider's perceptual search can run in the current setup.
+
+    Some reverse-search endpoints require an account even though their ordinary
+    metadata lookup is anonymous (e621 and Danbooru).  They must be reported as
+    not configured instead of silently returning no results.
+    """
+    if getattr(provider, "reverse_search_requires_auth", False):
+        return bool(getattr(provider, "login", None)) and bool(
+            getattr(provider, "api_key", None)
+        )
+    return not _provider_needs_configuration(provider)
+
+
 # Failures that leave nothing useful to validate manually.  For these the job
 # stays failed (the uploaded bytes are still kept on disk by the import worker).
 _RETAIN_EXCLUDED_CODES = {
@@ -1029,7 +1043,19 @@ def _reverse_similar(image_path, providers, diagnostics=None):
     for provider in list(providers) + [_iqdb_reverse_search(), _saucenao_reverse_search()]:
         if provider is None or not callable(getattr(provider, "search_similar", None)):
             continue
-        if _provider_needs_configuration(provider):
+        if not _reverse_provider_available(provider):
+            if diagnostics is not None:
+                name = (
+                    getattr(provider, "provider_name", None)
+                    or provider.__class__.__name__.lower()
+                )
+                # Surface the skipped source so the user knows that signing in
+                # could widen the search instead of seeing a silent no-result.
+                _record_provider_diagnostic(
+                    diagnostics, "perceptual_search", name, "not_configured", 0,
+                    "import.provider_not_configured",
+                    f"{name} was not checked because its account is not configured.",
+                )
             continue
         reverse_providers.append(provider)
     if not reverse_providers:
@@ -1237,17 +1263,25 @@ def _resolve_reverse_candidate(raw, providers):
         return raw
     confidence = _reverse_confidence(raw)
     preview = raw.get("preview_url") if isinstance(raw, dict) else getattr(raw, "preview_url", None)
+    fallback = None
     for url in _reverse_links(raw):
         resolved = _reverse_candidate_from_url(url, providers)
         if resolved is None:
             continue
-        return replace(
+        candidate = replace(
             resolved,
             match_method="perceptual",
             confidence=confidence if confidence is not None else resolved.confidence,
             preview_url=resolved.preview_url or preview,
         )
-    return raw
+        # The matched post page is what makes a candidate confirmable; a result
+        # that only carries a search-service thumbnail is not a real source.
+        # Keep looking through the remaining links for a loadable post.
+        if candidate.direct_media_url:
+            return candidate
+        if fallback is None:
+            fallback = candidate
+    return fallback if fallback is not None else raw
 
 
 def _coerce_match(raw, method):

@@ -6,7 +6,9 @@ from jiffle.infrastructure.database.connection import get_database
 from .workflow import (
     TrimFailure,
     approve_review_item,
+    count_review_items,
     create_review_scan_job,
+    defer_review_item,
     list_review_items,
     normalize_segments,
     run_review_scan,
@@ -24,14 +26,25 @@ def list_trim_reviews():
     status = (request.args.get("status") or "pending").strip().lower()
     if status not in {"pending", "approved", "all"}:
         return _error("trim.invalid_status", "Unknown review status.", 400)
+    try:
+        limit = int(request.args.get("limit", 60))
+        offset = int(request.args.get("offset", 0))
+    except ValueError:
+        return _error("trim.invalid_query", "Pagination values must be integers.", 400)
+    if not 1 <= limit <= 100 or offset < 0:
+        return _error("trim.invalid_query", "Pagination is outside its valid range.", 400)
     connection = get_database()
     settings = current_app.config["JIFFLE_SETTINGS"]
-    items = list_review_items(connection, settings, status)
+    items = list_review_items(connection, settings, status, limit=limit, offset=offset)
+    total = count_review_items(connection, settings, status)
     pending = connection.execute(
         "SELECT COUNT(*) FROM media_items WHERE deleted_at IS NULL "
         "AND derived_from_media_id IS NULL AND trim_review_status='pending'"
     ).fetchone()[0]
-    return jsonify({"items": items, "total": len(items), "pending": int(pending)})
+    return jsonify({
+        "items": items, "total": int(total), "pending": int(pending),
+        "limit": limit, "offset": offset,
+    })
 
 
 @trim_blueprint.post("/api/v1/trim-reviews/<int:media_id>/approve")
@@ -41,6 +54,15 @@ def approve_trim_review(media_id: int):
     except TrimFailure as error:
         return _trim_error(error)
     return jsonify({"status": "approved", "media_id": media_id})
+
+
+@trim_blueprint.post("/api/v1/trim-reviews/<int:media_id>/defer")
+def defer_trim_review(media_id: int):
+    try:
+        defer_review_item(get_database(), media_id)
+    except TrimFailure as error:
+        return _trim_error(error)
+    return jsonify({"status": "deferred", "media_id": media_id})
 
 
 @trim_blueprint.post("/api/v1/trim-scan-jobs")
