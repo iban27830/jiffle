@@ -772,6 +772,74 @@ def migration_33(connection: sqlite3.Connection) -> None:
     )
 
 
+def migration_34(connection: sqlite3.Connection) -> None:
+    """Make Import history reflect reviews that were resolved later.
+
+    A single-file import that ended in Review kept its ``import.review`` row
+    forever, so the Import list showed "Waiting for review" even after the card
+    was accepted or rejected.  This is a data-only backfill: accepted cards
+    become ``import.duplicate`` when the target media existed before the review
+    (a merge) and ``import.accepted`` otherwise; rejected cards become
+    ``import.rejected``.  Multi-post imports keep their single set summary row.
+    """
+    rows = connection.execute(
+        "SELECT review.id AS review_id, review.status, review.created_at, "
+        "candidate.job_id AS job_id, candidate.media_item_id AS media_item_id "
+        "FROM review_items review "
+        "JOIN import_candidates candidate ON candidate.id=review.import_candidate_id "
+        "WHERE review.status IN ('accepted', 'rejected')"
+    ).fetchall()
+    for row in rows:
+        review_id, status, review_created_at, job_id, media_item_id = (
+            row[0], row[1], row[2], row[3], row[4]
+        )
+        job = connection.execute(
+            "SELECT job_type FROM background_jobs WHERE id=?", (job_id,)
+        ).fetchone()
+        if job is None or job[0] != "import_resolve":
+            continue
+        history = connection.execute(
+            "SELECT id, event_type, details_json FROM operation_history "
+            "WHERE entity_type='background_job' AND entity_id=? "
+            "ORDER BY id DESC LIMIT 1",
+            (job_id,),
+        ).fetchone()
+        if history is None or history[1] not in ("import.review", "import.pending"):
+            continue
+        try:
+            details = json.loads(history[2] or "{}")
+        except (TypeError, ValueError):
+            details = {}
+        if not isinstance(details, dict):
+            details = {}
+        if status == "rejected" or media_item_id is None:
+            event_type = "import.rejected"
+            details["review_outcome"] = "rejected"
+        else:
+            created = connection.execute(
+                "SELECT created_at FROM media_items WHERE id=?", (media_item_id,)
+            ).fetchone()
+            merged = bool(
+                created is not None
+                and created[0]
+                and review_created_at
+                and str(created[0]) < str(review_created_at)
+            )
+            details["media_item_id"] = int(media_item_id)
+            details["review_outcome"] = "merged" if merged else "created"
+            if merged:
+                details["merged"] = True
+                details["duplicate_of"] = int(media_item_id)
+                event_type = "import.duplicate"
+            else:
+                event_type = "import.accepted"
+        details["review_item_id"] = int(review_id)
+        connection.execute(
+            "UPDATE operation_history SET event_type=?, details_json=? WHERE id=?",
+            (event_type, json.dumps(details), history[0]),
+        )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -806,6 +874,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (31, migration_31),
     (32, migration_32),
     (33, migration_33),
+    (34, migration_34),
 )
 
 
