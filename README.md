@@ -206,7 +206,7 @@ For an e621 or e926 post set, Jiffle first checks the complete set (using the sa
 - Select an author in the item details to add an `author:name` filter without clearing the current search. The active author and selected media card remain highlighted while results update. Items with multiple authors show each author separately.
 - Select an item to inspect its source, dimensions, tags, edits, and available actions. **Source** is the post whose metadata supplies tags, characters, parent, and author. When an exact copy had to be downloaded from another provider, the inspector also shows **File source** for the post that supplied the stored bytes; it is hidden when both URLs are the same. Images whose active version was changed in Editor have an edit icon on the library thumbnail; restoring the original removes the icon while keeping version history.
 - Images assigned to a family show a relatives marker in the Library. Open an item to see its relatives and select any relative to open it; the family can contain two or more images.
-- Open **Duplicates**, choose a similarity threshold from 70% to 100%, and select **Scan** to find similar files. Lower values find more approximate matches; higher values restrict results to nearly identical images. Scan progress remains visible in the status bar while fingerprints and image pairs are processed.
+- Open **Duplicates**, choose a similarity threshold from 70% to 100%, and select **Scan** to find similar files. Lower values find more approximate matches; higher values restrict results to nearly identical images. Scan progress remains visible in the status bar while fingerprints and image pairs are processed. Fingerprints are cached, so a repeated scan only decodes files that are new or were changed since the previous scan; images edited in **Editor** are re-analysed automatically.
 - When two similar images are related variations rather than a duplicate to remove, select **Family**. Both files remain in the library and are linked as relatives. Repeating this action with another match adds that image to the same family when the pairs overlap.
 - Open **Editor** to find images with removable empty margins. **Editor** is split into **Crop**, **Background**, and **Videos & animations** tabs, each with its own list, page size, and **Previous** / **Next** paging, so one long queue does not push the other sections off the screen. Use **Find crop candidates** for a background scan with progress and cancellation, or select an image in **Library** and choose **Open in Editor**.
 - Use the library button beside a crop candidate or in the crop review screen to return to that image in **Library** with its details open.
@@ -295,6 +295,13 @@ found, and **Accept without choosing a source** to keep the staged file when you
 not want any of the listed candidates (a confirmation appears when candidates exist).
 **Reject** removes the whole group. The history entry records the submitted input,
 resolution method, providers checked, and the URL that supplied the accepted file.
+If the accepted source is already in the library and the file you imported is not
+byte-identical to it (for example a different crop or a re-encode), Jiffle keeps your
+file as a new library item and links it to the existing copy as a relative in the same
+family; the source copy is not overwritten and your import is not discarded. While an
+accept is being applied, the card and the viewer show an **Applying source…** progress
+state with disabled buttons, so a slower file cannot be mistaken for a click that did
+nothing; when it finishes, the card leaves Review and the item appears in **Library**.
 
 Use the category buttons at the top of Review to narrow the list: **All**, **Source
 found** for cards where a recheck already produced source candidates, and **Needs
