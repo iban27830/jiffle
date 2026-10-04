@@ -295,13 +295,17 @@ found, and **Accept without choosing a source** to keep the staged file when you
 not want any of the listed candidates (a confirmation appears when candidates exist).
 **Reject** removes the whole group. The history entry records the submitted input,
 resolution method, providers checked, and the URL that supplied the accepted file.
-If the accepted source is already in the library and the file you imported is not
-byte-identical to it (for example a different crop or a re-encode), Jiffle keeps your
-file as a new library item and links it to the existing copy as a relative in the same
-family; the source copy is not overwritten and your import is not discarded. While an
-accept is being applied, the card and the viewer show an **Applying source…** progress
-state with disabled buttons, so a slower file cannot be mistaken for a click that did
-nothing; when it finishes, the card leaves Review and the item appears in **Library**.
+When the source you accept (or your uploaded file) is already stored in the library,
+Jiffle does not create a second copy: it merges the new tags and empty metadata into
+the existing item, never replaces its file, and tells you **Already in library — merged
+into #X**. A file that is not byte-identical but at least 90% similar to an existing
+image is kept and queued under **Duplicates** as a possible duplicate, so you can
+choose **Keep left**, **Keep right**, **Family**, or **Ignore** yourself. Both the
+accepted and the rejected outcome are written back to Import history, which no longer
+stays on **Waiting for review**. While an accept is being applied, the card and the
+viewer show an **Applying source…** progress state with disabled buttons, so a slower
+file cannot be mistaken for a click that did nothing; when it finishes, the card leaves
+Review and the item appears in **Library**.
 
 Use the category buttons at the top of Review to narrow the list: **All**, **Source
 found** for cards where a recheck already produced source candidates, and **Needs
