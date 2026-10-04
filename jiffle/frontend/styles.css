@@ -302,7 +302,8 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
 .smart-body strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .smart-body small { display: block; margin: 5px 0 9px; color: var(--muted); }
 .collection-builder { max-width: 1440px; padding-bottom: 82px; }
-.builder-fields { display: grid; grid-template-columns: minmax(180px,.7fr) minmax(220px,1fr) repeat(3,minmax(130px,.65fr)); gap: 10px; align-items: end; }
+.builder-fields { display: grid; grid-template-columns: minmax(150px,.85fr) minmax(150px,.85fr) minmax(200px,1.15fr) minmax(110px,.6fr); gap: 10px; align-items: end; }
+.builder-fields .builder-search { grid-column: 1 / -1; }
 .builder-fields .form-row { margin: 0; }
 .builder-actions { grid-column: 1/-1; display: flex; justify-content: flex-end; gap: 7px; }
 .builder-summary { min-height: 44px; display: flex; align-items: center; gap: 10px; padding: 10px 0; color: var(--muted); font-size: .88em; }

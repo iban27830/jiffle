@@ -1677,7 +1677,7 @@ async function showCollectionBuilder() {
   let preview = null;
   let rejectedIds = [];
   const tagValues = value => [...new Set(String(value || '').split(/\s+/).map(tag => tag.trim().toLowerCase()).filter(Boolean))];
-  workspace.innerHTML = `<div class="page collection-builder"><section class="panel"><div class="panel-head"><i data-lucide="wand-sparkles"></i>Selection rules</div><div class="panel-body builder-fields"><div class="form-row"><label>Preset</label><select id="builderPreset" class="control"><option value="">No preset</option>${presets.items.map(item => `<option value="${item.id}">${esc(item.name)}</option>`).join('')}</select></div><div class="form-row"><label>Collection name</label><input id="builderName" class="control" maxlength="120"></div><div class="form-row"><label>Search</label><input id="builderQuery" class="control" placeholder="portrait blue_eyes -comic author:artist"><div id="builderQueryChips" class="search-chips"></div></div><div class="form-row"><label>Count</label><input id="builderCount" class="control" type="number" min="1" max="1000" value="10"></div><div class="builder-actions"><button id="savePreset" class="btn"><i data-lucide="bookmark-plus"></i>Save preset</button><button id="deletePreset" class="icon-btn danger" title="Delete selected preset"><i data-lucide="trash-2"></i></button><button id="generateCollection" class="btn primary"><i data-lucide="shuffle"></i>Generate</button></div></div></section><div id="builderSummary" class="builder-summary"></div><div id="builderPreview" class="collection-preview-grid"><div class="empty">Enter tags and generate a selection</div></div><div class="builder-savebar"><button id="cancelBuilder" class="btn"><i data-lucide="chevron-left"></i>Collections</button><span id="builderStatus">No collection generated yet</span><button id="commitCollection" class="btn primary" disabled><i data-lucide="save"></i>Save collection</button></div></div>`;
+  workspace.innerHTML = `<div class="page collection-builder"><section class="panel"><div class="panel-head"><i data-lucide="wand-sparkles"></i>Selection rules</div><div class="panel-body builder-fields"><div class="form-row"><label>Preset</label><select id="builderPreset" class="control"><option value="">No preset</option>${presets.items.map(item => `<option value="${item.id}">${esc(item.name)}</option>`).join('')}</select></div><div class="form-row"><label>Preset name</label><input id="builderPresetName" class="control" maxlength="120" placeholder="Name for a new preset"></div><div class="form-row"><label>Collection name</label><input id="builderName" class="control" maxlength="120"></div><div class="form-row"><label>Count</label><input id="builderCount" class="control" type="number" min="1" max="1000" value="10"></div><div class="form-row builder-search"><label>Search</label><input id="builderQuery" class="control" placeholder="portrait blue_eyes -comic author:artist"><div id="builderQueryChips" class="search-chips"></div></div><div class="builder-actions"><button id="savePreset" class="btn"><i data-lucide="bookmark-plus"></i>Save preset</button><button id="deletePreset" class="icon-btn danger" title="Delete selected preset"><i data-lucide="trash-2"></i></button><button id="generateCollection" class="btn primary"><i data-lucide="shuffle"></i>Generate</button></div></div></section><div id="builderSummary" class="builder-summary"></div><div id="builderPreview" class="collection-preview-grid"><div class="empty">Enter tags and generate a selection</div></div><div class="builder-savebar"><button id="cancelBuilder" class="btn"><i data-lucide="chevron-left"></i>Collections</button><span id="builderStatus">No collection generated yet</span><button id="commitCollection" class="btn primary" disabled><i data-lucide="save"></i>Save collection</button></div></div>`;
   const fields = () => ({
     query: document.querySelector('#builderQuery').value.trim(),
     requested_count: Number(document.querySelector('#builderCount').value),
@@ -1707,11 +1707,15 @@ async function showCollectionBuilder() {
     });
     icons();
   };
-  document.querySelector('#builderPreset').onchange = event => {
-    const preset = presets.items.find(item => item.id === Number(event.target.value));
-    if (!preset) return;
+  const presetSelect = () => document.querySelector('#builderPreset');
+  const presetNameInput = () => document.querySelector('#builderPresetName');
+  const selectedPreset = () => presets.items.find(item => item.id === Number(presetSelect().value)) || null;
+  presetSelect().onchange = () => {
+    const preset = selectedPreset();
+    if (!preset) { presetNameInput().value = ''; return; }
     document.querySelector('#builderQuery').value = preset.query || '';
     document.querySelector('#builderCount').value = preset.requested_count;
+    presetNameInput().value = preset.name;
     renderBuilderChips();
   };
   document.querySelector('#generateCollection').onclick = async () => {
@@ -1720,20 +1724,37 @@ async function showCollectionBuilder() {
   };
   document.querySelector('#builderName').oninput = () => preview && renderPreview();
   document.querySelector('#savePreset').onclick = async () => {
-    const name = prompt('Preset name');
-    if (!name) return;
+    const name = presetNameInput().value.trim();
+    if (!name) { presetNameInput().classList.add('invalid'); presetNameInput().focus(); toast('Enter a preset name', true); return; }
+    presetNameInput().classList.remove('invalid');
+    const preset = selectedPreset();
     try {
-      const saved = await api('/api/v1/collection-presets', {method:'POST',body:JSON.stringify({name,...fields()})});
-      presets.items.push(saved);
-      document.querySelector('#builderPreset').add(new Option(saved.name,String(saved.id),true,true));
-      toast('Preset saved');
+      const saved = preset
+        ? await api(`/api/v1/collection-presets/${preset.id}`, {method:'PUT',body:JSON.stringify({name,...fields()})})
+        : await api('/api/v1/collection-presets', {method:'POST',body:JSON.stringify({name,...fields()})});
+      if (preset) {
+        Object.assign(preset, saved);
+        const option = presetSelect().querySelector(`option[value="${preset.id}"]`);
+        if (option) option.textContent = saved.name;
+        toast('Preset updated');
+      } else {
+        presets.items.push(saved);
+        presetSelect().add(new Option(saved.name,String(saved.id),true,true));
+        toast('Preset saved');
+      }
+      presetNameInput().value = saved.name;
     } catch (error) { toast(error.message, true); }
   };
   document.querySelector('#deletePreset').onclick = async () => {
-    const id = Number(document.querySelector('#builderPreset').value);
+    const id = Number(presetSelect().value);
     if (!id) return;
-    try { await api(`/api/v1/collection-presets/${id}`,{method:'DELETE'}); presets.items=presets.items.filter(item=>item.id!==id); document.querySelector(`#builderPreset option[value="${id}"]`).remove(); toast('Preset deleted'); }
-    catch (error) { toast(error.message, true); }
+    try {
+      await api(`/api/v1/collection-presets/${id}`,{method:'DELETE'});
+      presets.items = presets.items.filter(item => item.id !== id);
+      presetSelect().querySelector(`option[value="${id}"]`).remove();
+      presetNameInput().value = '';
+      toast('Preset deleted');
+    } catch (error) { toast(error.message, true); }
   };
   document.querySelector('#commitCollection').onclick = async () => {
     try { await api('/api/v1/collections',{method:'POST',body:JSON.stringify({name:document.querySelector('#builderName').value.trim(),preset_id:Number(document.querySelector('#builderPreset').value)||null,...fields(),media_item_ids:preview.items.map(item=>item.id)})}); toast('Collection saved'); showCollections(); }
