@@ -1037,6 +1037,18 @@ function applyAcceptStates() {
     const accepting = reviewAccepting.has(id);
     card.classList.toggle('review-card-accepting', accepting);
     card.querySelectorAll('button').forEach(button => { button.disabled = accepting; });
+    const preview = card.querySelector('.review-card-preview');
+    if (preview) {
+      let badge = preview.querySelector('.review-card-accepting-badge');
+      if (accepting && !badge) {
+        badge = document.createElement('span');
+        badge.className = 'review-card-accepting-badge';
+        badge.innerHTML = '<i data-lucide="refresh-cw" class="spin"></i>Applying source…';
+        preview.appendChild(badge);
+      } else if (!accepting && badge) {
+        badge.remove();
+      }
+    }
   });
   const lightbox = document.querySelector('.media-lightbox');
   if (!lightbox) return;
