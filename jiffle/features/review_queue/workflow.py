@@ -188,10 +188,25 @@ def accept_source_candidate(
             (row["input_hash"],),
         ).fetchone()
 
-    if source_existing or input_existing:
-        # The accepted file is already stored byte-for-byte.  Merge the source
-        # metadata into that item; its file and revisions are never replaced.
-        media_item_id = int((source_existing or input_existing)[0])
+    # The candidate's bytes can differ from the stored file (for example a
+    # re-cut of the same post) while its source URL is already recorded on a
+    # live item.  ``media_sources.canonical_url`` is unique, so inserting a
+    # second item for it would raise an integrity error; merge into the item
+    # that already owns the source instead.
+    url_existing = None
+    if source is not None and source.canonical_url:
+        url_existing = connection.execute(
+            "SELECT source.media_item_id FROM media_sources source "
+            "JOIN media_items item ON item.id=source.media_item_id "
+            "WHERE source.canonical_url=? AND item.deleted_at IS NULL",
+            (source.canonical_url,),
+        ).fetchone()
+
+    if source_existing or input_existing or url_existing:
+        # The accepted file (or its source URL) is already in the library.
+        # Merge the source metadata into that item; its file and revisions are
+        # never replaced.
+        media_item_id = int((source_existing or input_existing or url_existing)[0])
         _merge_source_into_existing(connection, media_item_id, source, file_source)
         outcome = "merged"
         duplicate_of = media_item_id
