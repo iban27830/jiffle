@@ -1106,6 +1106,7 @@ def _reverse_similar(image_path, providers, diagnostics=None):
             "provider": name,
             "matches": [],
             "duration_ms": int(REVERSE_SEARCH_TIMEOUT_SECONDS * 1000),
+            "min_confidence": _reverse_min_confidence(provider),
             "error": {
                 "status": "timeout",
                 "code": "import.provider_timeout",
@@ -1124,9 +1125,12 @@ def _reverse_similar(image_path, providers, diagnostics=None):
         provider_name = str(result["provider"])
         error = result.get("error")
         raw_matches = list(result.get("matches") or [])
+        # Each service reports similarity on its own scale, so keep the
+        # provider-specific cut-off that the lookup used.
+        min_confidence = float(result.get("min_confidence") or MIN_SIMILAR_CONFIDENCE)
         accepted = [
             raw for raw in raw_matches
-            if (_reverse_confidence(raw) or 0) >= MIN_SIMILAR_CONFIDENCE
+            if (_reverse_confidence(raw) or 0) >= min_confidence
         ]
         resolved = [
             _resolve_reverse_candidate(raw, providers) for raw in accepted
@@ -1150,7 +1154,7 @@ def _reverse_similar(image_path, providers, diagnostics=None):
                     duration_ms=result["duration_ms"],
                     raw_count=len(raw_matches),
                     above_threshold=len(accepted),
-                    min_confidence=MIN_SIMILAR_CONFIDENCE,
+                    min_confidence=min_confidence,
                 )
         collected.extend(kept)
     return _unique_similar(collected)[:MAX_REVERSE_CANDIDATES]
@@ -1174,16 +1178,18 @@ def _saucenao_reverse_search():
 
 def _run_reverse_search(provider, image_path) -> dict[str, object]:
     name = getattr(provider, "provider_name", None) or provider.__class__.__name__.lower()
+    min_confidence = _reverse_min_confidence(provider)
     started = time.perf_counter()
     try:
         matches = list(getattr(provider, "search_similar")(image_path) or [])
         return {
             "provider": name, "matches": matches, "error": None,
-            "duration_ms": _elapsed_ms(started),
+            "duration_ms": _elapsed_ms(started), "min_confidence": min_confidence,
         }
     except SourceProviderFailure as error:
         return {
             "provider": name, "matches": [], "duration_ms": _elapsed_ms(started),
+            "min_confidence": min_confidence,
             "error": {
                 "status": _status_for_error(error.code),
                 "code": error.code,
@@ -1193,12 +1199,27 @@ def _run_reverse_search(provider, image_path) -> dict[str, object]:
     except Exception as error:
         return {
             "provider": name, "matches": [], "duration_ms": _elapsed_ms(started),
+            "min_confidence": min_confidence,
             "error": {
                 "status": "network_error",
                 "code": "import.source_search_failed",
                 "message": _safe_error_message(error, "The reverse search failed."),
             },
         }
+
+
+def _reverse_min_confidence(provider) -> float:
+    """Return the similarity cut-off a reverse-search provider reports on.
+
+    Most services report a percentage where a good match is close to 100, so
+    the shared cut-off applies.  e621's IQDB backend reports even an exact match
+    around 60, so it declares a lower threshold of its own.
+    """
+    try:
+        value = float(getattr(provider, "min_similar_confidence", None))
+    except (TypeError, ValueError):
+        return MIN_SIMILAR_CONFIDENCE
+    return value if value > 0 else MIN_SIMILAR_CONFIDENCE
 
 
 def _reverse_confidence(raw) -> float | None:

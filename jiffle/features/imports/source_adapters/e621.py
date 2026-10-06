@@ -30,6 +30,11 @@ class E621SourceProvider:
     # not configured when no credentials are saved.
     credentials_improve_results = True
     reverse_search_requires_auth = True
+    # e621's IQDB backend reports even a byte-identical post around 60, unlike
+    # Danbooru's and IQDB.org's percentages, so the shared 80% cut-off would drop
+    # real matches.  e621 itself hides anything below 60 by default; the lookup
+    # lowers that server-side cut-off and applies this provider threshold instead.
+    min_similar_confidence = 50.0
     domains = {"e621.net", "e926.net"}
     page_limit = 320
     _transient_statuses = {408, 429, 500, 502, 503, 504}
@@ -166,6 +171,11 @@ class E621SourceProvider:
             response = requests.post(
                 "https://e621.net/iqdb_queries.json",
                 files={"search[file]": ("jiffle-preview.jpg", preview, "image/jpeg")},
+                # Ask e621 to return its whole ranked list instead of filtering at
+                # its own 60 cut-off, which hides a genuine match that scores just
+                # below it.  The shared result list is filtered with this
+                # provider's threshold by the caller.
+                data={"search[score_cutoff]": "0"},
                 headers={
                     "User-Agent": f"{REVERSE_SEARCH_USER_AGENT} (by {self.login})",
                     "Accept": "application/json",

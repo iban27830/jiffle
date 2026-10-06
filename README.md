@@ -156,9 +156,12 @@ local perceptual fingerprints and then performs an image reverse search: IQDB,
 SauceNAO, plus the Danbooru and e621 reverse-search endpoints when those accounts
 are configured.
 Only a small preview of the image is uploaded, so a re-encoded or lower-resolution
-copy can still be matched. Matches from 80% similarity are shown in **Review** as
-source candidates with their similarity percentage; when a match points at a
-supported post, Jiffle loads that post's tags and original file, so selecting
+copy can still be matched. Similar matches are shown in **Review** as source
+candidates with their similarity percentage. Each service reports similarity on
+its own scale, so the gate follows the service: Danbooru and IQDB.org keep matches
+from 80%, while e621, whose IQDB backend scores even an exact match near 60, keeps
+the top of its own ranking. When a match points at a supported post, Jiffle loads
+that post's tags and original file, so selecting
 **Use this source** stores the original rather than a preview. Exact matching still
 requires the same file bytes; resized and recompressed copies are handled by the
 local pHash check described above when there is one exact perceptual match; edited
@@ -261,8 +264,9 @@ returned a post, but the file could not be downloaded** means a post matched
 but its CDN failed (or returned bytes with the wrong MD5). **Not supported**
 means the source has no reverse-image search at all, so it was not queried.
 Similarity rows report the raw hits and how many reached the kept threshold, for
-example **16 found, 0 at ≥80%**, so a match below the 80% similarity gate is
-not mistaken for a candidate. A summary such as **Found N candidates, but none
+example **16 found, 0 at ≥80%** (e621 shows its own gate, for example **2 found
+at ≥50%**, because its scale differs), so a match below that gate is not mistaken
+for a candidate. A summary such as **Found N candidates, but none
 passed verification** means every returned file was unavailable or failed the
 exact hash check. Older history entries that predate these diagnostics still
 show their recorded provider errors and timings.
@@ -281,7 +285,7 @@ Review shows its waiting items as a card grid like **Library**. Each card keeps 
 the preview and a row of actions: **Open full size**, **Run import again**, and
 **Reject**. A card never confirms a file by itself: **Open full size** opens the
 original in a full-screen viewer, and confirming is done there. When several source
-pages matched at 80% or more, that viewer opens as a side-by-side comparison: your
+pages passed the similarity gate, that viewer opens as a side-by-side comparison: your
 staged file on the left and the matched candidate in the middle, with a details panel
 on the right. Both images keep the same size, so the extra panel helps compare similar
 matches without covering either picture. Use the left and right arrows (or the keyboard
@@ -325,7 +329,7 @@ rejected. **Select all
 on screen** ticks every card on the current page. Rechecking runs the normal import resolution again, so a file
 that only had a metadata match can now combine tags from one provider with the file
 bytes from another. When no byte-identical copy exists, the recheck also runs the
-image reverse search and adds every match of 80% similarity or more to the card, so a
+image reverse search and adds every match that reaches the service's similarity gate to the card, so a
 re-encoded copy can be confirmed without dropping the file again. Review shows 60
 items per page by default; use **Per page** to change the count, and **Previous** /
 **Next** to move between pages.
