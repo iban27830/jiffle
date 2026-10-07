@@ -30,6 +30,7 @@ from jiffle.features.imports.local_import import (
 )
 from jiffle.features.imports.source_adapters.contracts import SourceMedia, SourceMatch
 from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
+from jiffle.features.imports.source_adapters.reverse_search import reverse_preview_bytes
 from jiffle.features.imports.url_normalization import normalize_source_url
 from jiffle.infrastructure.database.connection import connect_database
 from jiffle.infrastructure.media_revisions import create_original_revision
@@ -496,8 +497,10 @@ def run_universal_import_job(
             details["provider_diagnostics"], "perceptual_search", "local",
             "matched" if similar else "no_result", len(similar)
         )
-        if inspection.media_type == "image":
-            similar.extend(_reverse_similar(original_path, providers, details["provider_diagnostics"]))
+        # Videos are searched through one representative frame, so a re-encoded
+        # or sample-quality copy can still match the post it was taken from even
+        # though its bytes differ from the original.
+        similar.extend(_reverse_similar(original_path, providers, details["provider_diagnostics"]))
         similar = [_coerce_match(match, "perceptual") for match in similar]
         similar = [match for match in _unique_similar(similar) if match.confidence >= MIN_SIMILAR_CONFIDENCE]
         details["similar_candidates_found"] = len(similar)
@@ -1048,6 +1051,17 @@ def _reverse_similar(image_path, providers, diagnostics=None):
     through the matching provider first, so the candidate carries real tags and
     the original file instead of only a similarity thumbnail.
     """
+    if reverse_preview_bytes(image_path) is None:
+        # A file that is neither an image nor a decodable video has nothing to
+        # upload.  Report that once instead of letting every provider claim a
+        # search that never ran and found nothing.
+        if diagnostics is not None:
+            _record_provider_diagnostic(
+                diagnostics, "perceptual_search", "preview", "not_supported", 0,
+                "import.reverse_search_no_preview",
+                "This file has no readable image or video frame to reverse-search.",
+            )
+        return []
     reverse_providers = []
     for provider in list(providers) + [_iqdb_reverse_search(), _saucenao_reverse_search()]:
         if provider is None or not callable(getattr(provider, "search_similar", None)):
