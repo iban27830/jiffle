@@ -115,6 +115,20 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
 .tag-section:not([open]) summary::after { transform: rotate(-45deg); }
 .tag-section .badge { margin-left: 2px; }
 .tag-scroll { max-height: min(34vh,300px); margin-top: 9px; padding-right: 4px; overflow: auto; }
+.tag.manual { border-color: #d8c3ea; background: #f1e8fb; color: #5b3a86; }
+.tag-filter.manual:hover { border-color: #c4a6e0; background: #e9dcf8; }
+.tag-filter.manual.included { color: #4b2f74; border-color: #b28ed6; background: #e5d5f7; }
+.tag-filter.manual.excluded { color: #8f3036; border-color: #e0b4b7; background: #f8e5e6; }
+.tag-remove { width: 21px; height: 21px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 3px; color: #6b4a99; background: transparent; cursor: pointer; opacity: .5; }
+.tag-filter:hover .tag-remove, .tag-remove:focus-visible { opacity: 1; }
+.tag-remove:hover { color: #fff; background: #7b52b8; }
+.tag-remove [data-lucide] { width: 13px; height: 13px; }
+.tag-add { position: relative; margin-top: 9px; }
+.tag-add .control { height: 32px; font-size: .86em; }
+.tag-suggest { position: absolute; z-index: 30; top: calc(100% + 4px); left: 0; right: 0; max-height: 240px; padding: 4px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; background: #fff; box-shadow: 0 10px 24px rgba(20,40,40,.14); }
+.tag-suggest-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; padding: 6px 8px; border: 0; border-radius: 4px; background: transparent; color: var(--text); font: inherit; font-size: .86em; text-align: left; cursor: pointer; }
+.tag-suggest-item small { color: var(--muted); }
+.tag-suggest-item:hover, .tag-suggest-item.active { background: var(--surface-2); }
 .inspector-actions { position: sticky; bottom: -15px; margin: 14px -15px -15px; padding: 11px 15px; border-top: 1px solid var(--line); background: rgba(255,255,255,.96); display: flex; flex-wrap: wrap; gap: 7px; }
 .inspector-actions .btn { min-width: 0; flex: 1 1 150px; }
 .badge.good { color: var(--good); background: #e2f4ec; }

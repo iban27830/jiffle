@@ -491,8 +491,8 @@ def _ensure_family(connection, source_row) -> int:
 
 def _copy_tags(connection, source_id: int, fragment_id: int) -> None:
     connection.execute(
-        "INSERT OR IGNORE INTO media_tags (media_item_id, tag) "
-        "SELECT ?, tag FROM media_tags WHERE media_item_id=?",
+        "INSERT OR IGNORE INTO media_tags (media_item_id, tag, origin) "
+        "SELECT ?, tag, origin FROM media_tags WHERE media_item_id=?",
         (fragment_id, source_id),
     )
 

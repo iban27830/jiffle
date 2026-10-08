@@ -840,6 +840,21 @@ def migration_34(connection: sqlite3.Connection) -> None:
         )
 
 
+def migration_35(connection: sqlite3.Connection) -> None:
+    """Track whether a media tag was added by the user or came from the source.
+
+    Manual tags can be removed in the Library inspector and are shown in their
+    own colour, while tags supplied by the original post stay read-only.  The
+    column is additive and defaults every existing row to ``import`` so the
+    behaviour of already imported media does not change.
+    """
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(media_tags)")}
+    if "origin" not in columns:
+        connection.execute(
+            "ALTER TABLE media_tags ADD COLUMN origin TEXT NOT NULL DEFAULT 'import'"
+        )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -875,6 +890,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (32, migration_32),
     (33, migration_33),
     (34, migration_34),
+    (35, migration_35),
 )
 
 

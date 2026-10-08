@@ -23,6 +23,7 @@ class MediaItem:
     edit_operations: tuple[str, ...]
     created_at: str
     tags: tuple[str, ...]
+    manual_tags: tuple[str, ...] = ()
     character_tags: tuple[str, ...] = ()
     parent_id: str | None = None
     parent_media_id: int | None = None

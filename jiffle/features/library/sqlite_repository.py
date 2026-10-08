@@ -56,12 +56,16 @@ class SqliteLibraryRepository:
                     (row["id"],),
                 ).fetchone() if _table_has_column(self.connection, "media_sources", "author") else None
                 author = author_row["author"] if author_row else None
-        tags = tuple(
-            tag_row[0]
-            for tag_row in self.connection.execute(
-                "SELECT tag FROM media_tags WHERE media_item_id = ? ORDER BY tag",
-                (row["id"],),
-            )
+        has_tag_origin = _table_has_column(self.connection, "media_tags", "origin")
+        tag_rows = self.connection.execute(
+            "SELECT tag, origin FROM media_tags WHERE media_item_id = ? ORDER BY tag"
+            if has_tag_origin
+            else "SELECT tag, NULL FROM media_tags WHERE media_item_id = ? ORDER BY tag",
+            (row["id"],),
+        ).fetchall()
+        tags = tuple(tag_row[0] for tag_row in tag_rows)
+        manual_tags = tuple(
+            tag_row[0] for tag_row in tag_rows if tag_row[1] == "manual"
         )
         parent_id = row["parent_id"] if "parent_id" in keys else None
         character_tags = _decode_tags(row["character_tags_json"] if "character_tags_json" in keys else None)
@@ -130,6 +134,7 @@ class SqliteLibraryRepository:
             if "active_revision_id" in row.keys() else (),
             created_at=row["created_at"],
             tags=tags,
+            manual_tags=manual_tags,
             character_tags=character_tags,
             parent_id=parent_id,
             parent_media_id=parent_media_id,

@@ -5,6 +5,7 @@ import {droppedUrl} from './import_drop.js';
 import {drawCompositionPreview, drawForegroundPreview} from './background_preview.js';
 import {formatDateTime, formatDuration} from './time.js';
 import {segmentsPayload, validateSegment, describeSegment, segmentDurationMs, parseTimecode, formatTimecode} from './trim.js';
+import {normalizeTagInput, suggestionQuery} from './tag_input.js';
 
 const workspace = document.querySelector('#workspace');
 const title = document.querySelector('#viewTitle');
@@ -345,12 +346,13 @@ function activeFiltersHtml() {
   }).join('');
 }
 
-function tagHtml(tag) {
+function tagHtml(tag, manual = false) {
   const terms = parseLibrarySearch(librarySearch).terms;
   const included = terms.includes(tag);
   const excluded = terms.includes(`-${tag}`);
   const state = included ? ' included' : excluded ? ' excluded' : '';
-  return `<span class="tag tag-filter${state}" data-include-tag="${esc(tag)}" role="button" tabindex="0" title="Add to search">${esc(tag)}<button type="button" class="tag-exclude" data-exclude-tag="${esc(tag)}" title="Exclude from search"><i data-lucide="circle-minus"></i></button></span>`;
+  const remove = manual ? `<button type="button" class="tag-remove" data-remove-tag="${esc(tag)}" title="Remove tag"><i data-lucide="x"></i></button>` : '';
+  return `<span class="tag tag-filter${state}${manual ? ' manual' : ''}" data-include-tag="${esc(tag)}" role="button" tabindex="0" title="${manual ? 'Manual tag - click to add to search' : 'Add to search'}">${esc(tag)}${remove}<button type="button" class="tag-exclude" data-exclude-tag="${esc(tag)}" title="Exclude from search"><i data-lucide="circle-minus"></i></button></span>`;
 }
 
 function authorHtml(author) {
@@ -388,6 +390,111 @@ function appendSearchTerm(term) {
 
 function bindLibraryFilters(load) {
   document.querySelectorAll('[data-remove-term]').forEach(node => node.onclick = () => appendSearchTerm(node.dataset.removeTerm));
+}
+
+function tagsSectionHtml(media) {
+  const manual = new Set(media.manual_tags || []);
+  const chips = media.tags.map(tag => tagHtml(tag, manual.has(tag))).join('') || 'No tags';
+  return `<details class="tag-section field" open><summary><span>Tags</span><span class="badge">${media.tags.length}</span></summary>`
+    + `<div class="tag-scroll"><div class="tags">${chips}</div></div>`
+    + '<div class="tag-add"><input id="tagAddInput" class="control" placeholder="Add tag..." autocomplete="off" spellcheck="false" maxlength="200"><div id="tagSuggest" class="tag-suggest" hidden></div></div>'
+    + '</details>';
+}
+
+function bindTagChips(container) {
+  container.querySelectorAll('[data-include-tag]').forEach(node => {
+    const include = () => appendSearchTerm(node.dataset.includeTag);
+    node.onclick = event => { if (!event.target.closest('[data-exclude-tag]') && !event.target.closest('[data-remove-tag]')) include(); };
+    node.onkeydown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); include(); } };
+  });
+  container.querySelectorAll('[data-exclude-tag]').forEach(node => node.onclick = event => { event.stopPropagation(); appendSearchTerm(`-${node.dataset.excludeTag}`); });
+  container.querySelectorAll('[data-remove-tag]').forEach(node => node.onclick = event => { event.stopPropagation(); removeMediaTag(node.dataset.removeTag); });
+}
+
+function bindTagSection(pane, media) {
+  bindTagChips(pane);
+  attachTagInput(pane.querySelector('#tagAddInput'), pane.querySelector('#tagSuggest'), media.id);
+}
+
+function renderTagSection(media) {
+  const pane = document.querySelector('#inspector');
+  const section = pane?.querySelector('.tag-section');
+  if (!pane || !section) return;
+  section.outerHTML = tagsSectionHtml(media);
+  bindTagSection(pane, media);
+  icons();
+}
+
+function applyTagChange(media) {
+  if (!selectedMedia || Number(selectedMedia.id) !== Number(media.id)) return;
+  selectedMedia = media;
+  renderTagSection(media);
+}
+
+async function addMediaTag(mediaId, rawTag, input, suggest) {
+  const tag = normalizeTagInput(rawTag);
+  if (!tag) { toast('Enter a valid tag', true); return; }
+  try {
+    const media = await api(`/api/v1/media/${mediaId}/tags`, {method:'POST', body: JSON.stringify({tag})});
+    if (input) input.value = '';
+    if (suggest) { suggest.hidden = true; suggest.innerHTML = ''; }
+    applyTagChange(media);
+    const added = media.tag_change?.added !== false;
+    const label = media.tag_change?.tag || tag;
+    toast(added ? `Added tag: ${label}` : `Already tagged: ${label}`, added ? false : 'warn');
+  } catch (error) { toast(error.message, true); }
+}
+
+async function removeMediaTag(tag) {
+  if (!selectedMedia) return;
+  const mediaId = selectedMedia.id;
+  try {
+    const media = await api(`/api/v1/media/${mediaId}/tags?tag=${encodeURIComponent(tag)}`, {method:'DELETE'});
+    applyTagChange(media);
+    toast(`Removed tag: ${tag}`);
+  } catch (error) { toast(error.message, true); }
+}
+
+let tagSuggestToken = 0;
+
+function attachTagInput(input, suggest, mediaId) {
+  if (!input || !suggest) return;
+  let items = [];
+  let active = -1;
+  let timer = null;
+  const close = () => { clearTimeout(timer); suggest.hidden = true; suggest.innerHTML = ''; items = []; active = -1; };
+  const pick = tag => { close(); addMediaTag(mediaId, tag, input, suggest); };
+  const render = () => {
+    if (!items.length) { close(); return; }
+    suggest.innerHTML = items.map((item, index) => `<button type="button" class="tag-suggest-item${index === active ? ' active' : ''}" data-tag="${esc(item.tag)}"><span>${esc(item.tag)}</span><small>${item.count}</small></button>`).join('');
+    suggest.hidden = false;
+    suggest.querySelectorAll('.tag-suggest-item').forEach((node, index) => { node.onmousedown = event => { event.preventDefault(); pick(items[index].tag); }; });
+  };
+  const request = async prefix => {
+    const token = ++tagSuggestToken;
+    try {
+      const data = await api(`/api/v1/tags?q=${encodeURIComponent(prefix)}&limit=20`);
+      if (token !== tagSuggestToken) return;
+      items = data.items || []; active = -1; render();
+    } catch { close(); }
+  };
+  input.oninput = () => {
+    const prefix = suggestionQuery(input.value);
+    clearTimeout(timer);
+    if (!prefix) { close(); return; }
+    timer = setTimeout(() => request(prefix), 150);
+  };
+  input.onkeydown = event => {
+    if (event.key === 'ArrowDown' && items.length) { event.preventDefault(); active = (active + 1) % items.length; render(); }
+    else if (event.key === 'ArrowUp' && items.length) { event.preventDefault(); active = (active - 1 + items.length) % items.length; render(); }
+    else if (event.key === 'Escape') { close(); }
+    else if (event.key === 'Enter') {
+      event.preventDefault(); event.stopPropagation();
+      if (active >= 0 && items[active]) pick(items[active].tag);
+      else addMediaTag(mediaId, input.value, input, suggest);
+    }
+  };
+  input.onblur = () => setTimeout(close, 120);
 }
 
 async function runJob(start, onCreated) {
@@ -538,15 +645,10 @@ async function showLibrary() {
         authorContainer.innerHTML = authorHtml(selectedMedia.author);
         bindAuthorFilters(authorContainer);
       }
-      const tagContainer = document.querySelector('#inspector .tag-scroll .tags');
-      if (tagContainer) {
-        tagContainer.innerHTML = selectedMedia.tags.map(tagHtml).join('') || 'No tags';
-        tagContainer.querySelectorAll('[data-include-tag]').forEach(node => {
-          const include = () => appendSearchTerm(node.dataset.includeTag);
-          node.onclick = event => { if (!event.target.closest('[data-exclude-tag]')) include(); };
-          node.onkeydown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); include(); } };
-        });
-        tagContainer.querySelectorAll('[data-exclude-tag]').forEach(node => node.onclick = event => { event.stopPropagation(); appendSearchTerm(`-${node.dataset.excludeTag}`); });
+      const tagSection = document.querySelector('#inspector .tag-section');
+      if (tagSection) {
+        tagSection.outerHTML = tagsSectionHtml(selectedMedia);
+        bindTagSection(document.querySelector('#inspector'), selectedMedia);
         icons();
       }
     }
@@ -603,7 +705,7 @@ async function inspectMedia(id) {
   const characters = selectedMedia.character_tags?.length ? `<div class="field"><label>Characters</label><div class="tags">${selectedMedia.character_tags.map(tagHtml).join('')}</div></div>` : '';
   const fileSourceField = selectedMedia.file_source_url && selectedMedia.file_source_url !== selectedMedia.source_url
     ? `<div class="field"><label>File source</label><a href="${esc(selectedMedia.file_source_url)}" target="_blank" rel="noopener" class="ellipsis">${esc(selectedMedia.file_source_url)}</a></div>` : '';
-  pane.innerHTML = `<button id="closeInspector" class="icon-btn inspector-close" title="Close"><i data-lucide="x"></i></button>${preview}<h2>${esc(selectedMedia.author || 'Unknown author')}</h2><div class="field"><label>Media ID</label><button type="button" id="searchMediaId" class="text-link">${selectedMedia.id}</button></div><div class="field"><label>Source</label><a href="${esc(selectedMedia.source_url || '#')}" target="_blank" rel="noopener" class="ellipsis">${esc(selectedMedia.source_url || 'Not specified')}</a></div>${fileSourceField}${parentField}${relatives}${fragmentField}${fragmentNotice}${characters}<div class="field"><label>Size</label>${selectedMedia.width || '?'} × ${selectedMedia.height || '?'} · ${formatBytes(selectedMedia.file_size)}</div>${edits}<details class="tag-section field" open><summary><span>Tags</span><span class="badge">${selectedMedia.tags.length}</span></summary><div class="tag-scroll"><div class="tags">${selectedMedia.tags.map(tagHtml).join('') || 'No tags'}</div></div></details><div class="form-actions inspector-actions"><a class="icon-btn" href="${selectedMedia.content_url}" target="_blank" rel="noopener" title="Open full size"><i data-lucide="maximize-2"></i></a>${selectedMedia.source_url?'<button id="refreshMetadata" class="btn"><i data-lucide="refresh-cw"></i>Refresh metadata</button>':''}<button id="openEditor" class="btn"><i data-lucide="panel-top-open"></i>Open in Editor</button>${selectedMedia.type==='image'?'<button id="replaceMediaBackground" class="btn"><i data-lucide="image-plus"></i>Replace background</button>':''}<button id="addCollection" class="btn"><i data-lucide="folder-plus"></i>Build collection</button><button id="deleteMedia" class="icon-btn danger" title="Delete"><i data-lucide="trash-2"></i></button></div>`;
+  pane.innerHTML = `<button id="closeInspector" class="icon-btn inspector-close" title="Close"><i data-lucide="x"></i></button>${preview}<h2>${esc(selectedMedia.author || 'Unknown author')}</h2><div class="field"><label>Media ID</label><button type="button" id="searchMediaId" class="text-link">${selectedMedia.id}</button></div><div class="field"><label>Source</label><a href="${esc(selectedMedia.source_url || '#')}" target="_blank" rel="noopener" class="ellipsis">${esc(selectedMedia.source_url || 'Not specified')}</a></div>${fileSourceField}${parentField}${relatives}${fragmentField}${fragmentNotice}${characters}<div class="field"><label>Size</label>${selectedMedia.width || '?'} × ${selectedMedia.height || '?'} · ${formatBytes(selectedMedia.file_size)}</div>${edits}${tagsSectionHtml(selectedMedia)}<div class="form-actions inspector-actions"><a class="icon-btn" href="${selectedMedia.content_url}" target="_blank" rel="noopener" title="Open full size"><i data-lucide="maximize-2"></i></a>${selectedMedia.source_url?'<button id="refreshMetadata" class="btn"><i data-lucide="refresh-cw"></i>Refresh metadata</button>':''}<button id="openEditor" class="btn"><i data-lucide="panel-top-open"></i>Open in Editor</button>${selectedMedia.type==='image'?'<button id="replaceMediaBackground" class="btn"><i data-lucide="image-plus"></i>Replace background</button>':''}<button id="addCollection" class="btn"><i data-lucide="folder-plus"></i>Build collection</button><button id="deleteMedia" class="icon-btn danger" title="Delete"><i data-lucide="trash-2"></i></button></div>`;
   const authorHeading = pane.querySelector('h2');
   authorHeading.insertAdjacentHTML('beforebegin', '<div class="field author-field"><label>Author</label></div>');
   authorHeading.className = 'author-value';
@@ -618,12 +720,7 @@ async function inspectMedia(id) {
   document.querySelector('#searchParentRemote')?.addEventListener('click', () => { librarySearch=parentSearch; libraryOffset=0; document.querySelector('#search').value=librarySearch; reloadLibrary(); });
   pane.querySelectorAll('.relative-link').forEach(node => node.onclick = () => openMediaInLibrary(Number(node.dataset.mediaId)));
   pane.querySelectorAll('.trim-source-link').forEach(node => node.onclick = () => { const sourceId = Number(node.dataset.mediaId); saveViewState('editor',{targetMediaId:sourceId,analysisId:null,backgroundOpen:false,trimTarget:true}); navigate('editor'); });
-  pane.querySelectorAll('[data-include-tag]').forEach(node => {
-    const include = () => appendSearchTerm(node.dataset.includeTag);
-    node.onclick = event => { if (!event.target.closest('[data-exclude-tag]')) include(); };
-    node.onkeydown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); include(); } };
-  });
-  pane.querySelectorAll('[data-exclude-tag]').forEach(node => node.onclick = event => { event.stopPropagation(); appendSearchTerm(`-${node.dataset.excludeTag}`); });
+  bindTagSection(pane, selectedMedia);
   document.querySelector('#deleteMedia').onclick = async () => { if (!confirm('Delete this file?')) return; try { await api(`/api/v1/media/${id}`, {method:'DELETE'}); toast('File deleted'); selectedMedia=null; showLibrary(); } catch(error) { toast(error.message,true); } };
   document.querySelector('#addCollection').onclick = () => showCollectionBuilder();
   document.querySelector('#openEditor').onclick = () => { const trimmable = selectedMedia.type==='video' || Boolean(selectedMedia.is_animated); saveViewState('editor',{targetMediaId:id,analysisId:null,backgroundOpen:false,trimTarget:trimmable}); navigate('editor'); };

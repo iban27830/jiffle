@@ -135,8 +135,8 @@ def mark_match_as_family(connection: sqlite3.Connection, match_id: int) -> int:
 
 def _merge_metadata(connection, keep, remove):
     connection.execute(
-        "INSERT OR IGNORE INTO media_tags (media_item_id, tag) "
-        "SELECT ?, tag FROM media_tags WHERE media_item_id=?",
+        "INSERT OR IGNORE INTO media_tags (media_item_id, tag, origin) "
+        "SELECT ?, tag, origin FROM media_tags WHERE media_item_id=?",
         (keep["id"], remove["id"]),
     )
     updates = {}

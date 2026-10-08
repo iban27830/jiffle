@@ -7,6 +7,7 @@ from flask import Blueprint, current_app, jsonify, request, send_file
 
 from jiffle.configuration.settings import Settings
 from jiffle.features.library.domain import LibraryQuery, MediaItem, MediaType
+from jiffle.features.library.serialization import serialize_media
 from jiffle.features.library.sqlite_repository import SqliteLibraryRepository
 from jiffle.features.library.thumbnail_cache import ensure_thumbnail
 from jiffle.infrastructure.database.connection import get_database
@@ -21,7 +22,7 @@ def list_media():
         return _error("library.invalid_query", error, 400)
     page = _repository().list_media(query)
     return jsonify({
-        "items": [_serialize(item) for item in page.items],
+        "items": [serialize_media(item) for item in page.items],
         "page": {"total": page.total, "limit": page.limit, "offset": page.offset},
     })
 
@@ -31,7 +32,7 @@ def get_media(media_id: int):
     item = _repository().get_media(media_id)
     if item is None:
         return _error("library.media_not_found", "Media item was not found.", 404)
-    return jsonify(_serialize(item))
+    return jsonify(serialize_media(item))
 
 @library_blueprint.delete("/api/v1/media/<int:media_id>")
 def delete_media(media_id: int):
@@ -163,45 +164,6 @@ def _resolve_media_path(item: MediaItem) -> Path | None:
     root = settings.media_path.resolve()
     candidate = (root / item.file_path).resolve()
     return candidate if candidate.is_relative_to(root) else None
-
-
-def _serialize(item: MediaItem) -> dict[str, object]:
-    return {
-        "id": item.id,
-        "type": item.media_type.value,
-        "source_url": item.source_url,
-        "file_source_url": item.file_source_url,
-        "author": item.author,
-        "domain": item.domain,
-        "width": item.width,
-        "height": item.height,
-        "file_size": item.file_size,
-        "created_at": item.created_at,
-        "active_revision_id": item.active_revision_id,
-        "is_edited": bool(item.edit_operations),
-        "edit_operations": list(item.edit_operations),
-        "tags": list(item.tags),
-        "character_tags": list(item.character_tags),
-        "characters": list(item.character_tags),
-        "parent_id": item.parent_id,
-        "parent_media_id": item.parent_media_id,
-        "remote_id": item.remote_id,
-        "parent_url": item.parent_url,
-        "has_parent": bool(item.parent_id),
-        "family_id": item.family_id,
-        "relatives": list(item.relatives),
-        "family_members": sorted((item.id, *item.relatives)) if item.family_id else [],
-        "has_family": bool(item.family_id),
-        "derived_from_media_id": item.derived_from_media_id,
-        "trim_start_ms": item.trim_start_ms,
-        "trim_end_ms": item.trim_end_ms,
-        "trim_index": item.trim_index,
-        "fragment_count": item.fragment_count,
-        "auto_collection_excluded": item.auto_collection_excluded,
-        "is_animated": item.is_animated,
-        "content_url": f"/api/v1/media/{item.id}/content?revision={item.active_revision_id or 0}",
-        "thumbnail_url": f"/api/v1/media/{item.id}/thumbnail?revision={item.active_revision_id or 0}",
-    }
 
 
 def _error(code: str, message: str, status: int):
