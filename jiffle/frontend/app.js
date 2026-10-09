@@ -124,7 +124,7 @@ function editSummary(operations=[]) {
 // purpose: once by hash (exact) and once by similarity (reverse image).
 const diagnosticStageHeadings = {
   metadata: 'Metadata',
-  exact_search: 'Exact search (MD5)',
+  exact_search: 'Exact search (file hash)',
   exact_download: 'Candidate download',
   perceptual_search: 'Similarity search (reverse image)',
 };

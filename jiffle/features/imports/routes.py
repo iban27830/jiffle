@@ -1,6 +1,6 @@
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from hashlib import md5
+from hashlib import md5, sha256
 from pathlib import Path
 from threading import Thread
 
@@ -193,16 +193,24 @@ def create_url_job():
 
 @imports_blueprint.post("/api/v1/source-search")
 def search_sources():
-    """Find exact copies by MD5 without creating an import job."""
+    """Find exact copies by file hash without creating an import job.
+
+    Most providers index by MD5; Pawchive stores files by SHA-256.  An uploaded
+    file is fingerprinted both ways so each provider receives the hash it uses,
+    while a source URL can still only supply an MD5 (a few boorus publish one).
+    """
     uploaded = request.files.get("file")
     payload = request.get_json(silent=True) if uploaded is None else None
     source_url = payload.get("url") if isinstance(payload, dict) else None
     digest = None
+    sha256_digest = None
 
     if uploaded is not None:
         if not uploaded.filename:
             return _error("import.invalid_request", "A file is required.", 400)
-        digest = md5(uploaded.read()).hexdigest()
+        raw = uploaded.read()
+        digest = md5(raw).hexdigest()
+        sha256_digest = sha256(raw).hexdigest()
     elif isinstance(source_url, str) and source_url.strip():
         try:
             normalized_url = normalize_source_url(source_url)
@@ -228,22 +236,27 @@ def search_sources():
             "import.invalid_request", "An image file or supported source URL is required.", 400
         )
 
-    if not digest:
-        return jsonify({"md5": None, "matches": [], "errors": []})
+    if not digest and not sha256_digest:
+        return jsonify({"md5": None, "sha256": None, "matches": [], "errors": []})
     providers = current_app.config["JIFFLE_SOURCE_PROVIDERS"]
     matches: list[dict[str, object]] = []
     errors: list[dict[str, str]] = []
-    searchable = [
-        provider for provider in providers
-        if callable(getattr(provider, "search_by_md5", None))
-    ]
+    searchable = []
+    for provider in providers:
+        if not callable(getattr(provider, "search_by_md5", None)):
+            continue
+        algorithm = str(getattr(provider, "hash_algorithm", "md5") or "md5").strip().lower()
+        provider_digest = sha256_digest if algorithm == "sha256" else digest
+        if provider_digest:
+            searchable.append((provider, provider_digest))
 
-    def lookup(provider):
-        return provider, provider.search_by_md5(digest)
+    def lookup(provider, provider_digest):
+        return provider, provider.search_by_md5(provider_digest)
 
     with ThreadPoolExecutor(max_workers=max(1, len(searchable))) as executor:
         futures = {
-            executor.submit(lookup, provider): provider for provider in searchable
+            executor.submit(lookup, provider, provider_digest): provider
+            for provider, provider_digest in searchable
         }
         for future in as_completed(futures):
             provider = futures[future]
@@ -271,6 +284,7 @@ def search_sources():
             unique[(provider, remote_id)] = match
     return jsonify({
         "md5": digest,
+        "sha256": sha256_digest,
         "matches": list(unique.values()),
         "errors": errors,
     })

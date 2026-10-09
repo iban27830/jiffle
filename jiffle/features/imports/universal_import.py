@@ -86,6 +86,19 @@ def _provider_needs_configuration(provider) -> bool:
     return not configured
 
 
+def _provider_search_digest(provider, md5_digest: str | None, sha256_digest: str | None) -> str | None:
+    """Pick the fingerprint a provider's exact search expects.
+
+    Every booru indexes posts by MD5 and keeps the default.  Pawchive stores
+    files by SHA-256, so it declares ``hash_algorithm = "sha256"`` and is
+    answered with the SHA-256 the import already computed for the file.
+    """
+    algorithm = str(getattr(provider, "hash_algorithm", "md5") or "md5").strip().lower()
+    if algorithm == "sha256":
+        return sha256_digest
+    return md5_digest
+
+
 def _reverse_provider_available(provider) -> bool:
     """Whether a provider's perceptual search can run in the current setup.
 
@@ -418,6 +431,7 @@ def run_universal_import_job(
             on_progress=lambda names: _progress(
                 connection, job_id, 50, "Waiting for sources: " + ", ".join(sorted(names))
             ),
+            sha256_digest=inspection.content_hash,
         )
         details["timing"]["phases_ms"]["exact_search"] = _elapsed_ms(exact_started)
         details["exact_candidates_checked"] = len(exact)
@@ -700,17 +714,26 @@ def _search_exact(
     provider_timings=None,
     diagnostics=None,
     on_progress=None,
+    sha256_digest: str | None = None,
 ):
     ordered = list(providers)
     if source_hint:
         ordered.sort(key=lambda p: 0 if getattr(p, "provider_name", "") == source_hint.provider else 1)
-    searchable = [(index, provider) for index, provider in enumerate(ordered)
-                  if callable(getattr(provider, "search_by_md5", None))]
+    searchable = []
+    for index, provider in enumerate(ordered):
+        if not callable(getattr(provider, "search_by_md5", None)):
+            continue
+        provider_digest = _provider_search_digest(provider, digest, sha256_digest)
+        # A provider that wants a fingerprint we do not have for this import
+        # (a SHA-256 provider reached only with a source MD5) is skipped
+        # silently instead of being reported as an error.
+        if provider_digest:
+            searchable.append((index, provider, provider_digest))
 
-    def lookup(position, provider):
+    def lookup(position, provider, provider_digest):
         started = time.perf_counter()
         try:
-            raw_matches = getattr(provider, "search_by_md5")(digest) or []
+            raw_matches = getattr(provider, "search_by_md5")(provider_digest) or []
             matches = [_coerce_match(raw, "exact") for raw in raw_matches]
             matches = [match for match in matches if match]
             return position, matches, [], _elapsed_ms(started), "ok"
@@ -721,7 +744,7 @@ def _search_exact(
 
     results = []
     active = []
-    for position, (_index, provider) in enumerate(searchable):
+    for position, (_index, provider, _digest) in enumerate(searchable):
         name = getattr(provider, "provider_name", "unknown")
         if _provider_on_cooldown(name):
             results.append((
@@ -741,13 +764,13 @@ def _search_exact(
             # change the outcome of an import that simply found no exact copy.
             results.append((position, [], [], 0, "not_configured"))
         else:
-            active.append((position, provider))
+            active.append((position, provider, _digest))
 
     executor = ThreadPoolExecutor(max_workers=max(1, len(active))) if active else None
     if executor is not None:
         futures = {
-            executor.submit(lookup, position, provider): (position, provider)
-            for position, provider in active
+            executor.submit(lookup, position, provider, provider_digest): (position, provider)
+            for position, provider, provider_digest in active
         }
         pending = set(futures)
         deadline = time.monotonic() + PROVIDER_SEARCH_TIMEOUT_SECONDS
@@ -876,7 +899,9 @@ def resolve_exact_downloads(path, providers, downloader, settings, diagnostics=N
     returned paths and must remove them.
     """
     digest = _md5(path)
-    matches, search_errors = _search_exact(providers, digest, None, None, diagnostics)
+    matches, search_errors = _search_exact(
+        providers, digest, None, None, diagnostics, sha256_digest=_sha256(path)
+    )
     verified, download_errors = _download_exact_candidates(
         matches, digest, settings, downloader, diagnostics
     )
@@ -1759,6 +1784,14 @@ def _failed(connection, job_id, code, message, details):
 
 def _md5(path):
     digest = hashlib.md5()
+    with Path(path).open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _sha256(path):
+    digest = hashlib.sha256()
     with Path(path).open("rb") as file:
         for chunk in iter(lambda: file.read(1024 * 1024), b""):
             digest.update(chunk)
