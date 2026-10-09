@@ -107,6 +107,7 @@ Supported online sources include:
 - Rule34.xxx (requires a free account User ID and API key)
 - FurAffinity
 - TBIB (The Big ImageBoard)
+- Pawchive (Patreon, Pixiv Fanbox, and Discord archives; post links such as `https://pawchive.pw/patreon/user/187748456/post/171899046`)
 
 Some sources require account credentials configured under **Settings → Sources**.
 Rule34.xxx requires the User ID and API key shown on its account options page;
@@ -120,7 +121,10 @@ it, calculates its hash, and checks it for duplicates before placing it in the
 library or Review.
 
 Jiffle first checks the local library and then searches supported providers for an
-exact MD5 copy. A downloaded copy is checked again locally before it is accepted,
+exact copy. The boorus are searched by MD5, while Pawchive stores its files by
+SHA-256 and is searched through its Hash Lookup with the file fingerprint Jiffle
+already computes, so both hash families are covered by the same import. A
+downloaded copy is checked again locally before it is accepted,
 so an unavailable source or an incorrect media response is skipped automatically.
 A dropped local file is compared with the library before any provider is contacted,
 so a file that is already in the library is reported as **Already imported** within
@@ -198,6 +202,11 @@ SauceNAO indexes FurAffinity, so it is how an image that exists only
 there can be found automatically. Each reverse search runs in parallel under a
 20-second deadline, and its slowest service cannot park the import. TBIB supports
 exact MD5 lookup, while it does not provide a separate visual reverse-search API.
+Pawchive is found the same way through its SHA-256 Hash Lookup and likewise has no
+reverse-image search. A Pawchive post that only archived a preview of a file
+(shown by Pawchive as **preview only**) cannot be downloaded from Pawchive at all,
+so Jiffle reports that the source has no downloadable media and leaves the file for
+**Review**.
 
 For an e621 or e926 post set, Jiffle first checks the complete set (using the saved e621 username and API key when configured), then imports up to four posts at the same time. The final counters and issue list keep the set's original order. The set itself is not added as a local collection. A private set or a set that cannot be accessed fails before any files are downloaded. If a post is deleted or its file is unavailable, Jiffle first tries its saved MD5 with the other providers, then records an issue only when no usable copy is found. Select **Stop** in the status bar to prevent new posts from starting; posts already running are allowed to finish. The status bar shows the current phase, active posts, and elapsed time, while **Import history** shows the total duration and slowest posts. Provider and download timings help identify a slow external service; a provider or CDN can still delay an individual post. Times in the interface are converted to the computer's local time zone, while the database remains in UTC.
 
@@ -255,7 +264,7 @@ imported, Waiting for review, or Import failed. Repeated imports of the same fil
 do not create another pending Review item.
 
 Open the closed diagnostics disclosure in an Import history entry to see each
-provider grouped by stage (metadata, **Exact search (MD5)**, **Candidate
+provider grouped by stage (metadata, **Exact search (file hash)**, **Candidate
 download**, and **Similarity search (reverse image)**), with its status, result
 count, technical code, and a safe error message. A provider that supports both
 lookups appears once per stage on purpose: the exact search uses the file hash
