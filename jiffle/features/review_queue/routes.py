@@ -28,12 +28,6 @@ review_blueprint = Blueprint("review_queue", __name__)
 
 _REVIEW_FILTERS = ("all", "source_found", "needs_source")
 
-# Import search statuses that mean a provider could not answer, so a card that
-# never reached a candidate is described as "unavailable" instead of "not found".
-_IMPORT_SEARCH_ERROR_STATUSES = {
-    "network_error", "authorization_error", "timeout", "unavailable",
-}
-
 
 @review_blueprint.get("/api/v1/review-items")
 def list_review_items():
@@ -501,7 +495,10 @@ def _import_search_attempt(review_id):
     candidate_count = int(payload.get("source_candidates") or 0)
     if row["reason"] == "source_candidates" or candidate_count:
         outcome = "candidates"
-    elif status in _IMPORT_SEARCH_ERROR_STATUSES or errors or resolution_error:
+    elif resolution_error:
+        # Only a search that could not run at all is "unavailable"; a completed
+        # search that merely hit a provider error stays "no_source" so the
+        # diagnostics keep describing which source did not answer.
         outcome = "unavailable"
     else:
         outcome = "no_source"
