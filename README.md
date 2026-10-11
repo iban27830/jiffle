@@ -1,402 +1,69 @@
 # Jiffle
 
-Jiffle is a local application for importing, organizing, tagging, editing, and curating images and videos.
+**Turn a folder of images and videos into an organized, reusable media library.**
 
-## Requirements
+Import files or source links, review uncertain matches, find what you need, make edits without losing originals, and assemble collections for export. Jiffle runs on your computer or NAS and is controlled in your browser.
 
-- Windows
-- Python 3.11 or newer
-- FFmpeg available in `PATH` for GIF/WebM conversion and oversized video export
-
-## Installation
-
-Open PowerShell in the Jiffle folder and start the application:
-
-```powershell
-python .\run.py
+```text
+Files and links → Import → Review when needed → Library → Editor → Collections → Export
 ```
 
-On the first run Jiffle checks for the Python packages it needs (Flask, Pillow, Requests, ImageHash, and OpenCV for video thumbnails and video imports) and installs any missing ones through pip. The first start therefore requires an internet connection and can take a few minutes. If you prefer to install everything up front, run:
+## What you can do
+
+- **Import once:** drop files, paste images or links, and import supported post sets. Duplicate checks help avoid repeated copies.
+- **Keep the context:** source links, authors, tags, characters, and related versions stay with the media.
+- **Find and organize:** search by tags, author, or ID; add personal tags and group related images.
+- **Edit without losing originals:** crop images, work with backgrounds where supported, and split videos or animations into fragments.
+- **Build collections:** generate a selection, replace individual files, save reusable presets, and export as ZIP or a server folder.
+- **Leave and return:** Library links open in a new tab by default. Collection and Editor drafts are kept separately in each browser tab.
+
+## Quick start
+
+### On Windows
+
+Install Python 3.11 or newer. Open PowerShell in the application folder:
 
 ```powershell
 python -m pip install -r requirements.txt
-```
-
-For NVIDIA GPU background removal, install the CUDA 12.8 PyTorch builds in the same Python environment:
-
-```powershell
-python -m pip install --upgrade --force-reinstall `
-  torch==2.11.0+cu128 `
-  torchvision==0.26.0+cu128 `
-  --extra-index-url https://download.pytorch.org/whl/cu128
-```
-
-Check the installation before selecting **GPU (CUDA)** in Settings:
-
-```powershell
-python -c "import torch; print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
-```
-
-The last line should print the NVIDIA device name. If it prints `CPU` or importing `torch` fails, choose **Automatic (recommended)** or **Processor (CPU)** until a CUDA-enabled build and compatible NVIDIA driver are installed.
-
-Install FFmpeg for export conversion, for example with Windows Package Manager:
-
-```powershell
-winget install Gyan.FFmpeg
-```
-
-Restart PowerShell after installation so `ffmpeg` is available in `PATH`.
-
-## Running Jiffle
-
-Start the application with:
-
-```powershell
 python .\run.py
 ```
 
-You can also double-click `run.bat`.
+Open **http://127.0.0.1:5001/** in your browser and keep the terminal running. You can also start Jiffle with `run.bat`. Install FFmpeg if you want video trimming or export conversion. See [installation and updates](guide/setup.md) for the complete steps.
 
-Jiffle opens automatically in the default browser. If it does not, open:
+### On a NAS / with Docker
 
-```text
-http://127.0.0.1:5001/
+Configure `.env`, choose your media folder and a host port, then run:
+
+```sh
+docker compose up -d --build
 ```
 
-Keep the terminal window open while using the application. Press `Ctrl+C` in the terminal to stop Jiffle.
+Open `http://<NAS-address>:<HOST_PORT>/` — the supplied example uses port **18001**. Settings and application state are kept in `state/`; media uses the folder you mount. [Docker setup and storage](guide/setup.md#nas--docker) explains the required values. The supplied NAS configuration disables local AI background removal.
 
-### Update from GitHub
+## Your first collection
 
-The updater does not require Git. It downloads the current application ZIP archive directly from GitHub:
+1. In **Settings → Sources**, configure any accounts you want to use.
+2. Open **Import** and drop a file or paste a link.
+3. If it needs a decision, open **Review** and choose a source or accept your file.
+4. Find it in **Library**, inspect its tags, and use **Open in Editor** if necessary.
+5. Open **Collections → Create**, enter tags and a count, then **Generate**. Replace unwanted items and **Save collection**.
 
-`https://github.com/iban27830/jiffle/archive/refs/heads/master.zip`
+## User guide
 
-1. Stop Jiffle by pressing `Ctrl+C` in its terminal window and wait for the process to exit.
-2. Double-click `update.bat` in the Jiffle folder.
-3. Allow the updater to finish downloading and checking the files. It then starts Jiffle again.
+| I want to… | Read |
+|---|---|
+| Install, start, update, or move my data safely | [Setup](guide/setup.md) |
+| Import files and links, understand duplicates, or resolve Review | [Import and Review](guide/import-review.md) |
+| Search, tag, and organize my library | [Library](guide/library.md) |
+| Crop, replace a background, or trim a clip | [Editor](guide/editor.md) |
+| Build a collection, resume a draft, and export | [Collections](guide/collections.md) |
+| Configure sources, crop checks, display, and export rules | [Settings](guide/settings.md) |
+| Understand an error or recover a workflow | [Troubleshooting](guide/troubleshooting.md) |
 
-The updater requires Python (which Jiffle also needs) and Windows PowerShell 5.1 or newer. It creates a SQLite backup under `jiffle-data\migration-backups` before replacing application files. It does not replace `jiffle-data`, media folders, thumbnails, or the local `settings.json`. When a newer version needs database changes, Jiffle applies the pending migrations automatically during startup. Keep the backup until you have confirmed that the updated version works.
+## Your files stay yours
 
-If the download or ZIP check fails, check the internet connection and GitHub access, then run `update.bat` again. If a migration or startup fails after an update, stop Jiffle, keep the backup folder, and restore the affected `jiffle-v2.db` backup before starting the previous version.
-
-For an older installation whose updater still reports that Git is missing, download the current [`update.bat`](https://github.com/iban27830/jiffle/raw/refs/heads/master/update.bat?download=1) and replace the old file once. This replacement does not affect the library or its database.
-
-## Using Jiffle
-
-### Import media
-
-Open **Import**. It has one window for every import type: drag a local image/video,
-drag a browser link, paste an image from the clipboard, or enter a URL and select
-**Resolve and import**. Pasting a URL fills the field without starting an import;
-press **Enter** or select **Resolve and import** when you are ready. Jiffle detects
-whether the input is a local file, a post link, or a direct media URL and keeps the
-progress entry in **Import history**.
-
-Dropping a local file stores it in Jiffle's import folder immediately, so you can
-delete your own copy from the Downloads folder right away. The temporary copy is
-removed once the original has been downloaded and added to the library, and it is
-kept in **Review** for manual validation when no usable source is found or the
-import fails.
-
-Supported online sources include:
-
-- Danbooru
-- e621 and e926 (post links such as `https://e621.net/posts/12345`, including query parameters)
-- e621 and e926 post sets such as `https://e621.net/post_sets/12345` or `https://e926.net/post_sets/12345.json`
-- Gelbooru
-- Rule34.xxx (requires a free account User ID and API key)
-- FurAffinity
-- TBIB (The Big ImageBoard)
-- Pawchive (Patreon, Pixiv Fanbox, and Discord archives; post links such as `https://pawchive.pw/patreon/user/187748456/post/171899046`)
-
-Some sources require account credentials configured under **Settings → Sources**.
-Rule34.xxx requires the User ID and API key shown on its account options page;
-FurAffinity requires cookies from an active browser session. Use **Test** beside a
-source to confirm that the saved credentials work. You can paste the whole
-`&api_key=...&user_id=...` line from the account page into either credential field:
-Jiffle splits it into the User ID and API key automatically. A source without credentials is
-shown as **not configured** in the import diagnostics and is skipped for that
-import instead of blocking it. A direct image URL is also accepted; Jiffle downloads
-it, calculates its hash, and checks it for duplicates before placing it in the
-library or Review.
-
-Jiffle first checks the local library and then searches supported providers for an
-exact copy. The boorus are searched by MD5, while Pawchive stores its files by
-SHA-256 and is searched through its Hash Lookup with the file fingerprint Jiffle
-already computes, so both hash families are covered by the same import. A
-downloaded copy is checked again locally before it is accepted,
-so an unavailable source or an incorrect media response is skipped automatically.
-A dropped local file is compared with the library before any provider is contacted,
-so a file that is already in the library is reported as **Already imported** within
-a moment even when a source is unreachable.
-
-Provider lookups run at the same time and wait at most 10 seconds for an answer.
-A source that does not respond is abandoned for that import and skipped for the
-next few minutes, then retried automatically. The status bar shows the current
-stage while an import runs (for example `Waiting for sources: tbib`), so a slow or
-unreachable source is visible instead of looking like a frozen import.
-
-Before creating a Review item, Jiffle also compares downloaded or selected images
-with the live local library by perceptual hash. If exactly one live image has a
-100% perceptual match, the new file is marked **Already imported** and is not
-added to the library or Review. The existing high-resolution file, source URL,
-author, tags, dimensions, and other metadata remain unchanged. This applies to
-resized and recompressed copies after a URL has been downloaded, as well as to
-local files, whose library comparison runs before the provider search. Select
-**Open in Library** in the Import history entry to open the matched item.
-
-If two or more live library items have the same perceptual hash, Jiffle does not
-choose one automatically. The import continues through the normal Review flow
-so you can resolve the ambiguity. Matches below 100%, deleted items, and missing
-or unreadable library files are also left to the existing Review or blocked-media
-workflow.
-
-For a deleted e621 post, e621 can still return the file's MD5 in its JSON metadata.
-Paste that post URL into the same Import window and Jiffle can use the MD5 to search
-TBIB and other supported sources. The e621 post remains **Source** for its tags,
-characters, parent, and author even when TBIB supplies the downloadable file; in
-that case the TBIB post is shown separately as **File source**. If no exact copy is downloadable, Jiffle checks
-local perceptual fingerprints and then performs a reverse-image search: IQDB,
-SauceNAO, plus the Danbooru and e621 reverse-search endpoints when those accounts
-are configured.
-Only a small preview is uploaded, so a re-encoded or lower-resolution copy can
-still be matched; for a video, one of its frames is sent, so a re-encoded,
-lower-resolution or sample-quality video can be matched too. Similar matches are shown in **Review** as source
-candidates with their similarity percentage. Each service reports similarity on
-its own scale, so the gate follows the service: Danbooru and IQDB.org keep matches
-from 80%, while e621, whose IQDB backend scores even an exact match near 60, keeps
-the top of its own ranking. When a match points at a supported post, Jiffle loads
-that post's tags and original file, so selecting
-**Use this source** stores the original rather than a preview. Exact matching still
-requires the same file bytes; resized and recompressed copies are handled by the
-local pHash check described above when there is one exact perceptual match; edited
-copies and ambiguous matches may still appear as Review choices.
-
-Some older or animated e621/e926 posts return `file.url` as empty even though the
-original still exists on the CDN. When the response includes a valid MD5 and file
-extension, Jiffle reconstructs the standard e621 CDN address and verifies the
-downloaded bytes against that MD5 before accepting the file. A CDN response that is
-missing, forbidden, timed out, or has the wrong hash becomes an issue for that post;
-the remaining posts in the set continue importing. e621 metadata and media requests
-use short, bounded retries for temporary network and server errors, while
-authorization, access-denied, not-found, and HTML responses are reported directly.
-
-Import has no per-file size limit. Original `GIF`, `MP4`, and `WebM` files are stored
-in the library without transcoding, regardless of their size. The image and video
-limits under **Settings → Import and limits** apply only to collection exports;
-export conversion can create a smaller copy while leaving the library original
-unchanged. Large downloads use a 15-second connection timeout and a 45-second
-stall timeout: a download can take as long as it needs while data keeps arriving,
-but a source that stops sending data is abandoned after 45 seconds. If a server
-asks Jiffle to wait before retrying, the wait is capped at 30 seconds.
-
-Universal import checks the local MD5 first, then performs exact MD5 searches on
-the supported providers. A TBIB sample, resized image, or re-encoded copy has
-different bytes and therefore cannot match the original through exact MD5;
-approximate matching is provided by the local perceptual fingerprint (images
-only), IQDB, SauceNAO, and the Danbooru and e621 reverse-search endpoints (the
-last two need the saved account credentials; SauceNAO is queried anonymously and
-needs no account). A video is reverse-searched through one of its frames, so a
-re-encoded or sample-quality copy can match the post it was taken from.
-SauceNAO indexes FurAffinity, so it is how an image that exists only
-there can be found automatically. Each reverse search runs in parallel under a
-20-second deadline, and its slowest service cannot park the import. TBIB supports
-exact MD5 lookup, while it does not provide a separate visual reverse-search API.
-Pawchive is found the same way through its SHA-256 Hash Lookup and likewise has no
-reverse-image search. A Pawchive post that only archived a preview of a file
-(shown by Pawchive as **preview only**) cannot be downloaded from Pawchive at all,
-so Jiffle reports that the source has no downloadable media and leaves the file for
-**Review**.
-
-For an e621 or e926 post set, Jiffle first checks the complete set (using the saved e621 username and API key when configured), then imports up to four posts at the same time. The final counters and issue list keep the set's original order. The set itself is not added as a local collection. A private set or a set that cannot be accessed fails before any files are downloaded. If a post is deleted or its file is unavailable, Jiffle first tries its saved MD5 with the other providers, then records an issue only when no usable copy is found. Select **Stop** in the status bar to prevent new posts from starting; posts already running are allowed to finish. The status bar shows the current phase, active posts, and elapsed time, while **Import history** shows the total duration and slowest posts. Provider and download timings help identify a slow external service; a provider or CDN can still delay an individual post. Times in the interface are converted to the computer's local time zone, while the database remains in UTC.
-
-### Browse and organize
-
-- Open **Library** to browse imported media and filter it by tags. When an online source provides an author, the author name appears on the media card and in the item details.
-- On wide screens, the library list scrolls independently while the selected item's details and actions remain visible in the right panel. The right panel has its own scroll when its contents are taller than the window.
-- Search for an exact library item with `id:123`. The media ID is shown in the item details and can be selected there to apply the same search.
-- Images imported from e621/e926, Danbooru, or Gelbooru may show a parent marker on the thumbnail. Select it to open the imported parent when it is already in the library, or to search for the source post with `parent:123`. The item details panel shows the parent ID, an external source link, and categorized character tags when the source provides them.
-- To fill in parent or character data for an older imported item, open its details and select **Refresh metadata**. The fetched result appears in **Review**; select **Apply** to add the new metadata and tags, or use the trash button to ignore it. The original file is not downloaded again.
-- In the item details, use the full-size button to open the current file by itself in a new browser tab. **Open in Editor** opens the current version beside the original and shows the complete version history. Select **Analyze current** when you want a new crop proposal.
-- Select an author in the item details to add an `author:name` filter without clearing the current search. The active author and selected media card remain highlighted while results update. Items with multiple authors show each author separately.
-- Add your own tags in the item details: type in **Add tag** and pick a suggestion from the whole library (suggestions appear after two characters), or press Enter to create the tag as typed. Manual tags are shown in a different colour and carry a small **×** to remove them. Tags supplied by the source post stay read-only, because they come from the original post.
-- Select an item to inspect its source, dimensions, tags, edits, and available actions. **Source** is the post whose metadata supplies tags, characters, parent, and author. When an exact copy had to be downloaded from another provider, the inspector also shows **File source** for the post that supplied the stored bytes; it is hidden when both URLs are the same. Images whose active version was changed in Editor have an edit icon on the library thumbnail; restoring the original removes the icon while keeping version history.
-- Images assigned to a family show a relatives marker in the Library. Open an item to see its relatives and select any relative to open it; the family can contain two or more images.
-- Open **Duplicates**, choose a similarity threshold from 70% to 100%, and select **Scan** to find similar files. Lower values find more approximate matches; higher values restrict results to nearly identical images. Scan progress remains visible in the status bar while fingerprints and image pairs are processed. Fingerprints are cached, so a repeated scan only decodes files that are new or were changed since the previous scan; images edited in **Editor** are re-analysed automatically.
-- When two similar images are related variations rather than a duplicate to remove, select **Family**. Both files remain in the library and are linked as relatives. Repeating this action with another match adds that image to the same family when the pairs overlap.
-- Open **Editor** to find images with removable empty margins. **Editor** is split into **Crop**, **Background**, and **Videos & animations** tabs, each with its own list, page size, and **Previous** / **Next** paging, so one long queue does not push the other sections off the screen. Use **Find crop candidates** for a background scan with progress and cancellation, or select an image in **Library** and choose **Open in Editor**.
-- Use the library button beside a crop candidate or in the crop review screen to return to that image in **Library** with its details open.
-- Completed scans remember images that produced no crop candidate, including skipped animations. Repeating a scan with the same detector settings skips their image analysis; changing minimum area, padding, or detector sensitivity makes them eligible for analysis again.
-- Navigation state such as library filters, the selected image, editor status, crop coordinates, zoom, scroll position, and expanded Settings sections survives page refreshes for the current browser session. Unsaved Settings values are not stored.
-- Review the source and cropped preview, adjust the Left, Top, Right, and Bottom coordinates, and select **Apply crop**. Jiffle asks for confirmation and retains the original and every accepted version. Use the Versions list to restore an earlier version, or **Reset to original** to make the original active without deleting later versions.
-- The crop scan checks static images for almost-uniform white, black, colored, or transparent margins on any side. Animated images and videos are not scanned. **No crop needed** excludes the current version from later scans; **Skip** leaves it pending. Use **Reopen review** to reconsider an earlier decision. The coordinate reset button restores the saved crop proposal only.
-- Configure the detector under **Settings → Crop analysis**: choose the cautious, normal, or sensitive preset, set the minimum removable area and retained padding, and select Local or Vision analysis for an image opened directly in Editor. Library-wide scans always use the local detector.
-- Optional Vision analysis is available for one open image at a time. Configure the OpenAI-compatible or Gemini endpoint, model, and API key under **Settings → Crop vision model**, then select **Vision model** in the crop editor. The full original is sent only after this explicit action. An OpenAI-compatible URL may point to a local model server.
-- Open **Collections** to create reusable selections and export them. In the collection builder, use one search field with the same syntax as Library: separate terms require all tags, prefix a term with `-` to exclude it, and use filters such as `author:name` when needed. Tag aliases apply to both included and excluded terms. Export limits apply to each file, not to the combined collection. By default, images and videos are each limited to 50 MB per file; oversized files are compressed only in the exported copy.
-- The collection builder keeps the selected preset and tag rules with each saved collection. When viewing a collection, these rules are shown as creation metadata. Use the Library button on any preview or saved item to open that exact media ID in **Library**.
-- In the collection builder, choose a saved preset to load its search and count, or name the current rules under **Preset name**. With a preset selected, **Save preset** updates it in place, so you can rename it without creating a duplicate; use the trash button to delete the selected preset.
-- When viewing a collection, select the copy button beside its name to copy one source link per item to the clipboard. Links follow the same order as the gallery; when a different provider supplied the stored file, its **File source** link is used.
-- Jiggie-compatible export conversions are configured under **Settings → Import and limits**. New installations convert GIF and WebM files to MP4 by default. A converted video is kept close to the source file size: Jiffle allows only a small encoding margin, never exceeds the configured video limit, and reports an export error if the target cannot be reached without changing the frame dimensions. Add, change, or remove conversion rows as needed; originals in the library are never changed.
-
-### Trim videos and animations
-
-Long clips and animations can be split into shorter fragments without changing
-the original. A fragment is a separate library item: it keeps the source link,
-author, and tags of the clip it came from, appears as a relative in the same
-family, and is exported as a standalone file.
-
-- Select a video or an animation in **Library** and choose **Open in Editor**, or open **Editor** and use **Videos and animations to review**. The full-size trim editor is always available from **Library**, whether or not the review queue is enabled.
-- In the trim editor, drag the two markers on the timeline under the video, or park the player and use **Set start here** / **Set end here**; **Jump to end** goes straight to the marked end. The highlighted band shows the exact range, and the **Start** and **End** fields accept `mm:ss.d` (for example `0:56.0`) or plain seconds. Playback never continues past the marked end, so **Preview range** stops on it. Select **Add segment**, and repeat for every part you need. Segments must not overlap and must each last at least 0.2 s.
-- Long clips zoom in for precise trimming. Scroll over the timeline to zoom toward the pointer, or use the zoom slider, **Zoom in** / **Zoom out**, **Fit all**, and **Fit selection**; the arrows pan, and dragging the empty track seeks. Shift and drag to pan the visible range. The zoom level and the segments you are editing are kept for the current browser session, so refreshing the page reopens the same trim editor with your work in place.
-- If the clip is still waiting for review and has no fragments yet, select **Keep original, no trim** to confirm it as-is from inside the editor. The clip leaves the review queue without creating any fragments.
-- Select **Save fragments**. Jiffle creates one MP4 file per segment under the media folder and links it to the original; the original keeps its place in the library. Each row shows its own state while saving (**Queued**, **Encoding**) and a **Saved** check when its fragment is written, so you can see that every part finished.
-- Open a fragment to see **Part N of Media #X** and return to its source. **Open in Editor** on a fragment reopens the same trim editor with its existing segments, where you can add, change, or remove parts. Existing fragments keep their identity, so collections that already contain them stay valid.
-- When a clip has fragments it is marked in the library and left out of automatic collection assembly by tags; the fragments are picked instead. The original can still be added to a collection manually.
-- **Settings → Import and limits → Review videos and animations for trimming** (off by default) sends every imported video and animated image, including the ones already in the library, to the Editor review queue. Confirm a clip with **Looks good** or split it with **Trim**. The new-tab button on a candidate opens the source media file by itself for a closer look before you decide. Candidates are shown as preview cards; **Move to end** rotates a clip you do not want to decide on yet to the back of the queue, while newly imported clips always join at the front.
-- **Settings → Import and limits → Block exporting unreviewed clips** (off by default) leaves clips that still wait for trim review out of automatic collection assembly and refuses to export a collection that still contains one, so an unreviewed original cannot be delivered before you confirm or split it. You can still add such a clip to a collection by hand; export asks you to review it first.
-- Trimming re-encodes each segment, so it needs FFmpeg (already required for collection exports) and takes a little time on large files.
-
-### Import and review
-
-The attempt appears in Import history immediately with an **Importing** status while
-downloading and resolving continue. Its status changes to Imported, Already
-imported, Waiting for review, or Import failed. Repeated imports of the same file
-do not create another pending Review item.
-
-Open the closed diagnostics disclosure in an Import history entry to see each
-provider grouped by stage (metadata, **Exact search (file hash)**, **Candidate
-download**, and **Similarity search (reverse image)**), with its status, result
-count, technical code, and a safe error message. A provider that supports both
-lookups appears once per stage on purpose: the exact search uses the file hash
-and works anonymously, while the similarity search uploads a preview and may
-need an account. **Exact source not found** means providers answered
-successfully without an exact match. **TBIB unavailable over the network** or
-another network status means a provider did not answer. **Source requires
-authorization** means saved credentials are missing or rejected. **TBIB
-returned a post, but the file could not be downloaded** means a post matched
-but its CDN failed (or returned bytes with the wrong MD5). **Not supported**
-means the source has no reverse-image search at all, so it was not queried.
-Similarity rows report the raw hits and how many reached the kept threshold, for
-example **16 found, 0 at ≥80%** (e621 shows its own gate, for example **2 found
-at ≥50%**, because its scale differs), so a match below that gate is not mistaken
-for a candidate. A summary such as **Found N candidates, but none
-passed verification** means every returned file was unavailable or failed the
-exact hash check. Older history entries that predate these diagnostics still
-show their recorded provider errors and timings.
-
-Both Import history and each Review card summarise a search with small badges so
-a partial result is never shown as a plain "not found". A green check marks a
-found candidate, a key marks sources that were skipped because they need an
-account, a softer badge marks a source that answered anonymously and might
-return more when you sign in, an alert marks a source that errored, and a
-search-crossed badge appears only when every configured source was checked and
-none matched. The badges combine, so a card can show found candidates together
-with an error on another source, and each source row in the expanded search log
-carries the matching status icon. The key, anonymous, and alert badges name the
-providers they refer to, so a card whose sources were only partly checked is
-clear at a glance without opening the log.
-
-Review shows its waiting items as a card grid like **Library**. Each card keeps only
-the preview and a row of actions: **Open full size**, **Run import again**, and
-**Reject**. A card never confirms a file by itself: **Open full size** opens the
-original in a full-screen viewer, and confirming is done there. When several source
-pages passed the similarity gate, that viewer opens as a side-by-side comparison: your
-staged file on the left and the matched candidate in the middle, with a details panel
-on the right. Both images keep the same size, so the extra panel helps compare similar
-matches without covering either picture. Use the left and right arrows (or the keyboard
-arrow keys) to switch between candidates; the details panel shows the provider and
-remote ID, author, source domain, dimensions, file size, match method, confidence, tags,
-and character tags, along with an **Open source** link to the page it was taken from so
-you can check it in the original gallery. Select **Use this source** to keep the candidate that is
-currently shown together with its metadata; the other staged files are removed. The
-viewer also offers **Add source URL** as a manual fallback when no usable source was
-found, and **Accept without choosing a source** to keep the staged file when you do
-not want any of the listed candidates (a confirmation appears when candidates exist).
-**Reject** removes the whole group. The history entry records the submitted input,
-resolution method, providers checked, and the URL that supplied the accepted file.
-When the source you accept (or your uploaded file) is already stored in the library,
-Jiffle does not create a second copy: it merges the new tags and empty metadata into
-the existing item, never replaces its file, and tells you **Already in library — merged
-into #X**. A file that is not byte-identical but at least 90% similar to an existing
-image is kept and queued under **Duplicates** as a possible duplicate, so you can
-choose **Keep left**, **Keep right**, **Family**, or **Ignore** yourself. Both the
-accepted and the rejected outcome are written back to Import history, which no longer
-stays on **Waiting for review**. While an accept is being applied, the card and the
-viewer show an **Applying source…** progress state with disabled buttons, so a slower
-file cannot be mistaken for a click that did nothing; when it finishes, the card leaves
-Review and the item appears in **Library**.
-
-Use the category buttons at the top of Review to narrow the list: **All**, **Source
-found** for cards where a recheck already produced source candidates, and **Needs
-source** for cards that still have none. A card with a found source is highlighted in
-green. Every card shows the badges of the search its import ran, so a card opened
-later still explains which providers answered, and a card that was rechecked by hand
-is outlined as well.
-**Run import again** stays available on both kinds of card, because a source can appear
-after a provider is added or reconfigured; select it to search that one card, or tick
-several cards and select **Recheck selected** at the top. A running card is outlined
-while its search is in progress and its button is disabled only for that request. If
-you start another search while one card is still searching, that card joins a queue: it
-gets a waiting outline and is searched automatically when the current search finishes.
-Select the log button on the card to open the full search
-results for that card, grouped by stage. A card that has not been rechecked yet
-opens the search the import itself performed (exact hash and reverse image), so
-the original provider result stays available; after a recheck, the newest
-recheck is expanded and older rechecks are collapsed, and each row shows the
-outcome, provider details, and why a source was not found. The log is removed
-when the card is confirmed or rejected. **Select all
-on screen** ticks every card on the current page. Rechecking runs the normal import resolution again, so a file
-that only had a metadata match can now combine tags from one provider with the file
-bytes from another. When no byte-identical copy exists, the recheck also runs the
-reverse-image search (using a frame for a video) and adds every match that reaches the service's similarity gate to the card, so a
-re-encoded copy can be confirmed without dropping the file again. Review shows 60
-items per page by default; use **Per page** to change the count, and **Previous** /
-**Next** to move between pages.
-
-Metadata refreshes for existing source-backed items also appear in **Review** as **Metadata update** entries. They are suggestions until you apply them, so a refresh cannot silently replace your current tags or parent relationship.
-
-By default, previously deleted media is held in **Review** before it can be added again. To block it without asking, open **Settings**, enable **Never re-import deleted media**, and save the settings.
-
-Set imports show their name, percentage, and processed count in the status bar. Select the stop button to finish the current download and stop before the next post. The final history entry is marked as completed, partial, or stopped and includes accepted, duplicate, Review, blocked, failed, and remaining counts. Expand **Issues** in a partial or failed entry to open each affected post and read its exact reason.
-
-Set access uses the `e621_login` and `e621_api_key` values saved under **Settings → Sources → e621 / e926**. Jiffle sends them with Basic Authentication while checking the set metadata and all post pages; they are not included in the Import history.
-
-### Configure sources
-
-Open **Settings** to configure source accounts, library display options, storage folders, and tag rules. Under **Sources**, add a Danbooru login and API key, an e621/e926 username and API key, a Gelbooru or Rule34.xxx User ID and API key, or FurAffinity session cookies, then use **Test** to check the connection. The Test result names each capability: it can succeed for metadata while reporting that the reverse search is off because Danbooru or e621 still needs both the login and the API key. Jiffle also warns after **Save settings** when only one half of a credential pair is filled.
-
-For Gelbooru and Rule34.xxx you can paste the account line exactly as the site shows it (`&api_key=...&user_id=...`) into either the User ID or the API key field and select **Save settings**; Jiffle fills both fields from it.
-
-Imports from e621/e926 and FurAffinity always carry the `furry` tag, even when the site does not list it, and a post on another booru (Rule34.xxx, Gelbooru, Danbooru, or TBIB) gets the tag when its `source` field points back at one of those sites. Media imported before that rule existed can be corrected with **Fill implicit tags** under **Settings → Sources**: Jiffle re-reads the saved source page of every record that is missing the tag and adds it when the original upload is furry-only.
-
-### Background replacement
-
-Background replacement is available for static images in **Library** and **Editor**. Jiffle looks for likely replacement candidates by checking whether a large connected area at the image edges is almost one color (white, black, or another uniform color). This scan is only a suggestion; always check the removal preview before saving a result.
-
-To replace a background:
-
-1. Open **Editor** and select **Find background candidates** to scan the whole library, or select an image in **Library** and choose **Replace background**. For one image, **Analyze selected** reports the estimated background area and color.
-2. In **Settings → Background removal**, choose **Processing device**: **Automatic (recommended)** uses CUDA when a compatible NVIDIA GPU is available and otherwise uses the processor; **GPU (CUDA)** requires CUDA and reports a clear error if it is unavailable; **Processor (CPU)** always stays on the CPU. The response for a completed preview shows the actual device used. Choose **Removal model** separately: Automatic uses public **BiRefNet-HR** at 2048×2048 on CUDA and the faster public **BiRefNet** at 1024×1024 on CPU. You can choose **BiRefNet-HR** explicitly, use **BiRefNet** for speed, or select **RMBG-2.0 (compatibility)** for an existing RMBG installation. BiRefNet and BiRefNet-HR are public and do not require a token. RMBG-2.0 requires a Hugging Face `Read` token when its weights are not already cached; paste it into **Hugging Face token** and save settings. **Test access** checks the selected model, including public models without a token. The token itself is never shown back by the settings API.
-3. In the image editor, open **Replace background** and select **Remove background / Preview**. The first request may take several minutes while Jiffle installs the local segmentation runtime (PyTorch, torchvision, transformers, safetensors, einops, kornia, and timm) and downloads the selected model weights. The BiRefNet-HR download is approximately 444 MB. Network access is required for setup; later requests use the cached model. A completed foreground preview is kept for the active image version, model, and device, so reopening the editor does not run the model again.
-4. Automatic mode first tries BiRefNet-HR when CUDA is available, then falls back to standard BiRefNet if loading or inference fails. If an RMBG-2.0 snapshot is cached or a valid token is configured, RMBG is the final fallback. The editor reports the model that actually produced the preview. A CPU Automatic run starts with standard BiRefNet so processing remains practical.
-5. Select **Choose background** to open the background library. Filter by category, or enter an import category and choose a local image file; imported backgrounds appear in the open modal and keep the selected category. Clicking a card only makes a temporary choice. Select **Select background** to confirm it, or use **Cancel**, **Escape**, or the backdrop to close the library without changing the current background.
-6. Adjust **Blur** if needed, check the composition preview, and press **Apply background**. Jiffle creates and activates a full-resolution PNG version; the previous version remains available under **Versions** and can be restored later. Use **Cutout**, **Mask**, and **Zoom** to inspect the generated mask before applying it.
-7. After the first run the action is named **Regenerate automatic mask**. It runs the selected model again. If the model produces the same mask, the editor reports that result; the existing preview can still be applied.
-
-Background files and foreground previews are stored in the application's data directory and are not uploaded anywhere. A foreground preview belongs to the source image version, model, and device that produced it; after switching to another version or device, create a new preview for that combination.
-
-If **Test access** reports an invalid token, create a new read token and replace the saved value. If it reports that access to RMBG-2.0 is denied, accept the model terms while logged in to Hugging Face. If it reports that Hugging Face is unavailable, check the network or proxy settings. Model setup requires enough disk space for PyTorch and the model cache. A GPU is optional; BiRefNet-HR is intended for GPU use and CPU processing is slower. If you select **GPU (CUDA)** while CUDA is unavailable, Jiffle returns `background.cuda_unavailable`; install a CUDA-enabled PyTorch build or select **Automatic (recommended)** or **Processor (CPU)**. If the preview reports that no usable subject was isolated, try another image or correct the source version before composing. If the editor reports that a preview is stale, restore the source version that produced it or run **Remove background / Preview** again.
-
-## Troubleshooting
-
-- If `python` is not recognized, install Python and enable **Add Python to PATH** during installation.
-- If startup reports that a required package is missing, Jiffle normally installs it automatically on the next start when an internet connection is available. If automatic installation is blocked by permissions or the network, install the packages manually with `python -m pip install -r requirements.txt` in the Jiffle folder and restart Jiffle.
-- If background removal reports that a runtime package is missing, keep Jiffle connected to the network and retry the action in the same Python environment used to start it. The error names the missing package, such as `einops`; install that package and restart Jiffle if automatic installation is blocked by permissions.
-- If the page does not open automatically, visit `http://127.0.0.1:5001/` manually.
-- If an online import fails, check the source credentials under **Settings** and confirm that the source URL is accessible in a browser.
-- If Vision crop analysis fails, verify that the configured model accepts images and returns JSON coordinates. Local crop scanning and manual crop controls remain available without a model.
-- If collection export reports that FFmpeg is unavailable, install FFmpeg, add its executable directory to `PATH`, and restart Jiffle. If a file cannot be reduced below its configured image or video limit, increase the corresponding per-file limit under **Settings → Import and limits**.
+Edits retain the original and version history; export conversions do not overwrite library files. Back up your media and application data before major updates or moving folders. Unsaved browser drafts are a convenience, not a backup. Use Jiffle on a trusted local network, not as an internet-facing service.
 
 ## License
 
-Jiffle is distributed under the [MIT License](LICENSE).
+[MIT](LICENSE).
