@@ -171,6 +171,14 @@ function diagnosticCapabilities(diagnostics) {
 function sourceBadge(tone, icon, text, title) {
   return `<span class="source-badge source-badge-${tone}" title="${esc(title)}"><i data-lucide="${icon}"></i>${text ? `<span>${esc(text)}</span>` : ''}</span>`;
 }
+function providerLabel(providers) {
+  // Naming the providers on the badge is what makes a partial search visible at
+  // a glance: an icon alone leaves "another source was never checked" hidden
+  // until the search log is opened.
+  const names = [...providers];
+  const shown = names.slice(0, 3).join(', ');
+  return names.length > 3 ? `${shown} +${names.length - 3}` : shown;
+}
 function sourceVerdictBadges({found = false, count = 0, diagnostics = [], outcome = ''} = {}) {
   const caps = diagnosticCapabilities(diagnostics);
   const badges = [];
@@ -179,14 +187,14 @@ function sourceVerdictBadges({found = false, count = 0, diagnostics = [], outcom
       count ? `Source found: ${count} candidate${count === 1 ? '' : 's'} to confirm` : 'Source found'));
   }
   if (caps.authProviders.size) {
-    badges.push(sourceBadge('auth', 'key-round', '',
+    badges.push(sourceBadge('auth', 'key-round', providerLabel(caps.authProviders),
       `Not checked without authorization: ${[...caps.authProviders].join(', ')}. Add credentials in Settings to search them.`));
   } else if (caps.limitedProviders.size) {
-    badges.push(sourceBadge('limited', 'shield-question', '',
+    badges.push(sourceBadge('limited', 'shield-question', providerLabel(caps.limitedProviders),
       `Searched anonymously on ${[...caps.limitedProviders].join(', ')}; signing in may find more.`));
   }
   if (caps.errorProviders.size) {
-    badges.push(sourceBadge('error', 'triangle-alert', '',
+    badges.push(sourceBadge('error', 'triangle-alert', providerLabel(caps.errorProviders),
       `Source error while checking: ${[...caps.errorProviders].join(', ')}. Open the search log for details.`));
   }
   const clean = !found && !caps.authProviders.size && !caps.limitedProviders.size && !caps.errorProviders.size;
@@ -831,11 +839,14 @@ function reviewCardHtml(item) {
     ? item.search
     : (reviewLocalSearches.get(Number(item.id)) || {});
   const searched = Number(search.count || 0) > 0;
-  // A rechecked card stays marked even after reopening the page, so the user
-  // can see that a search already ran. The badges combine "found", "needs
-  // sign-in", "anonymous only", "source error", and "nothing found" so a card
-  // can be understood without opening the log. The recheck button stays
-  // enabled because a source may have appeared since.
+  // Every card is searched once by its import, so the badges always describe
+  // that search. Only a manual recheck gets the extra "rechecked" outline, so
+  // the marker still means "a search was run again after the import". The
+  // badges combine "found", "needs sign-in", "anonymous only", "source error",
+  // and "nothing found", and name the affected providers, so a card can be
+  // understood without opening the log. The recheck button stays enabled
+  // because a source may have appeared since.
+  const rechecked = searched && search.origin !== 'import';
   const diagnostics = (search.last_details || {}).provider_diagnostics || [];
   const verdictBadges = searched
     ? `<span class="review-card-badges" title="${esc(reviewSearchTitle(search))}">${sourceVerdictBadges({found, count:candidateCount, diagnostics, outcome:search.last_outcome})}</span>`
@@ -850,7 +861,7 @@ function reviewCardHtml(item) {
   // A card stays visibly busy while its source is being applied, so a slow
   // accept cannot be mistaken for "nothing happened" and clicked again.
   const acceptingBadge = accepting ? '<span class="review-card-accepting-badge"><i data-lucide="refresh-cw" class="spin"></i>Applying source…</span>' : '';
-  const cardClass = ['media-card', 'review-card', found ? 'review-card-source-found' : '', searched ? 'review-card-already-searched' : '', accepting ? 'review-card-accepting' : ''].filter(Boolean).join(' ');
+  const cardClass = ['media-card', 'review-card', found ? 'review-card-source-found' : '', rechecked ? 'review-card-already-searched' : '', accepting ? 'review-card-accepting' : ''].filter(Boolean).join(' ');
   return `<article class="${cardClass}" data-review-kind="candidate" data-review-id="${item.id}"><div class="review-card-preview" data-open-review="${item.id}" title="Open full size"><img loading="lazy" src="${esc(item.thumbnail_url)}" alt="">${reason}${verdictBadges}${acceptingBadge}<label class="review-card-select" title="Select for recheck"><input type="checkbox" data-review-select="${item.id}"${selected}></label></div><div class="review-card-actions"><button type="button" class="icon-btn" data-open-review="${item.id}" title="Open full size to choose a source"><i data-lucide="maximize-2"></i></button>${recheck}${log}<button type="button" class="icon-btn danger" data-review-reject="${item.id}" title="Reject"><i data-lucide="trash-2"></i></button></div></article>`;
 }
 

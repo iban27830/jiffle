@@ -422,7 +422,15 @@ def _source_candidates(review_id):
 
 
 def _review_search_summaries(review_ids):
-    """Return ``{review_id: summary}`` for the cards that were already searched."""
+    """Return ``{review_id: summary}`` for every card that has a source search.
+
+    A card is searched twice in its life: once by the import that created it
+    and again whenever the user rechecks it.  The import result is stored with
+    the background job rather than in ``review_search_attempts``, so a card that
+    was never manually rechecked would otherwise look unsearched even though its
+    provider diagnostics already exist.  The import search is used as the
+    fallback so the Review card can show the same badges as its log.
+    """
     unique_ids = [int(value) for value in dict.fromkeys(review_ids)]
     if not unique_ids:
         return {}
@@ -449,8 +457,51 @@ def _review_search_summaries(review_ids):
             "last_message": row["message"],
             "last_details": details,
             "last_at": row["created_at"],
+            "origin": "review",
         })
+    # Cards with no recorded recheck still carry the provider search the import
+    # ran, so surface it instead of showing an empty "not searched" state.
+    missing = [review_id for review_id in unique_ids if review_id not in summaries]
+    for review_id, attempt in _import_search_attempts(missing).items():
+        summaries[review_id] = {
+            "count": 1,
+            "last_outcome": attempt["outcome"],
+            "last_code": attempt["code"],
+            "last_message": attempt["message"],
+            "last_details": attempt["details"],
+            "last_at": attempt["created_at"],
+            "origin": "import",
+        }
     return summaries
+
+
+def _import_search_attempts(review_ids):
+    """Return ``{review_id: import_search_attempt}`` for pending cards.
+
+    One query covers a page of cards so the Review list does not fetch each
+    import job on its own.
+    """
+    unique_ids = [int(value) for value in dict.fromkeys(review_ids)]
+    if not unique_ids:
+        return {}
+    placeholders = ",".join("?" for _ in unique_ids)
+    rows = get_database().execute(
+        "SELECT review.id AS review_id, review.reason, job.result_json, "
+        "job.finished_at, job.started_at "
+        "FROM review_items review "
+        "JOIN import_candidates candidate ON candidate.id=review.import_candidate_id "
+        "JOIN background_jobs job ON job.id=candidate.job_id "
+        f"WHERE review.id IN ({placeholders}) AND review.status='pending'",
+        unique_ids,
+    ).fetchall()
+    attempts = {}
+    for row in rows:
+        attempt = _import_search_attempt_from_row(
+            row["reason"], row["result_json"], row["finished_at"] or row["started_at"]
+        )
+        if attempt is not None:
+            attempts[int(row["review_id"])] = attempt
+    return attempts
 
 
 def _import_search_attempt(review_id):
@@ -469,10 +520,19 @@ def _import_search_attempt(review_id):
         "WHERE review.id=? AND review.status='pending'",
         (review_id,),
     ).fetchone()
-    if row is None or not row["result_json"]:
+    if row is None:
+        return None
+    return _import_search_attempt_from_row(
+        row["reason"], row["result_json"], row["finished_at"] or row["started_at"]
+    )
+
+
+def _import_search_attempt_from_row(reason, result_json, created_at):
+    """Build one import search attempt from a stored background job result."""
+    if not result_json:
         return None
     try:
-        payload = json.loads(row["result_json"] or "{}")
+        payload = json.loads(result_json or "{}")
     except (TypeError, ValueError):
         return None
     if not isinstance(payload, dict):
@@ -493,7 +553,7 @@ def _import_search_attempt(review_id):
     if not diagnostics and not errors and not status and not resolution_error:
         return None
     candidate_count = int(payload.get("source_candidates") or 0)
-    if row["reason"] == "source_candidates" or candidate_count:
+    if reason == "source_candidates" or candidate_count:
         outcome = "candidates"
     elif resolution_error:
         # Only a search that could not run at all is "unavailable"; a completed
@@ -515,7 +575,7 @@ def _import_search_attempt(review_id):
         "code": resolution_error.get("code"),
         "message": resolution_error.get("message"),
         "details": attempt_details,
-        "created_at": row["finished_at"] or row["started_at"],
+        "created_at": created_at,
     }
 
 

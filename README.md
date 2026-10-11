@@ -292,7 +292,9 @@ return more when you sign in, an alert marks a source that errored, and a
 search-crossed badge appears only when every configured source was checked and
 none matched. The badges combine, so a card can show found candidates together
 with an error on another source, and each source row in the expanded search log
-carries the matching status icon.
+carries the matching status icon. The key, anonymous, and alert badges name the
+providers they refer to, so a card whose sources were only partly checked is
+clear at a glance without opening the log.
 
 Review shows its waiting items as a card grid like **Library**. Each card keeps only
 the preview and a row of actions: **Open full size**, **Run import again**, and
@@ -327,7 +329,9 @@ Review and the item appears in **Library**.
 Use the category buttons at the top of Review to narrow the list: **All**, **Source
 found** for cards where a recheck already produced source candidates, and **Needs
 source** for cards that still have none. A card with a found source is highlighted in
-green, and a rechecked card keeps its search badges even after the page reopens.
+green. Every card shows the badges of the search its import ran, so a card opened
+later still explains which providers answered, and a card that was rechecked by hand
+is outlined as well.
 **Run import again** stays available on both kinds of card, because a source can appear
 after a provider is added or reconfigured; select it to search that one card, or tick
 several cards and select **Recheck selected** at the top. A running card is outlined

@@ -228,6 +228,9 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
 .review-log-entry .source-badges { margin-left: 4px; }
 .source-badge { display: inline-flex; align-items: center; gap: 3px; padding: 2px 6px; border-radius: 999px; font-size: 11px; font-weight: 700; line-height: 1.5; cursor: help; box-shadow: 0 1px 3px rgba(18,30,36,.2); }
 .source-badge [data-lucide] { width: 12px; height: 12px; }
+/* On a card the badge can name several sources; keep the pill from stretching
+   past the thumbnail and let a long list end in an ellipsis. */
+.review-card-badges .source-badge > span { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .source-badge-found { color: #075e50; background: rgba(223,243,238,.96); }
 .source-badge-auth { color: #7a3d00; background: rgba(255,236,204,.97); }
 .source-badge-limited { color: #334f7a; background: rgba(226,236,252,.97); }
