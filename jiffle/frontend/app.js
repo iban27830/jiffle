@@ -844,7 +844,9 @@ function reviewCardHtml(item) {
     ? 'Search again - a new source may have appeared since'
     : 'Run the source search again';
   const recheck = `<button type="button" class="icon-btn" data-review-reimport="${item.id}" title="${esc(recheckTitle)}"><i data-lucide="refresh-cw"></i></button>`;
-  const log = searched ? `<button type="button" class="icon-btn" data-review-log="${item.id}" title="View the search results for this card"><i data-lucide="scroll-text"></i></button>` : '';
+  // Every card can open its log: a card with no recheck still shows the search
+  // the import itself ran, so the button is not limited to already-checked cards.
+  const log = `<button type="button" class="icon-btn" data-review-log="${item.id}" title="View the search results for this card"><i data-lucide="scroll-text"></i></button>`;
   // A card stays visibly busy while its source is being applied, so a slow
   // accept cannot be mistaken for "nothing happened" and clicked again.
   const acceptingBadge = accepting ? '<span class="review-card-accepting-badge"><i data-lucide="refresh-cw" class="spin"></i>Applying source…</span>' : '';

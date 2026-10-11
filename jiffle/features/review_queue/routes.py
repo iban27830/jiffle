@@ -28,6 +28,12 @@ review_blueprint = Blueprint("review_queue", __name__)
 
 _REVIEW_FILTERS = ("all", "source_found", "needs_source")
 
+# Import search statuses that mean a provider could not answer, so a card that
+# never reached a candidate is described as "unavailable" instead of "not found".
+_IMPORT_SEARCH_ERROR_STATUSES = {
+    "network_error", "authorization_error", "timeout", "unavailable",
+}
+
 
 @review_blueprint.get("/api/v1/review-items")
 def list_review_items():
@@ -453,13 +459,75 @@ def _review_search_summaries(review_ids):
     return summaries
 
 
+def _import_search_attempt(review_id):
+    """Describe the source search the import itself ran for a pending card.
+
+    A review card is created at the end of an import resolution, so its first
+    provider search is stored with the import job instead of in
+    ``review_search_attempts``.  Reading it back gives every card a log, not
+    only the ones the user manually rechecked.
+    """
+    row = get_database().execute(
+        "SELECT review.reason, job.result_json, job.finished_at, job.started_at "
+        "FROM review_items review "
+        "JOIN import_candidates candidate ON candidate.id=review.import_candidate_id "
+        "JOIN background_jobs job ON job.id=candidate.job_id "
+        "WHERE review.id=? AND review.status='pending'",
+        (review_id,),
+    ).fetchone()
+    if row is None or not row["result_json"]:
+        return None
+    try:
+        payload = json.loads(row["result_json"] or "{}")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    details = payload.get("resolution")
+    if not isinstance(details, dict):
+        details = {}
+    diagnostics = details.get("provider_diagnostics")
+    if not isinstance(diagnostics, list):
+        diagnostics = []
+    errors = details.get("provider_errors")
+    if not isinstance(errors, list):
+        errors = []
+    status = str(details.get("search_status") or details.get("search_outcome") or "")
+    resolution_error = details.get("resolution_error")
+    if not isinstance(resolution_error, dict):
+        resolution_error = {}
+    if not diagnostics and not errors and not status and not resolution_error:
+        return None
+    candidate_count = int(payload.get("source_candidates") or 0)
+    if row["reason"] == "source_candidates" or candidate_count:
+        outcome = "candidates"
+    elif status in _IMPORT_SEARCH_ERROR_STATUSES or errors or resolution_error:
+        outcome = "unavailable"
+    else:
+        outcome = "no_source"
+    attempt_details = {}
+    for key in ("provider_diagnostics", "provider_errors"):
+        value = details.get(key)
+        if value:
+            attempt_details[key] = value
+    if candidate_count:
+        attempt_details["candidate_count"] = candidate_count
+    return {
+        "id": None,
+        "outcome": outcome,
+        "code": resolution_error.get("code"),
+        "message": resolution_error.get("message"),
+        "details": attempt_details,
+        "created_at": row["finished_at"] or row["started_at"],
+    }
+
+
 def _review_search_attempts(review_id):
     rows = get_database().execute(
         "SELECT id, outcome, code, message, details_json, created_at "
         "FROM review_search_attempts WHERE review_item_id=? ORDER BY id",
         (review_id,),
     ).fetchall()
-    import json
     items = []
     for row in rows:
         try:
@@ -471,7 +539,12 @@ def _review_search_attempts(review_id):
             "message": row["message"], "details": details,
             "created_at": row["created_at"],
         })
-    return items
+    if items:
+        return items
+    # A card that was never rechecked still had the search the import ran, so
+    # its log is not empty just because no recheck has been recorded yet.
+    initial = _import_search_attempt(review_id)
+    return [initial] if initial else []
 
 
 def _source_candidate_file(review_id, candidate_id):

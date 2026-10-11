@@ -335,10 +335,12 @@ while its search is in progress and its button is disabled only for that request
 you start another search while one card is still searching, that card joins a queue: it
 gets a waiting outline and is searched automatically when the current search finishes.
 Select the log button on the card to open the full search
-results for that card, grouped by stage, with the newest recheck expanded and
-older rechecks collapsed; each row shows the outcome, provider details, and why
-a source was not found. The log is removed when the card is confirmed or
-rejected. **Select all
+results for that card, grouped by stage. A card that has not been rechecked yet
+opens the search the import itself performed (exact hash and reverse image), so
+the original provider result stays available; after a recheck, the newest
+recheck is expanded and older rechecks are collapsed, and each row shows the
+outcome, provider details, and why a source was not found. The log is removed
+when the card is confirmed or rejected. **Select all
 on screen** ticks every card on the current page. Rechecking runs the normal import resolution again, so a file
 that only had a metadata match can now combine tags from one provider with the file
 bytes from another. When no byte-identical copy exists, the recheck also runs the
