@@ -155,7 +155,7 @@ def run_url_import_job(
                 ),
             )
             media_item_id = int(cursor.lastrowid)
-            create_original_revision(connection, media_item_id)
+            create_original_revision(connection, media_item_id, settings)
             _attach_source(connection, media_item_id, source)
             connection.executemany(
                 "INSERT INTO media_tags (media_item_id, tag) VALUES (?, ?)",

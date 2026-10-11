@@ -855,6 +855,29 @@ def migration_35(connection: sqlite3.Connection) -> None:
         )
 
 
+
+def migration_36(connection: sqlite3.Connection) -> None:
+    """Keep crop admission decisions attached to the version that was checked."""
+    connection.execute(
+        "CREATE TABLE crop_review_checks ("
+        "revision_id INTEGER PRIMARY KEY REFERENCES media_revisions(id) ON DELETE CASCADE, "
+        "status TEXT NOT NULL CHECK(status IN ('pending','passed','needs_crop','failed')), "
+        "parameter_signature TEXT NOT NULL DEFAULT '', error_code TEXT, error_message TEXT, "
+        "updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    )
+    connection.execute(
+        "INSERT INTO crop_review_checks (revision_id,status) "
+        "SELECT revision_id, CASE WHEN SUM(status='no_crop_needed')>0 THEN 'passed' "
+        "WHEN SUM(status IN ('pending','deferred','cropped'))>0 THEN 'needs_crop' "
+        "ELSE 'failed' END FROM crop_analyses GROUP BY revision_id"
+    )
+    connection.execute(
+        "INSERT OR IGNORE INTO crop_review_checks (revision_id,status) "
+        "SELECT id,'passed' FROM media_revisions WHERE operation='crop'"
+    )
+    connection.execute("CREATE INDEX crop_review_status_idx ON crop_review_checks(status)")
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -891,6 +914,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (33, migration_33),
     (34, migration_34),
     (35, migration_35),
+    (36, migration_36),
 )
 
 

@@ -125,7 +125,7 @@ def accept_review_item(
             ),
         )
         media_item_id = int(cursor.lastrowid)
-        create_original_revision(connection, media_item_id)
+        create_original_revision(connection, media_item_id, settings)
         perceptual_hash = _store_new_fingerprint(
             connection, media_item_id, row["media_type"],
             settings.media_path / stored_path,
@@ -224,7 +224,7 @@ def accept_source_candidate(
                  json.dumps(list(source.character_tags)) if source else "[]"),
             )
             media_item_id = int(cursor.lastrowid)
-            create_original_revision(connection, media_item_id)
+            create_original_revision(connection, media_item_id, settings)
             perceptual_hash = _store_new_fingerprint(
                 connection, media_item_id, row["media_type"],
                 settings.media_path / stored_path,

@@ -33,10 +33,11 @@ def parse_collection_query(value: object) -> tuple[tuple[str, ...], tuple[str, .
 
 
 class CollectionFailure(Exception):
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, details=None):
         super().__init__(message)
         self.code = code
         self.message = message
+        self.details = details or {}
 
 
 @dataclass(frozen=True)
@@ -113,6 +114,7 @@ def build_collection_preview(
     excluded_ids: tuple[int, ...] = (),
     variant_count: int = 32,
     block_unreviewed: bool = False,
+    block_crop: bool = False,
 ) -> CollectionComposition:
     if not included_tags:
         raise CollectionFailure("collections.tags_required", "At least one included tag is required.")
@@ -120,7 +122,7 @@ def build_collection_preview(
         raise CollectionFailure("collections.invalid_count", "Requested count must be from 1 to 1000.")
     candidates = _matching_candidates(
         connection, included_tags, excluded_tags, excluded_ids,
-        block_unreviewed=block_unreviewed,
+        block_unreviewed=block_unreviewed, block_crop=block_crop,
     )
     available_count = len(candidates)
     target = min(requested_count, available_count)
@@ -140,9 +142,11 @@ def build_collection_preview(
 
 
 def replace_collection_items(
-    connection: sqlite3.Connection, collection_id: int, media_ids: list[int]
+    connection: sqlite3.Connection, collection_id: int, media_ids: list[int], settings=None
 ) -> None:
     _collection(connection, collection_id)
+    if settings is not None:
+        ensure_crop_eligible(connection, settings, media_ids)
     if len(media_ids) != len(set(media_ids)):
         raise CollectionFailure(
             "collections.duplicate_item", "A collection cannot contain an item twice."
@@ -219,6 +223,10 @@ def preview_export(
         # The collection can still be exported after the waiting clips are
         # confirmed or split; this is a warning so the builder can explain why.
         warnings.append("unreviewed_trim")
+    if settings.crop_review_enabled:
+        from jiffle.features.crop_editor.review import blocked_media
+        if blocked_media(connection, [row["id"] for row in rows]):
+            violations.append("unreviewed_crop")
     return ExportPreview(len(rows), total_size, author_counts, tuple(violations), tuple(warnings))
 
 
@@ -257,6 +265,7 @@ def export_collection_directory(
     Used both by the background folder export and by the browser archive
     download, so both deliveries produce exactly the same files.
     """
+    ensure_crop_eligible(connection, settings, [row["id"] for row in _collection_media(connection, collection_id)])
     preview = preview_export(connection, settings, collection_id)
     if preview.violations:
         raise CollectionFailure("exports.constraints_failed", ", ".join(preview.violations))
@@ -422,11 +431,14 @@ def _collection_media(connection, collection_id):
 
 
 def _matching_candidates(
-    connection, included_tags, excluded_tags, excluded_ids, block_unreviewed=False,
+    connection, included_tags, excluded_tags, excluded_ids, block_unreviewed=False, block_crop=False,
 ):
     aliases = build_tag_alias_map(connection)
 
     clauses = ["item.deleted_at IS NULL"]
+    if block_crop:
+        from jiffle.features.crop_editor.review import admission_sql
+        clauses.append(admission_sql())
     parameters: list[object] = []
     # A clip that was split into fragments keeps its place in the library but
     # is never picked automatically: the fragments stand in for it.
@@ -737,3 +749,18 @@ def _fail_export(connection, job_id, code, message):
         "finished_at=CURRENT_TIMESTAMP WHERE id=?", (code, message, job_id)
     )
     connection.commit()
+
+
+def ensure_crop_eligible(connection, settings, media_ids):
+    if not settings.crop_review_enabled:
+        return
+    from jiffle.features.crop_editor.review import blocked_media
+    blocked = blocked_media(connection, media_ids)
+    if blocked:
+        ids = [row["id"] for row in blocked]
+        raise CollectionFailure(
+            "collections.crop_review_required",
+            "Crop review required for media " + ", ".join(f"#{value}" for value in ids) +
+            ". Apply a crop or confirm No crop needed in Editor.",
+            {"media_ids": ids, "items": blocked},
+        )

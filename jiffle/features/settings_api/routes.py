@@ -1,7 +1,6 @@
 from dataclasses import replace
 from pathlib import Path
 import platform
-import webbrowser
 from flask import Blueprint, current_app, jsonify, request
 import requests
 
@@ -45,6 +44,7 @@ def update_settings():
         "collection_export_mode",
         "max_items_per_author", "max_image_export_size_bytes",
         "max_video_export_size_bytes", "export_format_rules", "block_previously_deleted",
+        "crop_review_enabled",
         "trim_review_enabled",
         "trim_block_unreviewed_export",
         "crop_vision_url", "crop_vision_key", "crop_vision_model", "crop_vision_format",
@@ -204,13 +204,8 @@ def test_source_provider(provider_name: str):
 
 @settings_blueprint.post("/api/v1/settings/furaffinity/open-login")
 def open_furaffinity_login():
-    try:
-        opened = webbrowser.open("https://www.furaffinity.net/login/")
-    except webbrowser.Error:
-        opened = False
-    if not opened:
-        return _error("providers.browser_failed", "The browser could not be opened.", 500)
-    return jsonify({"status": "opened"})
+    # Compatibility endpoint: only the user's browser should open external pages.
+    return jsonify({"status": "link", "url": "https://www.furaffinity.net/login/"})
 
 
 @settings_blueprint.get("/api/v1/history")
@@ -319,6 +314,8 @@ def _validated_update(settings, payload):
         values["block_previously_deleted"], bool
     ):
         raise ValueError("block_previously_deleted must be boolean.")
+    if "crop_review_enabled" in values and not isinstance(values["crop_review_enabled"], bool):
+        raise ValueError("crop_review_enabled must be boolean.")
     if "trim_review_enabled" in values and not isinstance(
         values["trim_review_enabled"], bool
     ):
@@ -382,6 +379,7 @@ def _public_settings(settings):
         "max_video_export_size_bytes": settings.max_video_export_size_bytes,
         "export_format_rules": dict(settings.export_format_rules),
         "block_previously_deleted": settings.block_previously_deleted,
+        "crop_review_enabled": settings.crop_review_enabled,
         "trim_review_enabled": settings.trim_review_enabled,
         "trim_block_unreviewed_export": settings.trim_block_unreviewed_export,
         "crop_vision_url": settings.crop_vision_url,

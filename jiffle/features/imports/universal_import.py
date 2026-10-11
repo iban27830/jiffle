@@ -1581,7 +1581,7 @@ def _accept_downloaded(
              json.dumps(list(metadata_source.character_tags)) if metadata_source else "[]"),
         )
         media_id = int(cursor.lastrowid)
-        create_original_revision(connection, media_id)
+        create_original_revision(connection, media_id, settings)
         if inspection.media_type == "image":
             try:
                 with Image.open(path) as image:

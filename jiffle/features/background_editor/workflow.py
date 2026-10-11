@@ -669,6 +669,8 @@ def _store_composed_revision(
             "VALUES ('background.created','media',?,?)",
             (media_id, json.dumps({"revision_id": revision_id, "preview_id": preview["id"]})),
         )
+        from jiffle.features.crop_editor.review import check_new_media
+        check_new_media(connection, settings, media_id)
         connection.commit()
         return revision_id
     except BackgroundFailure:

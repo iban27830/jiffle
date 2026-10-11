@@ -472,6 +472,7 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
 .toggle::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.2); transition: transform .15s; }
 .toggle-line input:checked + .toggle { background: var(--accent); }
 .toggle-line input:checked + .toggle::after { transform: translateX(18px); }
+.toggle-line input:focus-visible + .toggle { outline: 2px solid var(--accent); outline-offset: 3px; }
 .settings-fields-2 { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 0 14px; }
 .settings-fields-2 .form-row { min-width: 0; }
 .prompt-control { min-height: 130px; }
@@ -650,4 +651,30 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
 
 @media (max-width: 900px) {
   .trim-layout { grid-template-columns: 1fr; }
+}
+
+
+/* Tool identity is repeated in icons, labels and color, not color alone. */
+.tone-crop { --tool-ink: #855000; --tool-fill: #fff0cd; }
+.tone-background { --tool-ink: #6540a2; --tool-fill: #f0e7ff; }
+.tone-trim { --tool-ink: #006787; --tool-fill: #ddf4ff; }
+.editor-nav-counts { display:flex; flex-wrap:wrap; gap:5px; padding:0 10px 5px 39px; }
+.editor-nav-counts:has(> :not([hidden])) { padding-bottom:8px; }
+.editor-queue-badge { display:inline-flex; align-items:center; justify-content:center; gap:4px; min-width:35px; min-height:27px; padding:3px 6px; border:0; border-radius:5px; color:var(--tool-ink); background:var(--tool-fill); cursor:pointer; }
+.editor-queue-badge [data-lucide] { width:13px; height:13px; }
+.editor-queue-badge:focus-visible, .editor-tab:focus-visible { outline:2px solid #61bfae; outline-offset:2px; }
+.editor-tab.tone-crop, .editor-tab.tone-background, .editor-tab.tone-trim { color:var(--tool-ink); }
+.editor-tab.active { background:var(--tool-fill, var(--accent-soft)); border-color:var(--tool-ink,var(--accent)); }
+.editor-tab-count { font-size:.8em; font-variant-numeric:tabular-nums; background:var(--tool-fill); color:var(--tool-ink); border-radius:10px; padding:1px 7px; }
+.image-tool-tabs { margin-bottom:14px; }
+.crop-admission-notice { background:#fff6df; border:1px solid #dfc387; color:#71470b; padding:12px; border-radius:6px; margin-bottom:12px; }
+.crop-admission-notice small { display:block; margin-top:5px; }
+.invalid-selection { border-color:var(--bad); background:#fff8f8; }
+.selection-issue { color:var(--bad); font-size:.85em; margin:5px 0 0; }
+a.btn, a.icon-btn { text-decoration:none; color:inherit; }
+[hidden] { display:none !important; }
+@media (max-width:760px) {
+  .editor-nav-counts { padding-left:4px; }
+  .editor-queue-badge { min-width:30px; }
+  .editor-tabs { flex-wrap:wrap; }
 }

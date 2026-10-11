@@ -38,6 +38,9 @@ def analyze_with_vision(connection, settings, media_id):
         raise CropFailure("crop.vision_invalid_response","Vision model did not return a safe crop box.") from error
     removed=100*(1-(box[2]-box[0])*(box[3]-box[1])/(width*height))
     connection.execute("INSERT INTO crop_analyses (media_item_id,revision_id,method,status,left_px,top_px,right_px,bottom_px,confidence,removed_area,parameters_json) VALUES (?,?,?,'pending',?,?,?,?,?,?,?) ON CONFLICT(revision_id,method) DO UPDATE SET left_px=excluded.left_px,top_px=excluded.top_px,right_px=excluded.right_px,bottom_px=excluded.bottom_px,confidence=excluded.confidence,removed_area=excluded.removed_area,status='pending'",(media_id,row["active_revision_id"],"vision",*box,70,removed,json.dumps({"model":settings.crop_vision_model}))); connection.commit()
+    from .review import record_check
+    record_check(connection, row["active_revision_id"], "needs_crop")
+    connection.commit()
     return connection.execute("SELECT * FROM crop_analyses WHERE revision_id=? AND method='vision'",(row["active_revision_id"],)).fetchone()
 
 

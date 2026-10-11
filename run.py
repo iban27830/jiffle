@@ -8,8 +8,6 @@ import importlib.util
 import os
 import subprocess
 import sys
-from threading import Timer
-import webbrowser
 
 
 # Module import names mapped to the pip packages that provide them. These
@@ -68,15 +66,14 @@ def main() -> None:
     if os.environ.get("JIFFLE_NO_AUTO_INSTALL") != "1":
         ensure_startup_packages()
 
-    host = os.environ.get("HOST", "127.0.0.1")
+    host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", "5001"))
 
     from jiffle import create_app
 
     app = create_app()
 
-    if not os.environ.get("JIFFLE_NO_BROWSER"):
-        Timer(1, lambda: webbrowser.open_new(f"http://127.0.0.1:{port}/")).start()
+    print(f"Open Jiffle in your browser on port {port}.")
     app.run(host=host, port=port, debug=False)
 
 

@@ -211,7 +211,7 @@ def _import_file(
             ),
         )
         media_item_id = int(cursor.lastrowid)
-        create_original_revision(connection, media_item_id)
+        create_original_revision(connection, media_item_id, settings)
         connection.execute(
             "UPDATE import_candidates SET status = 'accepted', stored_path = ?, "
             "media_item_id = ? WHERE id = ?",

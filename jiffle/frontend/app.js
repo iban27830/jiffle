@@ -1,3 +1,4 @@
+import {parseRoute, libraryHref, editorDraftKey, imageDraftFields, pickImageDraft, restoreImageDraft, restoreTrimDraft, selectionRulesMatch} from './ui_state.js';
 ﻿import {api, waitForJob} from './api.js';
 
 import {parseLibrarySearch, withAuthorFilter, toggleSearchTerm} from './library_search.js';
@@ -14,6 +15,10 @@ const actions = document.querySelector('#headerActions');
 const statusText = document.querySelector('#statusText');
 const jobStatus = document.querySelector('#jobStatus');
 let currentView = 'library';
+let renderEpoch = 0;
+let editorCounts = {crop: 0, background: 0, trim: 0};
+const collectionDraftRequests = new Map();
+let collectionRequestSequence = 0;
 let libraryOffset = 0;
 let reviewOffset = 0;
 let reviewSearching = false;
@@ -36,7 +41,12 @@ const UI_STATE_KEY = 'jiffle-session-state-v1';
 let uiState = (() => { try { return JSON.parse(sessionStorage.getItem(UI_STATE_KEY) || '{}'); } catch { return {}; } })();
 function viewState(view) { return uiState[view] || {}; }
 function saveViewState(view, changes) {
-  uiState = {...uiState, [view]: {...viewState(view), ...changes}};
+  const next = {...viewState(view), ...changes};
+  if (view === 'editor' && next.editingMediaId && Number(next.editingMediaId)===Number(next.targetMediaId) && next.editingRevisionId && imageDraftFields.some(key => key in changes)) {
+    const key = editorDraftKey(next.editingMediaId, next.editingRevisionId);
+    next.imageDrafts = {...next.imageDrafts, [key]: pickImageDraft(next)};
+  }
+  uiState = {...uiState, [view]: next};
   try { sessionStorage.setItem(UI_STATE_KEY, JSON.stringify(uiState)); } catch {}
 }
 function saveScrollState() {
@@ -55,10 +65,35 @@ function restoreScrollState(view) {
   });
 }
 
+function activateImageDraft(mediaId, revisionId, tool) {
+  const previous = viewState('editor');
+  const key=editorDraftKey(mediaId,revisionId);
+  if(!previous.imageDrafts?.[key]&&Object.keys(previous.imageDrafts||{}).some(value=>value.startsWith(`${Number(mediaId)}:`))){
+    toast('This version has a separate draft. Coordinates and masks from another version were not applied.');
+  }
+  const restored = restoreImageDraft(previous, mediaId, revisionId);
+  const chosen = tool || restored.tool || 'crop';
+  saveViewState('editor', {...restored, tool: chosen, backgroundOpen: chosen === 'background',
+    targetMediaId: Number(mediaId), trimTarget: false, trimMediaId: null});
+}
+function libraryTarget() { return libraryPrefs().openLibraryInNewTab ? '_blank' : '_self'; }
+function libraryLinkClick(event) {
+  // Leave default anchor behavior intact, including middle/Ctrl/Cmd-click.
+  event.currentTarget.target = libraryTarget();
+  saveScrollState();
+}
+function openEditorForMedia(media, tool = null) {
+  const trim = media.type === 'video' || Boolean(media.is_animated);
+  const requested = tool || (trim ? 'trim' : '');
+  saveViewState('editor', {targetMediaId: Number(media.id), analysisId: null, trimTarget: trim,
+    trimMediaId: null, requestedTool: requested, fromQueue: false});
+  navigate(`editor?media=${media.id}${requested ? `&tool=${requested}` : ''}`);
+}
+
 const FONT_SIZE_KEY = 'jiffle-font-size';
 const allowedFontSizes = [14, 16, 18, 20];
 const LIBRARY_PREFS_KEY = 'jiffle-library-preferences';
-const defaultLibraryPrefs = {pageSize: 40, cardSize: 'medium', showCardInfo: true, inspectorWidth: 320};
+const defaultLibraryPrefs = {pageSize: 40, cardSize: 'medium', showCardInfo: true, inspectorWidth: 320, openLibraryInNewTab: true};
 function libraryPrefs() {
   try {
     const saved = JSON.parse(localStorage.getItem(LIBRARY_PREFS_KEY) || '{}');
@@ -611,6 +646,7 @@ async function monitorBackgroundScan(job) {
 async function restoreBackgroundScanMonitor(){try{const active=await api('/api/v1/background-scan-jobs/active');if(active.job)monitorBackgroundScan(active.job)}catch{}}
 
 async function showLibrary() {
+  const epoch=renderEpoch;
   const state = viewState('library');
   librarySearch = state.search ?? librarySearch;
   libraryOffset = Number(state.offset ?? libraryOffset);
@@ -633,7 +669,9 @@ async function showLibrary() {
     const type = document.querySelector('#mediaType').value;
     const filters = `${parsedSearch.includedTags.map(tag => `&tag=${encodeURIComponent(tag)}`).join('')}${parsedSearch.excludedTags.map(tag => `&exclude_tag=${encodeURIComponent(tag)}`).join('')}`;
     saveViewState('library', {search:librarySearch, offset:libraryOffset, mediaType:type});
+    if(parseRoute(location.hash).id && librarySearch!==`id:${parseRoute(location.hash).id}`)history.replaceState(null,'','#library');
     const data = await api(`/api/v1/media?limit=${pageSize}&offset=${libraryOffset}&q=${query}&type=${type}${authorFilter}${idFilter}${parentFilter}${filters}`);
+    if(epoch!==renderEpoch||!document.querySelector('#gallery'))return;
     meta.textContent = `${data.page.total} files`;
     statusText.textContent = `Showing ${data.items.length}`;
     document.querySelector('#activeFilters').innerHTML = activeFiltersHtml();
@@ -670,6 +708,7 @@ async function showLibrary() {
   bindInspectorResize();
   icons(); await load();
   const selectedId = Number(state.selectedMediaId || 0);
+  if(epoch!==renderEpoch)return;
   if (selectedId) { try { await inspectMedia(selectedId); } catch { saveViewState('library',{selectedMediaId:null}); } }
   restoreScrollState('library');
 }
@@ -699,7 +738,10 @@ function bindInspectorResize() {
 }
 
 async function inspectMedia(id) {
-  selectedMedia = await api(`/api/v1/media/${id}`);
+  const epoch=renderEpoch;
+  const loadedMedia = await api(`/api/v1/media/${id}`);
+  if(epoch!==renderEpoch||currentView!=='library')return;
+  selectedMedia=loadedMedia;
   saveViewState('library', {selectedMediaId:id});
   document.querySelectorAll('.media-card').forEach(card => card.classList.toggle('selected', Number(card.dataset.id) === id));
   const pane = document.querySelector('#inspector');
@@ -713,7 +755,7 @@ async function inspectMedia(id) {
   const characters = selectedMedia.character_tags?.length ? `<div class="field"><label>Characters</label><div class="tags">${selectedMedia.character_tags.map(tagHtml).join('')}</div></div>` : '';
   const fileSourceField = selectedMedia.file_source_url && selectedMedia.file_source_url !== selectedMedia.source_url
     ? `<div class="field"><label>File source</label><a href="${esc(selectedMedia.file_source_url)}" target="_blank" rel="noopener" class="ellipsis">${esc(selectedMedia.file_source_url)}</a></div>` : '';
-  pane.innerHTML = `<button id="closeInspector" class="icon-btn inspector-close" title="Close"><i data-lucide="x"></i></button>${preview}<h2>${esc(selectedMedia.author || 'Unknown author')}</h2><div class="field"><label>Media ID</label><button type="button" id="searchMediaId" class="text-link">${selectedMedia.id}</button></div><div class="field"><label>Source</label><a href="${esc(selectedMedia.source_url || '#')}" target="_blank" rel="noopener" class="ellipsis">${esc(selectedMedia.source_url || 'Not specified')}</a></div>${fileSourceField}${parentField}${relatives}${fragmentField}${fragmentNotice}${characters}<div class="field"><label>Size</label>${selectedMedia.width || '?'} × ${selectedMedia.height || '?'} · ${formatBytes(selectedMedia.file_size)}</div>${edits}${tagsSectionHtml(selectedMedia)}<div class="form-actions inspector-actions"><a class="icon-btn" href="${selectedMedia.content_url}" target="_blank" rel="noopener" title="Open full size"><i data-lucide="maximize-2"></i></a>${selectedMedia.source_url?'<button id="refreshMetadata" class="btn"><i data-lucide="refresh-cw"></i>Refresh metadata</button>':''}<button id="openEditor" class="btn"><i data-lucide="panel-top-open"></i>Open in Editor</button>${selectedMedia.type==='image'?'<button id="replaceMediaBackground" class="btn"><i data-lucide="image-plus"></i>Replace background</button>':''}<button id="addCollection" class="btn"><i data-lucide="folder-plus"></i>Build collection</button><button id="deleteMedia" class="icon-btn danger" title="Delete"><i data-lucide="trash-2"></i></button></div>`;
+  pane.innerHTML = `<button id="closeInspector" class="icon-btn inspector-close" title="Close"><i data-lucide="x"></i></button>${preview}<h2>${esc(selectedMedia.author || 'Unknown author')}</h2><div class="field"><label>Media ID</label><button type="button" id="searchMediaId" class="text-link">${selectedMedia.id}</button></div><div class="field"><label>Source</label><a href="${esc(selectedMedia.source_url || '#')}" target="_blank" rel="noopener" class="ellipsis">${esc(selectedMedia.source_url || 'Not specified')}</a></div>${fileSourceField}${parentField}${relatives}${fragmentField}${fragmentNotice}${characters}<div class="field"><label>Size</label>${selectedMedia.width || '?'} × ${selectedMedia.height || '?'} · ${formatBytes(selectedMedia.file_size)}</div>${edits}${selectedMedia.crop_review?.blocked?`<div class="field crop-admission-notice"><strong>Crop review required</strong><small>${esc(selectedMedia.crop_review.error_message || "Not eligible for collections until reviewed in Crop.")}</small></div>`:""}${tagsSectionHtml(selectedMedia)}<div class="form-actions inspector-actions"><a class="icon-btn" href="${selectedMedia.content_url}" target="_blank" rel="noopener" title="Open full size"><i data-lucide="maximize-2"></i></a>${selectedMedia.source_url?'<button id="refreshMetadata" class="btn"><i data-lucide="refresh-cw"></i>Refresh metadata</button>':''}<button id="openEditor" class="btn"><i data-lucide="panel-top-open"></i>Open in Editor</button>${selectedMedia.type==='image'&&!selectedMedia.is_animated?'<button id="replaceMediaBackground" class="btn"><i data-lucide="image-plus"></i>Replace background</button>':''}<button id="addCollection" class="btn"><i data-lucide="folder-plus"></i>Build collection</button><button id="deleteMedia" class="icon-btn danger" title="Delete"><i data-lucide="trash-2"></i></button></div>`;
   const authorHeading = pane.querySelector('h2');
   authorHeading.insertAdjacentHTML('beforebegin', '<div class="field author-field"><label>Author</label></div>');
   authorHeading.className = 'author-value';
@@ -730,18 +772,20 @@ async function inspectMedia(id) {
   pane.querySelectorAll('.trim-source-link').forEach(node => node.onclick = () => { const sourceId = Number(node.dataset.mediaId); saveViewState('editor',{targetMediaId:sourceId,analysisId:null,backgroundOpen:false,trimTarget:true}); navigate('editor'); });
   bindTagSection(pane, selectedMedia);
   document.querySelector('#deleteMedia').onclick = async () => { if (!confirm('Delete this file?')) return; try { await api(`/api/v1/media/${id}`, {method:'DELETE'}); toast('File deleted'); selectedMedia=null; showLibrary(); } catch(error) { toast(error.message,true); } };
-  document.querySelector('#addCollection').onclick = () => showCollectionBuilder();
-  document.querySelector('#openEditor').onclick = () => { const trimmable = selectedMedia.type==='video' || Boolean(selectedMedia.is_animated); saveViewState('editor',{targetMediaId:id,analysisId:null,backgroundOpen:false,trimTarget:trimmable}); navigate('editor'); };
+  document.querySelector('#addCollection').onclick = () => navigate('collections?screen=builder');
+  document.querySelector('#openEditor').onclick = () => openEditorForMedia(selectedMedia);
   const replaceBackground=document.querySelector('#replaceMediaBackground');
-  if(replaceBackground)replaceBackground.onclick=()=>{saveViewState('editor',{targetMediaId:id,analysisId:null,backgroundOpen:true});navigate('editor')};
+  if(replaceBackground)replaceBackground.onclick=()=>openEditorForMedia(selectedMedia,'background');
   const refreshMetadata = document.querySelector('#refreshMetadata');
   if (refreshMetadata) refreshMetadata.onclick = async () => { try { const job = await api(`/api/v1/media/${id}/metadata-refresh`, {method:'POST'}); await waitForJob(job.status_url); toast('Metadata refresh is ready in Review'); refreshCounts(); } catch(error) { toast(error.message,true); } };
   icons();
 }
 
 async function showImport() {
+  const epoch=renderEpoch;
   setHeader('Import', 'Drop an image or paste a link');
   const history = await api('/api/v1/history?limit=100&entity_type=background_job');
+  if(epoch!==renderEpoch||currentView!=='import')return;
   const historyLabels = {'import.pending':'Importing','import.accepted':'Imported','import.review':'Waiting for review','import.duplicate':'Already imported','import.rejected':'Review rejected','import.failed':'Import failed','import.set_completed':'Set imported','import.set_partial':'Set partially imported','import.set_cancelled':'Set import stopped'};
   const historyRows = history.items.map(item=>{
     let details={}; try { details=JSON.parse(item.details_json || '{}'); } catch {}
@@ -752,7 +796,7 @@ async function showImport() {
     const mediaId = Number(details.media_item_id);
     const hasMedia = Number.isInteger(mediaId) && mediaId > 0 && (item.event_type === 'import.duplicate' || item.event_type === 'import.accepted');
     const label = historyLabels[item.event_type] || item.event_type;
-    const openAction = hasMedia ? `<button type="button" class="icon-btn open-import-media" data-media-id="${mediaId}" title="Open in Library"><i data-lucide="images"></i></button>` : '';
+    const openAction = hasMedia ? `<a type="button" class="icon-btn open-import-media" data-media-id="${mediaId}" title="Open in Library" href="${libraryHref(mediaId)}" target="${libraryTarget()}" rel="noopener" aria-label="Open in Library"><i data-lucide="images"></i></a>` : '';
     const duplicateNote = details.merged ? ` · merged into #${mediaId}` : (details.possible_duplicate_of ? ` · possible duplicate #${details.possible_duplicate_of}` : '');
     const resolved = details.resolved_source_url ? ` · ${esc(details.resolved_source_url)}` : '';
     const duration = details.timing?.duration_ms != null ? ` · ${formatDuration(details.timing.duration_ms)}` : '';
@@ -763,9 +807,9 @@ async function showImport() {
   workspace.innerHTML = `<div class="page"><section id="dropImport" class="drop-import" tabindex="0"><i data-lucide="upload-cloud"></i><strong>Drop a file, image link, or post link here</strong><span>Paste an image, video, or URL into this window</span><input id="fileImport" type="file" accept="image/*,video/*" hidden><button id="chooseImport" type="button" class="btn primary"><i data-lucide="file-up"></i>Choose file</button><input id="pasteImport" class="control" type="url" placeholder="https://..." aria-label="Image or post URL"><button id="submitUrlImport" type="button" class="btn"><i data-lucide="link"></i>Resolve and import</button><div id="importResolveStatus" class="muted" aria-live="polite"></div></section><section class="import-history"><div class="page-head"><h2>Import history</h2><span class="badge">${history.page.total}</span></div><div class="item-list">${historyRows || '<div class="empty">History is empty</div>'}</div></section></div>`;
   const drop = document.querySelector('#dropImport'); const fileInput = document.querySelector('#fileImport');
   const showQueued = created => { const list=document.querySelector('.import-history .item-list'); const empty=list.querySelector('.empty'); if(empty) empty.remove(); list.insertAdjacentHTML('afterbegin',`<article class="history-row"><i data-lucide="loader-circle" class="spin"></i><div><strong>Importing</strong><small>Import #${created.job_id}</small><details class="history-diagnostics"><summary>Provider diagnostics</summary><p>Resolving providers...</p></details></div><time>now</time></article>`); document.querySelector('.import-history .badge').textContent=String(Number(document.querySelector('.import-history .badge').textContent)+1); const status=document.querySelector('#importResolveStatus'); if(status) status.textContent=`Resolving import #${created.job_id}...`; icons(); };
-  const submitFile = async file => { if (!file) return; try { const body = new FormData(); body.append('file', file); const job = await runJob(() => api('/api/v1/import-resolve-jobs',{method:'POST',body}),showQueued); toast(`Import: ${job.result?.outcome || 'failed'}`); refreshCounts(); showImport(); } catch (error) { toast(error.message,true); showImport(); } };
+  const submitFile = async file => { if (!file) return; try { const body = new FormData(); body.append('file', file); const job = await runJob(() => api('/api/v1/import-resolve-jobs',{method:'POST',body}),showQueued); toast(`Import: ${job.result?.outcome || 'failed'}`); refreshCounts(); if(currentView==='import')showImport(); } catch (error) { toast(error.message,true); if(currentView==='import')showImport(); } };
   document.querySelector('#chooseImport').onclick = () => fileInput.click(); fileInput.onchange = () => submitFile(fileInput.files[0]);
-  const submitUrl = async url => { if (!url) return; try { const job=await runJob(()=>api('/api/v1/import-resolve-jobs',{method:'POST',body:JSON.stringify({url})}),showQueued); toast(`Import: ${job.result?.outcome || 'failed'}`); refreshCounts(); showImport(); } catch(error){toast(error.message,true);showImport();} };
+  const submitUrl = async url => { if (!url) return; try { const job=await runJob(()=>api('/api/v1/import-resolve-jobs',{method:'POST',body:JSON.stringify({url})}),showQueued); toast(`Import: ${job.result?.outcome || 'failed'}`); refreshCounts(); if(currentView==='import')showImport(); } catch(error){toast(error.message,true);if(currentView==='import')showImport();} };
   drop.ondragover = event => { event.preventDefault(); drop.classList.add('dragging'); };
   drop.ondragleave = () => drop.classList.remove('dragging');
   drop.ondrop = event => { event.preventDefault(); drop.classList.remove('dragging'); const file=event.dataTransfer.files[0]; if (file) submitFile(file); else submitUrl(droppedUrl(event.dataTransfer)); };
@@ -786,7 +830,7 @@ async function showImport() {
     }
   };
   document.querySelector('#submitUrlImport').onclick = () => submitUrl(document.querySelector('#pasteImport').value.trim());
-  document.querySelectorAll('.open-import-media').forEach(node => node.onclick = () => openMediaInLibrary(Number(node.dataset.mediaId)));
+  document.querySelectorAll('.open-import-media').forEach(node => node.onclick = libraryLinkClick);
   icons(); restoreSetImportMonitor();
 }
 
@@ -1057,12 +1101,14 @@ function openReviewSearchLog(reviewId, title = 'Search results') {
 }
 
 async function showReview() {
+  const epoch=renderEpoch;
   const prefs = reviewPrefs();
   const filter = prefs.filter;
   // ``reviewOffset`` is owned by navigate() and the pager buttons. Reading it back
   // from the saved view state on every render reset the pager to page one.
   const loadPage = offset => api(`/api/v1/review-items?limit=${prefs.pageSize}&offset=${offset}&filter=${encodeURIComponent(filter)}`);
   let data = await loadPage(reviewOffset);
+  if(epoch!==renderEpoch)return;
   if (!data.items.length && data.page.total > 0 && reviewOffset > 0) {
     // The last page can become empty after items are resolved; step back to the new last page.
     reviewOffset = Math.max(0, (Math.ceil(data.page.total / prefs.pageSize) - 1) * prefs.pageSize);
@@ -1292,15 +1338,18 @@ async function showDuplicates() {
 async function showEditor() {
   setHeader('Editor', 'Crop, backgrounds, and trimming');
   const editorState=viewState('editor');
+  const editorEpoch=renderEpoch;
+  let editorRenderSequence=0;
   let cropSettings=await api('/api/v1/settings');
+  if(editorEpoch!==renderEpoch)return;
 
   // The Editor used to stack three long lists on one page.  It is now split
   // into tabs with independent pagination so a long queue no longer pushes the
   // other sections off the screen.
   const EDITOR_PREFS_KEY='jiffle-editor-preferences';
   const EDITOR_PAGE_SIZES=[20,40,60,100];
-  const editorPrefs=()=>{try{const saved=JSON.parse(localStorage.getItem(EDITOR_PREFS_KEY)||'{}');const pageSize=EDITOR_PAGE_SIZES.includes(Number(saved.pageSize))?Number(saved.pageSize):40;const tab=['crop','background','trim'].includes(saved.tab)?saved.tab:'crop';return {...saved,pageSize,tab};}catch{return {pageSize:40,tab:'crop'};}};
-  const saveEditorPrefs=changes=>{try{localStorage.setItem(EDITOR_PREFS_KEY,JSON.stringify({...editorPrefs(),...changes}));}catch{}};
+  const editorPrefs=()=>{try{const saved=JSON.parse(localStorage.getItem(EDITOR_PREFS_KEY)||'{}');const pageSize=EDITOR_PAGE_SIZES.includes(Number(saved.pageSize))?Number(saved.pageSize):40;const preferred=viewState('editor').tab||saved.tab;const tab=['crop','background','trim'].includes(preferred)?preferred:'crop';return {...saved,pageSize,tab};}catch{return {pageSize:40,tab:'crop'};}};
+  const saveEditorPrefs=changes=>{if(changes.tab)saveViewState('editor',{tab:changes.tab});try{const {tab,...preferences}={...editorPrefs(),...changes};localStorage.setItem(EDITOR_PREFS_KEY,JSON.stringify(preferences));}catch{}};
   const asPercent=value=>{const number=Number(value)||0;return number<=1?number*100:number};
   const colorCss=value=>{
     if(Array.isArray(value)&&value.length>=3)return `rgb(${value.slice(0,3).map(channel=>Math.max(0,Math.min(255,Number(channel)||0))).join(',')})`;
@@ -1319,15 +1368,15 @@ async function showEditor() {
   const renderCropTab=async()=>{
     const pane=document.querySelector('#editorPane');
     const pageSize=editorPrefs().pageSize;
-    let status=viewState('editor').cropStatus||viewState('editor').status||'pending';
+    let status=viewState('editor').cropStatus||viewState('editor').status||'needs_attention';
     let offset=Math.max(0,Number(viewState('editor').cropOffset)||0);
-    const load=()=>api(`/api/v1/crop-analyses?status=${encodeURIComponent(status)}&limit=${pageSize}&offset=${offset}`);
-    let data=await load();let total=Number(data.total)||0;
+    const load=()=>api(status==='needs_attention'?`/api/v1/crop-reviews?limit=${pageSize}&offset=${offset}`:`/api/v1/crop-analyses?status=${encodeURIComponent(status)}&limit=${pageSize}&offset=${offset}`);
+    let data=await load();if(editorEpoch!==renderEpoch||!pane.isConnected)return;let total=Number(data.total)||0;
     if(!data.items.length&&total>0&&offset>0){offset=Math.max(0,(Math.ceil(total/pageSize)-1)*pageSize);data=await load();total=Number(data.total)||0;}
     saveViewState('editor',{cropStatus:status,cropOffset:offset});
     const items=data.items||[];
     pane.innerHTML=`<div class="editor-toolbar crop-toolbar">
-      <label>Status <select id="cropStatus" class="control"><option value="pending">Pending</option><option value="cropped">Cropped</option><option value="no_crop_needed">No crop needed</option><option value="failed">Failed</option><option value="all">All</option></select></label>
+      <label>Status <select id="cropStatus" class="control"><option value="needs_attention">Needs attention</option><option value="deferred">Deferred</option><option value="pending">Pending</option><option value="cropped">Cropped</option><option value="no_crop_needed">No crop needed</option><option value="failed">Failed</option><option value="all">All</option></select></label>
       <label>Preset <select id="cropPreset" class="control"><option value="14">Cautious</option><option value="20">Normal</option><option value="28">Sensitive</option></select></label>
       <label>Minimum area <input id="cropArea" class="control" type="number" min="1" max="50" value="10"></label>
       <label>Padding <input id="cropPadding" class="control" type="number" min="0" max="10" step=".5" value="2"></label>
@@ -1337,7 +1386,7 @@ async function showEditor() {
       ${pageSizeControl(pageSize,'crop')}
     </div>
     <div class="page-head"><h2>Crop candidates</h2><span class="badge">${total}</span></div>
-    <div class="item-list">${items.map(item=>`<article class="queue-item"><img src="${item.thumbnail_url}" alt=""><div><strong>Media #${item.media_id}</strong><small>${esc(item.status)} · ${Number(item.confidence).toFixed(0)}% confidence · removes ${Number(item.removed_area).toFixed(1)}%</small></div><div class="actions"><button class="icon-btn open-library" data-media-id="${item.media_id}" title="Open in Library"><i data-lucide="images"></i></button>${item.status==='pending'?`<button class="btn open-crop" data-id="${item.id}"><i data-lucide="scan-line"></i>Review</button>`:`<button class="btn reset-crop" data-id="${item.id}"><i data-lucide="rotate-ccw"></i>Reopen review</button>`}</div></article>`).join('')||'<div class="empty">No items for this status</div>'}</div>
+    <div class="item-list">${items.map(item=>`<article class="queue-item"><img src="${item.thumbnail_url}" alt=""><div><strong>Media #${item.media_id}</strong><small>${esc(item.error_message || item.status)}${item.confidence!=null?` · ${Number(item.confidence).toFixed(0)}% confidence`:""}${item.removed_area!=null?` · removes ${Number(item.removed_area).toFixed(1)}%`:""}</small></div><div class="actions"><a class="icon-btn open-library" data-media-id="${item.media_id}" title="Open in Library" href="${libraryHref(item.media_id)}" target="${libraryTarget()}" rel="noopener" aria-label="Open in Library"><i data-lucide="images"></i></a>${status==='needs_attention'?`<button class="btn open-crop-media" data-media-id="${item.media_id}"><i data-lucide="crop"></i>Review</button>`:item.status==='pending'?`<button class="btn open-crop" data-id="${item.id}"><i data-lucide="scan-line"></i>Review</button>`:`<button class="btn reset-crop" data-id="${item.id}"><i data-lucide="rotate-ccw"></i>Reopen review</button>`}</div></article>`).join('')||'<div class="empty">No items for this status</div>'}</div>
     ${pagerHtml(offset,total,pageSize,'crop')}`;
     const statusSelect=document.querySelector('#cropStatus');statusSelect.value=status;statusSelect.onchange=event=>{saveViewState('editor',{cropStatus:event.target.value,cropOffset:0});renderCropTab();};
     document.querySelector('#cropPreset').value=String(cropSettings.crop_background_tolerance);document.querySelector('#cropArea').value=String(cropSettings.crop_min_area_percent);document.querySelector('#cropPadding').value=String(cropSettings.crop_padding_percent);document.querySelector('#cropSelectedMethod').value=cropSettings.crop_selected_analysis;
@@ -1346,11 +1395,12 @@ async function showEditor() {
     const options=()=>({min_area:Number(document.querySelector('#cropArea').value),padding:Number(document.querySelector('#cropPadding').value)/100,tolerance:Number(document.querySelector('#cropPreset').value)});
     document.querySelector('#scanSelected').onclick=async()=>{if(!selectedMedia){toast('Select an image in Library first',true);return}try{const method=document.querySelector('#cropSelectedMethod').value;const result=method==='vision'?await api(`/api/v1/media/${selectedMedia.id}/crop-vision-analysis`,{method:'POST'}):await api('/api/v1/crop-analyses',{method:'POST',body:JSON.stringify({media_id:selectedMedia.id,...options()})});if(result.id){openCrop(result.id)}else{toast('No removable margins found')}}catch(error){toast(error.message,true)}};
     document.querySelector('#scanAll').onclick=async()=>{try{const created=await api('/api/v1/crop-scan-jobs',{method:'POST',body:JSON.stringify(options())});monitorCropScan({id:created.job_id,status_url:created.status_url,progress:0,scanned:0,total:'?',candidates:0});toast('Crop scan started')}catch(error){toast(error.message,true)}};
-    document.querySelectorAll('.open-library').forEach(n=>n.onclick=()=>openMediaInLibrary(Number(n.dataset.mediaId)));
-    document.querySelectorAll('.open-crop').forEach(n=>n.onclick=()=>openCrop(Number(n.dataset.id)));
+    document.querySelectorAll('.open-library').forEach(n=>n.onclick=libraryLinkClick);
+    document.querySelectorAll('.open-crop').forEach(n=>n.onclick=()=>{saveViewState('editor',{fromQueue:true});openCrop(Number(n.dataset.id));});
+    document.querySelectorAll('.open-crop-media').forEach(n=>n.onclick=()=>{saveViewState('editor',{fromQueue:true});openMediaEditor(Number(n.dataset.mediaId),'crop');});
     document.querySelectorAll('.reset-crop').forEach(n=>n.onclick=async()=>{await api(`/api/v1/crop-analyses/${n.dataset.id}/reset`,{method:'POST'});renderCropTab()});
     bindEditorPager('crop',offset,pageSize,newOffset=>{saveViewState('editor',{cropOffset:newOffset});renderCropTab()},newSize=>{saveEditorPrefs({pageSize:newSize});saveViewState('editor',{cropOffset:0});renderCropTab()});
-    if(status==='pending')document.querySelector('#cropCount').textContent=total||'';
+    refreshCounts();
     icons();
   };
 
@@ -1362,20 +1412,20 @@ async function showEditor() {
     const minimumArea=Math.min(95,Math.max(5,Number(savedState.backgroundMinimumArea)||25));
     let offset=Math.max(0,Number(viewState('editor').backgroundOffset)||0);
     const load=()=>api(`/api/v1/background-candidates?tolerance=${tolerance}&min_background_percent=${minimumArea}&limit=${pageSize}&offset=${offset}`);
-    let data=await load();let total=Number(data.total)||0;
+    let data=await load();if(editorEpoch!==renderEpoch||!pane.isConnected)return;let total=Number(data.total)||0;
     if(!data.items.length&&total>0&&offset>0){offset=Math.max(0,(Math.ceil(total/pageSize)-1)*pageSize);data=await load();total=Number(data.total)||0;}
     saveViewState('editor',{backgroundTolerance:tolerance,backgroundMinimumArea:minimumArea,backgroundOffset:offset});
     const items=data.items||[];
     pane.innerHTML=`<div class="background-scan-toolbar"><label>Edge tolerance <input id="backgroundTolerance" class="control" type="number" min="5" max="80" value="${tolerance}"></label><label>Minimum background, % <input id="backgroundMinimumArea" class="control" type="number" min="5" max="95" value="${minimumArea}"></label><button id="analyzeSelectedBackground" class="btn"><i data-lucide="scan-line"></i>Analyze selected</button><button id="scanBackgrounds" class="btn primary"><i data-lucide="scan-search"></i>Find background candidates</button>${pageSizeControl(pageSize,'background')}</div>
     <div class="page-head"><h2>Background candidates</h2><span class="badge">${total}</span></div>
-    <div class="item-list background-candidate-list">${items.map(item=>`<article class="queue-item background-candidate"><img src="${item.thumbnail_url}" alt=""><div><strong>Media #${item.media_id}</strong><small><span class="background-color-swatch" style="background:${colorCss(item.background_color)}"></span>${asPercent(item.confidence).toFixed(0)}% confidence · ${asPercent(item.background_area_percent).toFixed(1)}% background</small></div><div class="actions"><button class="icon-btn open-background-library" data-media-id="${item.media_id}" title="Open in Library"><i data-lucide="images"></i></button><button class="btn open-background-editor" data-media-id="${item.media_id}"><i data-lucide="image-plus"></i>Replace background</button></div></article>`).join('')||'<div class="empty">No background candidates</div>'}</div>
+    <div class="item-list background-candidate-list">${items.map(item=>`<article class="queue-item background-candidate"><img src="${item.thumbnail_url}" alt=""><div><strong>Media #${item.media_id}</strong><small><span class="background-color-swatch" style="background:${colorCss(item.background_color)}"></span>${asPercent(item.confidence).toFixed(0)}% confidence · ${asPercent(item.background_area_percent).toFixed(1)}% background</small></div><div class="actions"><a class="icon-btn open-background-library" data-media-id="${item.media_id}" title="Open in Library" href="${libraryHref(item.media_id)}" target="${libraryTarget()}" rel="noopener" aria-label="Open in Library"><i data-lucide="images"></i></a><button class="btn open-background-editor" data-media-id="${item.media_id}"><i data-lucide="image-plus"></i>Replace background</button></div></article>`).join('')||'<div class="empty">No background candidates</div>'}</div>
     ${pagerHtml(offset,total,pageSize,'background')}`;
     const saveBackgroundOptions=()=>{const values={tolerance:Number(document.querySelector('#backgroundTolerance').value),min_background_percent:Number(document.querySelector('#backgroundMinimumArea').value)};saveViewState('editor',{backgroundTolerance:values.tolerance,backgroundMinimumArea:values.min_background_percent,backgroundOffset:0});return values};
     ['backgroundTolerance','backgroundMinimumArea'].forEach(id=>document.querySelector(`#${id}`).onchange=()=>{saveBackgroundOptions();renderBackgroundTab()});
-    document.querySelector('#analyzeSelectedBackground').onclick=async()=>{if(!selectedMedia||selectedMedia.type!=='image'){toast('Select an image in Library first',true);return}try{const result=await api(`/api/v1/media/${selectedMedia.id}/background-analysis`,{method:'POST',body:JSON.stringify(saveBackgroundOptions())});if(result.status==='candidate'){saveViewState('editor',{targetMediaId:selectedMedia.id,analysisId:null,backgroundOpen:true});await openMediaEditor(selectedMedia.id)}else{toast('No replaceable background found')}}catch(error){toast(error.message,true)}};
+    document.querySelector('#analyzeSelectedBackground').onclick=async()=>{if(!selectedMedia||selectedMedia.type!=='image'){toast('Select an image in Library first',true);return}try{const result=await api(`/api/v1/media/${selectedMedia.id}/background-analysis`,{method:'POST',body:JSON.stringify(saveBackgroundOptions())});if(result.status==='candidate'){saveViewState('editor',{targetMediaId:selectedMedia.id,analysisId:null,backgroundOpen:true});await openMediaEditor(selectedMedia.id,'background')}else{toast('No replaceable background found')}}catch(error){toast(error.message,true)}};
     document.querySelector('#scanBackgrounds').onclick=async()=>{try{const created=await api('/api/v1/background-scan-jobs',{method:'POST',body:JSON.stringify(saveBackgroundOptions())});monitorBackgroundScan({id:created.job_id,status_url:created.status_url,progress:0,scanned:0,total:'?',candidates:0});toast('Background scan started')}catch(error){toast(error.message,true)}};
-    document.querySelectorAll('.open-background-library').forEach(n=>n.onclick=()=>openMediaInLibrary(Number(n.dataset.mediaId)));
-    document.querySelectorAll('.open-background-editor').forEach(n=>n.onclick=()=>{saveViewState('editor',{targetMediaId:Number(n.dataset.mediaId),analysisId:null,backgroundOpen:true});openMediaEditor(Number(n.dataset.mediaId))});
+    document.querySelectorAll('.open-background-library').forEach(n=>n.onclick=libraryLinkClick);
+    document.querySelectorAll('.open-background-editor').forEach(n=>n.onclick=()=>{saveViewState('editor',{targetMediaId:Number(n.dataset.mediaId),analysisId:null,backgroundOpen:true});openMediaEditor(Number(n.dataset.mediaId),'background')});
     bindEditorPager('background',offset,pageSize,newOffset=>{saveViewState('editor',{backgroundOffset:newOffset});renderBackgroundTab()},newSize=>{saveEditorPrefs({pageSize:newSize});saveViewState('editor',{backgroundOffset:0});renderBackgroundTab()});
     icons();
   };
@@ -1386,7 +1436,7 @@ async function showEditor() {
     const trimEnabled=Boolean(cropSettings.trim_review_enabled);
     let offset=Math.max(0,Number(viewState('editor').trimOffset)||0);
     const load=()=>api(`/api/v1/trim-reviews?status=pending&limit=${pageSize}&offset=${offset}`);
-    let data=await load();let total=Number(data.total)||0;
+    let data=await load();if(editorEpoch!==renderEpoch||!pane.isConnected)return;let total=Number(data.total)||0;
     if(!data.items.length&&total>0&&offset>0){offset=Math.max(0,(Math.ceil(total/pageSize)-1)*pageSize);data=await load();total=Number(data.total)||0;}
     saveViewState('editor',{trimOffset:offset});
     const items=data.items||[];
@@ -1396,7 +1446,7 @@ async function showEditor() {
       return `<article class="media-card trim-card" data-trim-card="${item.media_id}">
         <div class="trim-card-preview" data-trim-open="${item.media_id}" title="Open the trim editor"><img loading="lazy" src="${esc(item.thumbnail_url)}" alt=""><span class="trim-card-kind"><i data-lucide="${icon}"></i>${kind}</span>${item.deferred?'<span class="trim-card-deferred" title="Moved to the end of the queue"><i data-lucide="clock"></i></span>':''}${item.fragment_count?`<span class="fragment-count-marker"><i data-lucide="scissors"></i>${item.fragment_count}</span>`:''}</div>
         <div class="trim-card-info"><strong>Media #${item.media_id}</strong><small>${item.width||'?'}×${item.height||'?'} · ${formatBytes(item.file_size)}</small></div>
-        <div class="trim-card-actions"><a class="icon-btn" href="${esc(item.content_url)}" target="_blank" rel="noopener" title="Open the file in a new tab"><i data-lucide="maximize-2"></i></a><button type="button" class="icon-btn" data-trim-library="${item.media_id}" title="Open in Library"><i data-lucide="images"></i></button><button type="button" class="icon-btn" data-trim-defer="${item.media_id}" title="Move to the end of the queue"><i data-lucide="arrow-down-to-line"></i></button><button type="button" class="btn" data-trim-approve="${item.media_id}"><i data-lucide="check"></i>Looks good</button><button type="button" class="btn primary" data-trim-open="${item.media_id}"><i data-lucide="scissors"></i>Trim</button></div>
+        <div class="trim-card-actions"><a class="icon-btn" href="${esc(item.content_url)}" target="_blank" rel="noopener" title="Open the file in a new tab"><i data-lucide="maximize-2"></i></a><a type="button" class="icon-btn" data-trim-library="${item.media_id}" title="Open in Library" href="${libraryHref(item.media_id)}" target="${libraryTarget()}" rel="noopener" aria-label="Open in Library"><i data-lucide="images"></i></a><button type="button" class="icon-btn" data-trim-defer="${item.media_id}" title="Move to the end of the queue"><i data-lucide="arrow-down-to-line"></i></button><button type="button" class="btn" data-trim-approve="${item.media_id}"><i data-lucide="check"></i>Looks good</button><button type="button" class="btn primary" data-trim-open="${item.media_id}"><i data-lucide="scissors"></i>Trim</button></div>
       </article>`;
     }).join('');
     pane.innerHTML=`<div class="trim-scan-toolbar"><button id="scanTrims" class="btn primary" ${(trimEnabled||total)?'':'hidden'}><i data-lucide="scan-search"></i>Find videos and animations</button><span class="muted">${(trimEnabled||total)?'Approve a clip or split it into fragments. Fragments replace it in automatic collections.':'Enable "Review videos and animations for trimming" in Settings to build this queue.'}</span>${pageSizeControl(pageSize,'trim')}</div>
@@ -1406,7 +1456,7 @@ async function showEditor() {
     const scanTrims=document.querySelector('#scanTrims');
     if(scanTrims)scanTrims.onclick=async()=>{try{await runJob(()=>api('/api/v1/trim-scan-jobs',{method:'POST'}));toast('Review scan finished');renderTrimTab()}catch(error){toast(error.message,true)}};
     document.querySelectorAll('[data-trim-open]').forEach(n=>n.onclick=()=>openTrim(Number(n.dataset.trimOpen)));
-    document.querySelectorAll('[data-trim-library]').forEach(n=>n.onclick=()=>openMediaInLibrary(Number(n.dataset.trimLibrary)));
+    document.querySelectorAll('[data-trim-library]').forEach(n=>n.onclick=libraryLinkClick);
     document.querySelectorAll('[data-trim-approve]').forEach(n=>n.onclick=async()=>{try{await api(`/api/v1/trim-reviews/${n.dataset.trimApprove}/approve`,{method:'POST'});toast('Marked as reviewed');await refreshCounts();renderTrimTab()}catch(error){toast(error.message,true)}});
     document.querySelectorAll('[data-trim-defer]').forEach(n=>n.onclick=async()=>{n.disabled=true;try{await api(`/api/v1/trim-reviews/${n.dataset.trimDefer}/defer`,{method:'POST'});toast('Moved to the end of the queue');renderTrimTab()}catch(error){toast(error.message,true);n.disabled=false}});
     bindEditorPager('trim',offset,pageSize,newOffset=>{saveViewState('editor',{trimOffset:newOffset});renderTrimTab()},newSize=>{saveEditorPrefs({pageSize:newSize});saveViewState('editor',{trimOffset:0});renderTrimTab()});
@@ -1414,23 +1464,46 @@ async function showEditor() {
     icons();
   };
 
+  const imageToolTabs=(tool)=>`<div class="editor-tabs image-tool-tabs" role="tablist" aria-label="Image tools"><button type="button" role="tab" aria-selected="${tool==='crop'}" class="editor-tab tone-crop${tool==='crop'?' active':''}" data-image-tool="crop"><i data-lucide="crop"></i><span>Crop</span></button><button type="button" id="toggleBackgroundEditor" role="tab" aria-selected="${tool==='background'}" class="editor-tab tone-background${tool==='background'?' active':''}" data-image-tool="background"><i data-lucide="image-plus"></i><span>Background</span></button></div>`;
+  const bindImageTools=mediaId=>document.querySelectorAll('[data-image-tool]').forEach(node=>node.onclick=()=>{
+    if(node.dataset.imageTool!==viewState('editor').tool)openMediaEditor(mediaId,node.dataset.imageTool);
+  });
+  const writeEditorRoute=destination=>{
+    if(editorEpoch!==renderEpoch||location.hash===destination)return;
+    const current=parseRoute(location.hash);
+    const initial=current.view==='editor'&&!current.mediaId&&!current.params.has('tab');
+    const normalizing=current.mediaId===parseRoute(destination).mediaId&&!current.params.has('tool');
+    history[initial||normalizing?'replaceState':'pushState'](null,'',destination);
+  };
+  const syncEditorRoute=(mediaId,tool)=>writeEditorRoute(`#editor?media=${mediaId}&tool=${tool}`);
   const render=async options=>{
     if(typeof options==='string')options={cropStatus:options};
     options=options||{};
+    if(editorEpoch!==renderEpoch)return;
+    ++editorRenderSequence;
     saveViewState('editor',{analysisId:null,targetMediaId:null,backgroundOpen:false,...(options.cropStatus?{cropStatus:options.cropStatus,status:options.cropStatus}:{})});
     const tab=options.tab||editorPrefs().tab;
     saveEditorPrefs({tab});
+    writeEditorRoute(`#editor?tab=${tab}`);
     const tabs=[{value:'crop',label:'Crop',icon:'crop'},{value:'background',label:'Background',icon:'image-plus'},{value:'trim',label:'Videos & animations',icon:'scissors'}];
-    workspace.innerHTML=`<div class="page editor-page"><div class="editor-tabs" role="tablist">${tabs.map(item=>`<button type="button" role="tab" class="editor-tab${item.value===tab?' active':''}" data-editor-tab="${item.value}"><i data-lucide="${item.icon}"></i><span>${item.label}</span></button>`).join('')}</div><div id="editorPane"><div class="empty">Loading...</div></div></div>`;
+    workspace.innerHTML=`<div class="page editor-page"><div class="editor-tabs" role="tablist">${tabs.map(item=>`<button type="button" role="tab" class="editor-tab tone-${item.value}${item.value===tab?' active':''}" data-editor-tab="${item.value}"><i data-lucide="${item.icon}"></i><span>${item.label}</span><b class="editor-tab-count" data-editor-count="${item.value}">${editorCounts[item.value]||0}</b></button>`).join('')}</div><div id="editorPane"><div class="empty">Loading...</div></div></div>`;
     document.querySelectorAll('[data-editor-tab]').forEach(node=>node.onclick=()=>{if(node.dataset.editorTab!==tab){saveEditorPrefs({tab:node.dataset.editorTab});render()}});
     reloadBackgroundCandidates=()=>{if(currentView==='editor'&&!Number(viewState('editor').targetMediaId)&&editorPrefs().tab==='background')renderBackgroundTab()};
+    paintEditorCounts();refreshCounts();
     if(tab==='background')await renderBackgroundTab();
     else if(tab==='trim')await renderTrimTab();
     else await renderCropTab();
   };
-  const openMediaEditor = async mediaId => {
-    saveViewState('editor',{targetMediaId:mediaId,analysisId:null,box:null,backgroundMediaId:mediaId});
+  const openMediaEditor = async (mediaId,requestedTool=null) => {
+    const sequence=++editorRenderSequence;
     const [state,revisions,savedPreview]=await Promise.all([api(`/api/v1/media/${mediaId}/editor-state`),api(`/api/v1/media/${mediaId}/revisions`),api(`/api/v1/media/${mediaId}/background-preview`).catch(()=>({status:'none'}))]);
+    if(editorEpoch!==renderEpoch||sequence!==editorRenderSequence)return;
+    activateImageDraft(mediaId,state.active_revision_id,requestedTool||viewState('editor').requestedTool);
+    saveViewState('editor',{requestedTool:null});
+    const chosenTool=viewState('editor').tool;
+    const existing=state.analyses.find(item=>Number(item.revision_id)===Number(state.active_revision_id)&&['pending','deferred'].includes(item.status));
+    if(chosenTool==='crop'&&existing&&state.crop_review?.status!=='passed')return openCrop(existing.id);
+    syncEditorRoute(mediaId,chosenTool);
     const active=revisions.items.find(revision=>revision.active);
     const original=[...revisions.items].reverse().find(revision=>revision.operation==='original'&&!revision.parent_revision_id);
     const operationDetails=revision=>revision.operation==='crop'&&Array.isArray(revision.details?.box)?`Crop: ${revision.details.box.join(', ')}${revision.details.method?` · ${operationName(revision.details.method)} analysis`:''}`:operationName(revision.operation);
@@ -1441,9 +1514,11 @@ async function showEditor() {
     const savedBlur=backgroundStateMatches?Number(editorState.backgroundBlur ?? 12):12;
     const savedAssetId=backgroundStateMatches?Number(editorState.backgroundAssetId || 0):0;
     workspace.innerHTML=`<div class="page editor-page">
-      <div class="page-head"><button class="btn" id="backEditor"><i data-lucide="chevron-left"></i>Editor</button><button class="icon-btn" id="cropOpenLibrary" title="Open in Library"><i data-lucide="images"></i></button><h2>Image editor</h2>${state.is_edited?`<span class="badge good">${esc(editSummary(state.edit_operations))}</span>`:'<span class="badge">Original</span>'}</div>
+      <div class="page-head"><button class="btn" id="backEditor"><i data-lucide="chevron-left"></i>Editor</button><a class="icon-btn" id="cropOpenLibrary" title="Open in Library" href="${libraryHref(mediaId)}" target="${libraryTarget()}" rel="noopener" aria-label="Open in Library"><i data-lucide="images"></i></a><h2>Media #${mediaId}</h2>${state.is_edited?`<span class="badge good">${esc(editSummary(state.edit_operations))}</span>`:'<span class="badge">Original</span>'}</div>
+      ${imageToolTabs(chosenTool)}
+      ${state.crop_review?.blocked?`<div class="crop-admission-notice"><strong>Crop review required before collections</strong><p>${esc(state.crop_review.error_message||"Review the current version and apply a crop or confirm No crop needed.")}</p></div>`:""}
       <div class="editor-version-compare"><section><h3>Current version</h3><img src="${active?.content_url||state.content_url}" alt=""></section><section><h3>Original</h3><img src="${original?.content_url||state.content_url}" alt=""></section></div>
-      <div class="actions editor-state-actions"><button class="btn primary" id="analyzeCurrent"><i data-lucide="scan-line"></i>Analyze current</button><button class="btn" id="toggleBackgroundEditor" aria-expanded="${backgroundOpen}"><i data-lucide="image-plus"></i>Replace background</button><button class="btn danger" id="resetOriginal" ${state.is_edited?'':'disabled'}><i data-lucide="rotate-ccw"></i>Reset to original</button></div>
+      <div class="actions editor-state-actions"><button class="btn primary" id="analyzeCurrent" ${chosenTool!=='crop'?'hidden':''}><i data-lucide="scan-line"></i>Analyze current</button><button class="btn" id="approveCurrentCrop" ${chosenTool!=='crop'?'hidden':''}><i data-lucide="check"></i>No crop needed</button><button class="btn danger" id="resetOriginal" ${state.is_edited?'':'disabled'}><i data-lucide="rotate-ccw"></i>Reset to original</button></div>
        <section id="backgroundPanel" class="background-panel" ${backgroundOpen?'':'hidden'}>
          <div class="background-panel-head"><div><h3>Background replacement</h3><span id="backgroundStatus" class="background-status">${savedPreview?.status==='ready'?'Preview ready':'Preview required'}</span></div><div class="actions"><button id="analyzeBackgroundCurrent" class="btn"><i data-lucide="scan-search"></i>Check candidate</button><button id="removeBackgroundPreview" class="btn primary"><i data-lucide="scan-eye"></i>${savedPreview?.status==='ready'?'Regenerate automatic mask':'Remove background / Preview'}</button></div></div>
          <div class="background-zoom-control"><label for="backgroundZoom">Zoom <output id="backgroundZoomValue" for="backgroundZoom">100%</output></label><input id="backgroundZoom" type="range" min="100" max="400" value="${Number(editorState.backgroundZoom || 100)}"></div>
@@ -1459,8 +1534,9 @@ async function showEditor() {
        </section>
        <section class="revision-list"><h3>Versions</h3>${revisions.items.map(revision=>`<article class="${revision.in_active_chain?'active-chain':''}"><img src="${revision.content_url}" alt=""><span><strong>${esc(operationDetails(revision))}</strong><small>${revision.width}×${revision.height} · ${formatBytes(revision.file_size)}${revision.active?' · Active':''}</small></span><button class="btn restore-revision" data-id="${revision.id}" ${revision.active?'disabled':''}>${revision.active?'Active':'Restore'}</button></article>`).join('')}</section>
      </div>`;
-    document.querySelector('#backEditor').onclick=()=>{saveViewState('editor',{targetMediaId:null,backgroundOpen:false});render()};
-    document.querySelector('#cropOpenLibrary').onclick=()=>openMediaInLibrary(mediaId);
+    document.querySelector('#backEditor').onclick=()=>{saveViewState('editor',{targetMediaId:null,analysisId:null,backgroundOpen:false});render({tab:chosenTool})};
+    document.querySelector('#cropOpenLibrary').onclick=libraryLinkClick;
+    document.querySelector('#approveCurrentCrop').onclick=async()=>{if(!confirm('Confirm that the current image needs no crop?'))return;try{await api(`/api/v1/media/${mediaId}/crop-review/approve`,{method:'POST',body:JSON.stringify({revision_id:state.active_revision_id})});toast('Image approved');refreshCounts();await openMediaEditor(mediaId,'crop');}catch(error){toast(error.message,true);}};
     document.querySelector('#analyzeCurrent').onclick=async()=>{try{const method=cropSettings.crop_selected_analysis;const result=method==='vision'?await api(`/api/v1/media/${mediaId}/crop-vision-analysis`,{method:'POST'}):await api('/api/v1/crop-analyses',{method:'POST',body:JSON.stringify({media_id:mediaId,min_area:cropSettings.crop_min_area_percent,padding:cropSettings.crop_padding_percent/100,tolerance:cropSettings.crop_background_tolerance})});if(result.id)await openCrop(result.id);else toast('No removable margins found')}catch(error){toast(error.message,true)}};
     const panel=document.querySelector('#backgroundPanel');
     const toggleBackground=document.querySelector('#toggleBackgroundEditor');
@@ -1544,23 +1620,32 @@ async function showEditor() {
     updateSelectedSummary();
     if(preview){await resolveSelectedBackground().catch(()=>{});prepareForeground().catch(error=>setBackgroundStatus(error.message,'error'));}
     requestAnimationFrame(()=>{const saved=viewState('editor');sourcePane.scrollLeft=Number(saved.backgroundScrollLeft||0);sourcePane.scrollTop=Number(saved.backgroundScrollTop||0);previewPane.scrollLeft=sourcePane.scrollLeft;previewPane.scrollTop=sourcePane.scrollTop;applyZoom()});
-    document.querySelectorAll('.restore-revision').forEach(node=>node.onclick=async()=>{if(!confirm('Restore this version?'))return;await api(`/api/v1/media/${mediaId}/revisions/${node.dataset.id}/activate`,{method:'POST'});toast('Version restored');await openMediaEditor(mediaId)}); icons();
+    document.querySelectorAll('.restore-revision').forEach(node=>node.onclick=async()=>{if(!confirm('Restore this version?'))return;await api(`/api/v1/media/${mediaId}/revisions/${node.dataset.id}/activate`,{method:'POST'});toast('Version restored');await openMediaEditor(mediaId)}); bindImageTools(mediaId); icons();
   };
   const openCrop = async id => {
+    const sequence=++editorRenderSequence;
     const item=await api(`/api/v1/crop-analyses/${id}`);
-    saveViewState('editor',{analysisId:id,targetMediaId:null});
     const revisions=await api(`/api/v1/media/${item.media_id}/revisions`);
-    workspace.innerHTML=`<div class="page editor-page"><div class="page-head"><button class="btn" id="backEditor"><i data-lucide="chevron-left"></i>Editor</button><h2>Review crop</h2><span class="badge" id="proposalMethod">${esc(item.method)}</span></div><div class="crop-workspace"><div class="crop-source"><img id="cropSource" src="${item.content_url}" alt=""></div><canvas id="cropPreview"></canvas></div><div class="crop-controls">${['Left','Top','Right','Bottom'].map((name,index)=>`<label>${name}<input class="control crop-coordinate" data-index="${index}" type="number" value="${item.box[index]}"></label>`).join('')}<button id="resetCrop" class="icon-btn" title="Reset suggested crop"><i data-lucide="rotate-ccw"></i></button></div><div class="actions"><button class="btn" id="visionCrop"><i data-lucide="scan-eye"></i>Vision model</button><button class="btn primary" id="applyCrop"><i data-lucide="check"></i>Apply crop</button><button class="btn" id="noCrop">No crop needed</button><button class="btn" id="skipCrop">Skip</button></div><section class="revision-list"><h3>Versions</h3>${revisions.items.map(r=>`<article><img src="${r.content_url}" alt=""><span>${esc(r.operation)} · ${r.width}×${r.height} · ${formatBytes(r.file_size)}</span><button class="btn restore-revision" data-id="${r.id}" ${r.active?'disabled':''}>${r.active?'Active':'Restore'}</button></article>`).join('')}</section></div>`;
-    document.querySelector('#backEditor').insertAdjacentHTML('afterend',`<button class="icon-btn" id="cropOpenLibrary" title="Open in Library"><i data-lucide="images"></i></button>`);
-    document.querySelector('#cropOpenLibrary').onclick=()=>openMediaInLibrary(item.media_id);
-    document.querySelector('#backEditor').onclick=()=>{saveViewState('editor',{analysisId:null});render()};
+    if(editorEpoch!==renderEpoch||sequence!==editorRenderSequence)return;
+    const active=revisions.items.find(revision=>revision.active);
+    if(Number(active?.id)!==Number(item.revision_id))return openMediaEditor(item.media_id,'crop');
+    activateImageDraft(item.media_id,item.revision_id,'crop');
+    saveViewState('editor',{analysisId:id,targetMediaId:item.media_id,requestedTool:null});
+    syncEditorRoute(item.media_id,'crop');
+    workspace.innerHTML=`<div class="page editor-page"><div class="page-head"><button class="btn" id="backEditor"><i data-lucide="chevron-left"></i>Editor</button><h2>Media #${item.media_id}</h2><span class="badge" id="proposalMethod">${esc(item.method)}</span></div>${imageToolTabs("crop")}<div class="crop-workspace"><div class="crop-source"><img id="cropSource" src="${item.content_url}" alt=""></div><canvas id="cropPreview"></canvas></div><div class="crop-controls">${['Left','Top','Right','Bottom'].map((name,index)=>`<label>${name}<input class="control crop-coordinate" data-index="${index}" type="number" value="${item.box[index]}"></label>`).join('')}<button id="resetCrop" class="icon-btn" title="Reset suggested crop"><i data-lucide="rotate-ccw"></i></button></div><div class="actions"><button class="btn" id="visionCrop"><i data-lucide="scan-eye"></i>Vision model</button><button class="btn primary" id="applyCrop"><i data-lucide="check"></i>Apply crop</button><button class="btn" id="noCrop">No crop needed</button><button class="btn" id="skipCrop">Skip</button></div><section class="revision-list"><h3>Versions</h3>${revisions.items.map(r=>`<article><img src="${r.content_url}" alt=""><span>${esc(r.operation)} · ${r.width}×${r.height} · ${formatBytes(r.file_size)}</span><button class="btn restore-revision" data-id="${r.id}" ${r.active?'disabled':''}>${r.active?'Active':'Restore'}</button></article>`).join('')}</section></div>`;
+    document.querySelector('#backEditor').insertAdjacentHTML('afterend',`<a class="icon-btn" id="cropOpenLibrary" title="Open in Library" href="${libraryHref(item.media_id)}" target="${libraryTarget()}" rel="noopener" aria-label="Open in Library"><i data-lucide="images"></i></a>`);
+    document.querySelector('#cropOpenLibrary').onclick=libraryLinkClick;
+    document.querySelector('#backEditor').onclick=()=>{saveViewState('editor',{analysisId:null,targetMediaId:null});render({tab:'crop'})};
+    bindImageTools(item.media_id);
     const openNextPending = async () => {
-      await render('pending');
-      const next = document.querySelector('.open-crop');
-      if (next) await openCrop(Number(next.dataset.id));
+      refreshCounts();
+      if(!viewState('editor').fromQueue)return openMediaEditor(item.media_id,'crop');
+      await render('needs_attention');
+      const next = document.querySelector('.open-crop-media');
+      if (next) await openMediaEditor(Number(next.dataset.mediaId),'crop');
     };
-    document.querySelector('#noCrop').onclick=async()=>{try{await api(`/api/v1/crop-analyses/${id}/no_crop_needed`,{method:'POST'});await openNextPending()}catch(error){toast(error.message,true)}};
-    document.querySelector('#skipCrop').onclick=async()=>{try{await api(`/api/v1/crop-analyses/${id}/deferred`,{method:'POST'});await openNextPending()}catch(error){toast(error.message,true)}};
+    document.querySelector('#noCrop').onclick=async()=>{try{await api(`/api/v1/media/${item.media_id}/crop-review/approve`,{method:'POST',body:JSON.stringify({revision_id:item.revision_id})});await openNextPending()}catch(error){toast(error.message,true)}};
+    document.querySelector('#skipCrop').onclick=async()=>{try{if(item.status==='pending')await api(`/api/v1/crop-analyses/${id}/deferred`,{method:'POST'});await render({tab:'crop',cropStatus:'needs_attention'});refreshCounts()}catch(error){toast(error.message,true)}};
     const source=document.querySelector('#cropSource'),canvas=document.querySelector('#cropPreview'),inputs=[...document.querySelectorAll('.crop-coordinate')];
     const savedState=viewState('editor'); const savedBox=Number(savedState.boxRevisionId)===Number(item.revision_id)?savedState.box:null;
     if(Array.isArray(savedBox)&&savedBox.length===4)inputs.forEach((n,i)=>n.value=savedBox[i]);
@@ -1571,20 +1656,25 @@ async function showEditor() {
     const draw=()=>{if(!source.naturalWidth)return;const [l,t,r,b]=box();canvas.width=Math.max(1,r-l);canvas.height=Math.max(1,b-t);canvas.getContext('2d').drawImage(source,l,t,r-l,b-t,0,0,r-l,b-t);saveViewState('editor',{box:box(),boxRevisionId:item.revision_id});applyZoom()}; source.onload=draw; inputs.forEach(n=>n.oninput=draw);document.querySelector('#cropZoom').oninput=()=>{saveViewState('editor',{zoom:Number(document.querySelector('#cropZoom').value)});applyZoom()};document.querySelector('#resetCrop').title='Restore proposal';document.querySelector('#resetCrop').onclick=()=>{inputs.forEach((n,i)=>n.value=item.box[i]);draw()};
     let syncingPan=false;
     const syncPan=(from,to)=>{if(syncingPan)return;syncingPan=true;const maxX=Math.max(1,from.scrollWidth-from.clientWidth),maxY=Math.max(1,from.scrollHeight-from.clientHeight);to.scrollLeft=(from.scrollLeft/maxX)*Math.max(0,to.scrollWidth-to.clientWidth);to.scrollTop=(from.scrollTop/maxY)*Math.max(0,to.scrollHeight-to.clientHeight);syncingPan=false};
-    const bindPan=(pane,other)=>{pane.onscroll=()=>syncPan(pane,other);let start=null;pane.onpointerdown=event=>{if(event.button!==0)return;start={x:event.clientX,y:event.clientY,left:pane.scrollLeft,top:pane.scrollTop};pane.setPointerCapture(event.pointerId);pane.classList.add('panning')};pane.onpointermove=event=>{if(!start)return;pane.scrollLeft=start.left-(event.clientX-start.x);pane.scrollTop=start.top-(event.clientY-start.y)};pane.onpointerup=event=>{start=null;pane.classList.remove('panning');if(pane.hasPointerCapture(event.pointerId))pane.releasePointerCapture(event.pointerId)}};
+    const bindPan=(pane,other)=>{pane.onscroll=()=>{syncPan(pane,other);if(pane===source.parentElement)saveViewState('editor',{cropScrollLeft:pane.scrollLeft,cropScrollTop:pane.scrollTop});};let start=null;pane.onpointerdown=event=>{if(event.button!==0)return;start={x:event.clientX,y:event.clientY,left:pane.scrollLeft,top:pane.scrollTop};pane.setPointerCapture(event.pointerId);pane.classList.add('panning')};pane.onpointermove=event=>{if(!start)return;pane.scrollLeft=start.left-(event.clientX-start.x);pane.scrollTop=start.top-(event.clientY-start.y)};pane.onpointerup=event=>{start=null;pane.classList.remove('panning');if(pane.hasPointerCapture(event.pointerId))pane.releasePointerCapture(event.pointerId)}};
     bindPan(source.parentElement,previewPane);bindPan(previewPane,source.parentElement);
+    source.addEventListener('load',()=>requestAnimationFrame(()=>{source.parentElement.scrollLeft=savedState.cropScrollLeft||0;source.parentElement.scrollTop=savedState.cropScrollTop||0;}),{once:true});
     document.querySelector('#visionCrop').onclick=async()=>{try{const proposal=await api(`/api/v1/media/${item.media_id}/crop-vision-analysis`,{method:'POST'});inputs.forEach((n,i)=>n.value=proposal.box[i]);document.querySelector('#proposalMethod').textContent='vision';draw();toast('Vision proposal loaded')}catch(error){toast(error.message,true)}};
-    document.querySelector('#applyCrop').onclick=async()=>{if(!confirm('Apply this crop? The original is kept in version history.'))return;try{await api(`/api/v1/crop-analyses/${id}/apply`,{method:'POST',body:JSON.stringify({box:box()})});toast('Crop applied');await openNextPending()}catch(error){toast(error.message,true)}};
+    document.querySelector('#applyCrop').onclick=async()=>{if(!confirm('Apply this crop? The original is kept in version history.'))return;try{if(item.status!=='pending')await api(`/api/v1/crop-analyses/${id}/reset`,{method:'POST'});await api(`/api/v1/crop-analyses/${id}/apply`,{method:'POST',body:JSON.stringify({box:box()})});toast('Crop applied');await openNextPending()}catch(error){toast(error.message,true)}};
     document.querySelectorAll('.restore-revision').forEach(n=>n.onclick=async()=>{if(!confirm('Restore this version?'))return;await api(`/api/v1/media/${item.media_id}/revisions/${n.dataset.id}/activate`,{method:'POST'});toast('Version restored');openMediaEditor(item.media_id)}); icons();
   };
   const openTrim = async mediaId => {
+    const sequence=++editorRenderSequence;
     const state=await api(`/api/v1/media/${mediaId}/trim-state`);
+    if(editorEpoch!==renderEpoch||sequence!==editorRenderSequence)return;
     const source=state.source; let durationMs=Number(state.duration_ms)||0;
     const editorKey=Number(source.id);
+    const revisionKey=editorDraftKey(editorKey,source.active_revision_id);
+    syncEditorRoute(editorKey,'trim');
     // Persist the open clip and the in-progress draft so a refresh reopens the
     // same trim editor with its segments and zoom instead of the Editor list.
-    saveViewState('editor',{targetMediaId:editorKey,trimTarget:true,trimMediaId:editorKey,analysisId:null,backgroundOpen:false});
-    const draft=(viewState('editor').trimDrafts||{})[String(editorKey)]||null;
+    saveViewState('editor',{editingMediaId:null,editingRevisionId:null,targetMediaId:editorKey,trimTarget:true,trimMediaId:editorKey,analysisId:null,backgroundOpen:false,requestedTool:null});
+    const draft=restoreTrimDraft(viewState('editor').trimDrafts,editorKey,source.active_revision_id);
     const serverRanges=new Map((state.segments||[]).map(segment=>[`${Number(segment.start_ms)}:${Number(segment.end_ms)}`,segment]));
     let segments=(draft&&Array.isArray(draft.segments))
       ?draft.segments.map(segment=>{const start=Number(segment.start_ms)||0,end=Number(segment.end_ms)||0;const server=serverRanges.get(`${start}:${end}`);return {start_ms:start,end_ms:end,state:server?'saved':'new',media_item_id:server?.media_item_id,index:server?.index};})
@@ -1599,7 +1689,7 @@ async function showEditor() {
     let rangeTouched=Boolean(draft?.rangeTouched);
     const savedView=Array.isArray(draft?.view)&&draft.view.length===2?draft.view.map(Number):null;
     workspace.innerHTML=`<div class="page editor-page trim-editor-page">
-      <div class="page-head"><button class="btn" id="backEditor"><i data-lucide="chevron-left"></i>Editor</button><button class="icon-btn" id="trimOpenLibrary" title="Open in Library"><i data-lucide="images"></i></button><h2>Trim ${isVideo?'video':'animation'}</h2><span class="badge">Media #${source.id}</span>${state.derived_from_media_id?`<span class="badge">Part ${state.trim_index||'?'}</span>`:''}</div>
+      <div class="page-head"><button class="btn" id="backEditor"><i data-lucide="chevron-left"></i>Editor</button><a class="icon-btn" id="trimOpenLibrary" title="Open in Library" href="${libraryHref(source.id)}" target="${libraryTarget()}" rel="noopener" aria-label="Open in Library"><i data-lucide="images"></i></a><h2>Trim ${isVideo?'video':'animation'}</h2><span class="badge">Media #${source.id}</span>${state.derived_from_media_id?`<span class="badge">Part ${state.trim_index||'?'}</span>`:''}</div>
       <div class="trim-layout">
         <div class="trim-stage">
           <div class="trim-preview">${isVideo?`<video id="trimSource" src="${source.content_url}" controls preload="metadata" playsinline></video>`:`<img id="trimSource" src="${source.content_url}" alt="">`}</div>
@@ -1643,10 +1733,11 @@ async function showEditor() {
     const segmentStateLabel=state=>({saved:'Saved',encoding:'Encoding',queued:'Queued',error:'Failed',new:'Not saved'}[state]||'Not saved');
     const saveTrimDraft=()=>{
       const drafts={...(viewState('editor').trimDrafts||{})};
-      drafts[String(editorKey)]={segments:segments.map(segment=>({start_ms:segment.start_ms,end_ms:segment.end_ms})),startMs:pendingStartMs,endMs:pendingEndMs,rangeTouched,view:[viewStartMs,viewEndMs]};
+      delete drafts[String(editorKey)];
+      drafts[revisionKey]={revisionId:source.active_revision_id,segments:segments.map(segment=>({start_ms:segment.start_ms,end_ms:segment.end_ms})),startMs:pendingStartMs,endMs:pendingEndMs,rangeTouched,view:[viewStartMs,viewEndMs]};
       saveViewState('editor',{trimDrafts:drafts});
     };
-    const clearTrimDraft=()=>{const drafts={...(viewState('editor').trimDrafts||{})};delete drafts[String(editorKey)];saveViewState('editor',{trimDrafts:drafts});};
+    const clearTrimDraft=()=>{const drafts={...(viewState('editor').trimDrafts||{})};delete drafts[String(editorKey)];delete drafts[revisionKey];saveViewState('editor',{trimDrafts:drafts});};
     const renderZoomValue=()=>{const top=maxMs();const span=(viewEndMs-viewStartMs)||1;const factor=top?Math.max(1,Math.round(top/span)):1;const zoomInput=document.querySelector('#trimZoom');if(zoomInput)zoomInput.value=String(Math.min(64,factor));const label=document.querySelector('#trimZoomValue');if(label)label.textContent=`${factor}×`;};
     const syncRangeUI=()=>{
       startTime.value=formatTimecode(pendingStartMs);endTime.value=formatTimecode(pendingEndMs);
@@ -1707,7 +1798,7 @@ async function showEditor() {
     startTime.onchange=()=>{const parsed=parseTimecode(startTime.value);if(parsed===null){startTime.classList.add('invalid');toast('Enter the start as mm:ss.d, for example 0:56.0.',true);startTime.value=formatTimecode(pendingStartMs);startTime.classList.remove('invalid');return}setStart(parsed);seekTo(pendingStartMs);saveTrimDraft()};
     endTime.onchange=()=>{const parsed=parseTimecode(endTime.value);if(parsed===null){endTime.classList.add('invalid');toast('Enter the end as mm:ss.d, for example 0:56.0.',true);endTime.value=formatTimecode(pendingEndMs);endTime.classList.remove('invalid');return}setEnd(parsed);seekTo(pendingEndMs);saveTrimDraft()};
     document.querySelector('#backEditor').onclick=()=>{saveTrimDraft();saveViewState('editor',{targetMediaId:null,trimTarget:false,trimMediaId:null});render()};
-    document.querySelector('#trimOpenLibrary').onclick=()=>openMediaInLibrary(source.id);
+    document.querySelector('#trimOpenLibrary').onclick=libraryLinkClick;
     document.querySelector('#previewTrim').onclick=()=>{if(!video)return;rangeTouched=true;seekTo(pendingStartMs);const playing=video.play();if(playing&&playing.catch)playing.catch(()=>{})};
     document.querySelector('#trimSetStart').onclick=()=>{if(video){setStart(Math.round(video.currentTime*1000));saveTrimDraft()}};
     document.querySelector('#trimSetEnd').onclick=()=>{if(video){setEnd(Math.round(video.currentTime*1000));saveTrimDraft()}};
@@ -1765,12 +1856,20 @@ async function showEditor() {
     if(isVideo&&maxMs())setView(savedView?savedView[0]:0,savedView?savedView[1]:maxMs(),{persist:false});
   };
   const targetMediaId=Number(editorState.targetMediaId || 0);
-  if(targetMediaId){if(editorState.trimTarget||editorState.trimMediaId){try{await openTrim(targetMediaId);return}catch(error){toast(error.message,true);saveViewState('editor',{targetMediaId:null,trimTarget:false})}}try{await openMediaEditor(targetMediaId);return}catch(error){toast(error.message,true);saveViewState('editor',{targetMediaId:null})}}
+  if(targetMediaId){
+    try{
+      const media=await api(`/api/v1/media/${targetMediaId}`);
+      if(editorEpoch!==renderEpoch)return;
+      if(media.type==='video'||media.is_animated){syncEditorRoute(targetMediaId,'trim');await openTrim(targetMediaId);return;}
+      await openMediaEditor(targetMediaId,editorState.requestedTool==='trim'?null:editorState.requestedTool);return;
+    }catch(error){if(editorEpoch!==renderEpoch)return;toast(error.message,true);saveViewState('editor',{targetMediaId:null,analysisId:null,trimTarget:false,trimMediaId:null});}
+  }
   if(editorState.analysisId){try{await openCrop(Number(editorState.analysisId));return}catch{saveViewState('editor',{analysisId:null})}}
   await render(editorState.cropStatus || editorState.status ? {cropStatus: editorState.cropStatus || editorState.status} : undefined);
 }
 
-function downloadCollectionArchive(id) {
+async function downloadCollectionArchive(id) {
+  try{const check=await api(`/api/v1/collections/${id}/export-preview`);if(!check.can_export){toast(check.blocked_media?.length?`Crop review required for ${check.blocked_media.map(item=>'#'+item.id).join(', ')}. Open Editor before exporting.`:`Export blocked: ${check.violations.join(', ')}`,true);return;}}catch(error){toast(error.message,true);return;}
   toast('Preparing ZIP archive...');
   const link = document.createElement('a');
   link.href = `/api/v1/collections/${id}/export-archive`;
@@ -1799,9 +1898,13 @@ workspace.addEventListener('click', event => {
 
 async function showCollections() {
   const collectionState=viewState('collections');
+  if(collectionState.screen==='builder')return showCollectionBuilder();
+  if(collectionState.screen==='detail'&&collectionState.collectionId)return showSavedCollection(collectionState.collectionId);
+  const epoch=renderEpoch;
   setHeader('Collections','',button('Create','plus','primary'));
-  actions.querySelector('button').onclick = showCollectionBuilder;
+  actions.querySelector('button').onclick = () => navigate('collections?screen=builder');
   const data = await api('/api/v1/collections');
+  if(epoch!==renderEpoch)return;
   data.items.sort((left, right) => {
     const byDate = String(right.created_at || '').localeCompare(String(left.created_at || ''));
     return byDate || Number(right.id) - Number(left.id);
@@ -1827,133 +1930,173 @@ async function showCollections() {
   document.querySelector('#collectionSearch').value=collectionState.search || ''; document.querySelector('#collectionPageSize').value=String(prefs.pageSize); document.querySelector('#collectionView').value=prefs.view;
   document.querySelector('#collectionSearch').oninput=()=>{page=1;render()}; document.querySelector('#collectionPageSize').onchange=event=>{prefs.pageSize=Number(event.target.value);localStorage.setItem('jiffle.collection-prefs',JSON.stringify(prefs));page=1;render()}; document.querySelector('#collectionView').onchange=event=>{prefs.view=event.target.value;localStorage.setItem('jiffle.collection-prefs',JSON.stringify(prefs));render()};
   await render();
-  const collectionMedia = item => `<figure class="collection-media">${item.media_type === 'video' ? `<video class="collection-preview" src="${item.content_url}" poster="${item.thumbnail_url}" controls preload="metadata"></video>` : `<a href="${item.content_url}" target="_blank" rel="noopener"><img class="collection-preview" src="${item.thumbnail_url}" loading="lazy" alt=""></a>`}<figcaption>${item.source_url ? `<a href="${esc(item.source_url)}" target="_blank" rel="noopener">Source</a>` : '<span>Unknown source</span>'} <button class="icon-btn collection-library" data-media-id="${item.id}" title="Open in Library"><i data-lucide="images"></i></button></figcaption></figure>`;
-  const collectionSourceUrl = item => item.file_source_url || item.source_url || '';
-  const copyCollectionSources = async collection => {
-    const links = collection.items.map(collectionSourceUrl);
-    if (!links.some(Boolean)) { toast('No source links are available.', true); return; }
-    try {
-      await copyTextToClipboard(links.join('\n'));
-      const missing = links.filter(link => !link).length;
-      toast(missing ? `Copied ${links.length} lines; ${missing} have no source link.` : `Copied ${links.length} source links.`);
-    } catch (error) { toast(error.message, true); }
-  };
-  document.querySelectorAll('.open').forEach(node => node.onclick = async () => {
-    const c=await api(`/api/v1/collections/${node.dataset.id}`);
-    workspace.innerHTML=`<div class="page collection-page"><div class="page-head"><button class="btn" id="backCollections"><i data-lucide="chevron-left"></i>Collections</button><h2>${esc(c.name)}</h2><span class="badge">${c.items.length}</span><button class="btn archive" data-id="${c.id}" title="Download ZIP"><i data-lucide="file-archive"></i>ZIP</button><button id="copyCollectionSources" class="icon-btn" title="Copy image source links" aria-label="Copy image source links"><i data-lucide="copy"></i></button></div><div class="collection-meta"><span>Created: ${esc(formatDateTime(c.created_at))}</span><form id="jiggieForm"><label for="jiggieUrl">URL Jiggie</label><div class="jiggie-control"><input id="jiggieUrl" class="control" type="url" value="${esc(c.jiggie_url||'')}" placeholder="https://jiggie.fun/..."><button class="btn primary"><i data-lucide="save"></i>Save</button>${c.jiggie_url ? `<a class="icon-btn" href="${esc(c.jiggie_url)}" target="_blank" rel="noopener" title="Open Jiggie"><i data-lucide="external-link"></i></a>` : ''}</div></form></div><div class="collection-gallery">${c.items.map(collectionMedia).join('')}</div></div>`;
-    document.querySelectorAll('.collection-library').forEach(n=>n.onclick=()=>openMediaInLibrary(Number(n.dataset.mediaId))); document.querySelector('#backCollections').onclick=showCollections; document.querySelector('#copyCollectionSources').onclick=()=>copyCollectionSources(c);
-    document.querySelector('#jiggieForm').onsubmit=async event=>{event.preventDefault();try{await api(`/api/v1/collections/${c.id}`,{method:'PATCH',body:JSON.stringify({jiggie_url:document.querySelector('#jiggieUrl').value})});toast('URL saved');showCollections();}catch(error){toast(error.message,true);}};
-    icons();
-  });
-  function bindCollectionActions(){ document.querySelectorAll('.export').forEach(node => node.onclick = () => exportCollection(node.dataset.id)); document.querySelectorAll('.delete').forEach(node => node.onclick = async () => { await api(`/api/v1/collections/${node.dataset.id}`,{method:'DELETE'});showCollections(); }); document.querySelectorAll('.open').forEach(node => node.onclick = openCollection); }
-  async function openCollection(event){ const c=await api(`/api/v1/collections/${event.currentTarget.dataset.id}`); workspace.innerHTML=`<div class="page collection-page"><div class="page-head"><button class="btn" id="backCollections"><i data-lucide="chevron-left"></i>Collections</button><h2>${esc(c.name)}</h2><span class="badge">${c.items.length}</span><button class="btn archive" data-id="${c.id}" title="Download ZIP"><i data-lucide="file-archive"></i>ZIP</button><button id="copyCollectionSources" class="icon-btn" title="Copy image source links" aria-label="Copy image source links"><i data-lucide="copy"></i></button></div><div class="collection-meta"><span>Created: ${esc(formatDateTime(c.created_at))}</span><form id="jiggieForm"><label for="jiggieUrl">URL Jiggie</label><div class="jiggie-control"><input id="jiggieUrl" class="control" type="url" value="${esc(c.jiggie_url||'')}" placeholder="https://jiggie.fun/..."><button class="btn primary"><i data-lucide="save"></i>Save</button></div></form></div><div class="collection-gallery">${c.items.map(collectionMedia).join('')}</div></div>`; document.querySelector('#backCollections').onclick=showCollections; document.querySelector('#copyCollectionSources').onclick=()=>copyCollectionSources(c); document.querySelector('#jiggieForm').onsubmit=async e=>{e.preventDefault();try{await api(`/api/v1/collections/${c.id}`,{method:'PATCH',body:JSON.stringify({jiggie_url:document.querySelector('#jiggieUrl').value})});toast('URL saved');}catch(error){toast(error.message,true);}}; icons(); }
+  function bindCollectionActions(){
+    document.querySelectorAll('.export').forEach(node=>node.onclick=()=>exportCollection(node.dataset.id));
+    document.querySelectorAll('.delete').forEach(node=>node.onclick=async()=>{
+      if(!confirm('Delete this collection? Library files are kept.'))return;
+      await api(`/api/v1/collections/${node.dataset.id}`,{method:'DELETE'});
+      if(currentView==='collections')await showCollections();
+    });
+    document.querySelectorAll('.open').forEach(node=>node.onclick=()=>navigate(`collections?id=${node.dataset.id}`));
+  }
 }
 
-async function showCollectionBuilder() {
-  setHeader('Collection builder');
-  const presets = await api('/api/v1/collection-presets');
-  let preview = null;
-  let rejectedIds = [];
-  const tagValues = value => [...new Set(String(value || '').split(/\s+/).map(tag => tag.trim().toLowerCase()).filter(Boolean))];
-  workspace.innerHTML = `<div class="page collection-builder"><section class="panel"><div class="panel-head"><i data-lucide="wand-sparkles"></i>Selection rules</div><div class="panel-body builder-fields"><div class="form-row"><label>Preset</label><select id="builderPreset" class="control"><option value="">No preset</option>${presets.items.map(item => `<option value="${item.id}">${esc(item.name)}</option>`).join('')}</select></div><div class="form-row"><label>Preset name</label><input id="builderPresetName" class="control" maxlength="120" placeholder="Name for a new preset"></div><div class="form-row"><label>Collection name</label><input id="builderName" class="control" maxlength="120"></div><div class="form-row"><label>Count</label><input id="builderCount" class="control" type="number" min="1" max="1000" value="10"></div><div class="form-row builder-search"><label>Search</label><input id="builderQuery" class="control" placeholder="portrait blue_eyes -comic author:artist"><div id="builderQueryChips" class="search-chips"></div></div><div class="builder-actions"><button id="savePreset" class="btn"><i data-lucide="bookmark-plus"></i>Save preset</button><button id="deletePreset" class="icon-btn danger" title="Delete selected preset"><i data-lucide="trash-2"></i></button><button id="generateCollection" class="btn primary"><i data-lucide="shuffle"></i>Generate</button></div></div></section><div id="builderSummary" class="builder-summary"></div><div id="builderPreview" class="collection-preview-grid"><div class="empty">Enter tags and generate a selection</div></div><div class="builder-savebar"><button id="cancelBuilder" class="btn"><i data-lucide="chevron-left"></i>Collections</button><span id="builderStatus">No collection generated yet</span><button id="commitCollection" class="btn primary" disabled><i data-lucide="save"></i>Save collection</button></div></div>`;
-  const fields = () => ({
-    query: document.querySelector('#builderQuery').value.trim(),
-    requested_count: Number(document.querySelector('#builderCount').value),
-  });
-  const renderBuilderChips = () => {
-    document.querySelector('#builderQueryChips').innerHTML = tagValues(document.querySelector('#builderQuery').value).map(tag => `<span class="filter-chip${tag.startsWith('-') ? ' excluded' : ''}">${esc(tag)}</span>`).join('');
-    icons();
-  };
-  document.querySelector('#builderQuery').oninput = renderBuilderChips;
-  const renderPreview = () => {
-    if (!preview) return;
-    const similar = preview.most_similar_collection ? `Similarity ${Math.round(preview.max_similarity * 100)}% with "${esc(preview.most_similar_collection.name)}"` : '';
-    document.querySelector('#builderSummary').innerHTML = `<span class="badge ${preview.can_save ? 'good' : 'warn'}">Available ${preview.available_count}, selected ${preview.items.length} of ${preview.requested_count}</span>${similar ? `<span>${similar}</span>` : ''}`;
-    document.querySelector('#builderPreview').innerHTML = preview.items.map((item,index) => `<article class="builder-card${item.author_limit_exceeded ? ' limit-warning' : ''}"><div class="builder-image"><img src="${item.thumbnail_url}" loading="lazy" alt=""><button class="icon-btn open-builder-library" data-media-id="${item.id}" title="Open in Library"><i data-lucide="images"></i></button>${item.author_limit_exceeded ? '<span class="limit-icon" title="Author item limit exceeded"><i data-lucide="triangle-alert"></i></span>' : ''}<button class="icon-btn swap-builder-item" data-index="${index}" title="Replace"><i data-lucide="refresh-cw"></i></button></div><div><strong>${esc(item.author || 'Unknown author')}</strong><small>${item.usage_count} collections${item.last_used_at ? ` · ${esc(formatDateTime(item.last_used_at))}` : ' · never used'}</small></div></article>`).join('') || '<div class="empty">No matching images</div>';
-    document.querySelectorAll('.open-builder-library').forEach(n=>n.onclick=()=>openMediaInLibrary(Number(n.dataset.mediaId)));
-    document.querySelector('#commitCollection').disabled = !preview.can_save || !document.querySelector('#builderName').value.trim();
-    document.querySelector('#builderStatus').textContent = preview.can_save ? 'Selection is ready to save' : 'Not enough matching images';
-    document.querySelectorAll('.swap-builder-item').forEach(node => node.onclick = async () => {
-      const index = Number(node.dataset.index);
-      const old = preview.items[index];
-      try {
-        const replacement = await api('/api/v1/collection-previews/replacement', {method:'POST', body:JSON.stringify({...fields(), current_ids:preview.items.filter((_,itemIndex)=>itemIndex!==index).map(item=>item.id), rejected_ids:[...rejectedIds,old.id]})});
-        rejectedIds.push(old.id);
-        preview.items[index] = replacement;
-        renderPreview();
-      } catch (error) { toast(error.message, true); }
-    });
-    icons();
-  };
-  const presetSelect = () => document.querySelector('#builderPreset');
-  const presetNameInput = () => document.querySelector('#builderPresetName');
-  const selectedPreset = () => presets.items.find(item => item.id === Number(presetSelect().value)) || null;
-  presetSelect().onchange = () => {
-    const preset = selectedPreset();
-    if (!preset) { presetNameInput().value = ''; return; }
-    document.querySelector('#builderQuery').value = preset.query || '';
-    document.querySelector('#builderCount').value = preset.requested_count;
-    presetNameInput().value = preset.name;
-    renderBuilderChips();
-  };
-  document.querySelector('#generateCollection').onclick = async () => {
-    try { rejectedIds = []; preview = await api('/api/v1/collection-previews', {method:'POST',body:JSON.stringify(fields())}); renderPreview(); }
-    catch (error) { toast(error.message, true); }
-  };
-  document.querySelector('#builderName').oninput = () => preview && renderPreview();
-  document.querySelector('#savePreset').onclick = async () => {
-    const name = presetNameInput().value.trim();
-    if (!name) { presetNameInput().classList.add('invalid'); presetNameInput().focus(); toast('Enter a preset name', true); return; }
-    presetNameInput().classList.remove('invalid');
-    const preset = selectedPreset();
-    try {
-      const saved = preset
-        ? await api(`/api/v1/collection-presets/${preset.id}`, {method:'PUT',body:JSON.stringify({name,...fields()})})
-        : await api('/api/v1/collection-presets', {method:'POST',body:JSON.stringify({name,...fields()})});
-      if (preset) {
-        Object.assign(preset, saved);
-        const option = presetSelect().querySelector(`option[value="${preset.id}"]`);
-        if (option) option.textContent = saved.name;
-        toast('Preset updated');
-      } else {
-        presets.items.push(saved);
-        presetSelect().add(new Option(saved.name,String(saved.id),true,true));
-        toast('Preset saved');
-      }
-      presetNameInput().value = saved.name;
-    } catch (error) { toast(error.message, true); }
-  };
-  document.querySelector('#deletePreset').onclick = async () => {
-    const id = Number(presetSelect().value);
-    if (!id) return;
-    try {
-      await api(`/api/v1/collection-presets/${id}`,{method:'DELETE'});
-      presets.items = presets.items.filter(item => item.id !== id);
-      presetSelect().querySelector(`option[value="${id}"]`).remove();
-      presetNameInput().value = '';
-      toast('Preset deleted');
-    } catch (error) { toast(error.message, true); }
-  };
-  document.querySelector('#commitCollection').onclick = async () => {
-    try { await api('/api/v1/collections',{method:'POST',body:JSON.stringify({name:document.querySelector('#builderName').value.trim(),preset_id:Number(document.querySelector('#builderPreset').value)||null,...fields(),media_item_ids:preview.items.map(item=>item.id)})}); toast('Collection saved'); showCollections(); }
-    catch (error) {
-      const status=document.querySelector('#builderStatus');
-      const name=document.querySelector('#builderName');
-      status.textContent=error.message;
-      if(/name already exists/i.test(error.message)){name.classList.add('invalid');name.focus();}
-      toast(error.message, true);
-    }
-  };
-  document.querySelector('#builderName').oninput=event=>{event.target.classList.remove('invalid');document.querySelector('#commitCollection').disabled=!preview?.can_save||!event.target.value.trim();};
-  document.querySelector('#cancelBuilder').onclick = showCollections;
+const collectionSourceUrl = item => item.file_source_url || item.source_url || '';
+async function copyCollectionSources(collection) {
+  const links = collection.items.map(collectionSourceUrl);
+  if(!links.some(Boolean)){toast('No source links are available.',true);return;}
+  try{await copyTextToClipboard(links.join('\n'));toast(`Copied ${links.filter(Boolean).length} source links`);}catch(error){toast(error.message,true);}
+}
+async function showSavedCollection(id) {
+  const epoch=renderEpoch;
+  const c=await api(`/api/v1/collections/${id}`);
+  if(epoch!==renderEpoch)return;
+  setHeader('Collections');
+  const collectionMedia=item=>`<figure class="collection-media">${item.media_type==='video'?`<video class="collection-preview" src="${item.content_url}" poster="${item.thumbnail_url}" controls preload="metadata"></video>`:`<a href="${item.content_url}" target="_blank" rel="noopener"><img class="collection-preview" src="${item.thumbnail_url}" loading="lazy" alt=""></a>`}<figcaption>${item.source_url?`<a href="${esc(item.source_url)}" target="_blank" rel="noopener">Source</a>`:'<span>Unknown source</span>'}<a class="icon-btn collection-library" data-media-id="${item.id}" href="${libraryHref(item.id)}" target="${libraryTarget()}" rel="noopener" title="Open in Library" aria-label="Open in Library"><i data-lucide="images"></i></a></figcaption></figure>`;
+  workspace.innerHTML=`<div class="page collection-page"><div class="page-head"><button class="btn" id="backCollections"><i data-lucide="chevron-left"></i>Collections</button><h2>${esc(c.name)}</h2><span class="badge">${c.items.length}</span><button class="btn archive" data-id="${c.id}" title="Download ZIP"><i data-lucide="file-archive"></i>ZIP</button><button id="copyCollectionSources" class="icon-btn" title="Copy image source links" aria-label="Copy image source links"><i data-lucide="copy"></i></button></div><div class="collection-meta"><span>Created: ${esc(formatDateTime(c.created_at))}</span>${c.preset_name?`<span>Preset: ${esc(c.preset_name)}</span>`:''}<span>Rules: ${esc(c.preset_query||(c.included_tags||[]).join(' '))}</span><form id="jiggieForm"><label for="jiggieUrl">URL Jiggie</label><div class="jiggie-control"><input id="jiggieUrl" class="control" type="url" value="${esc(c.jiggie_url||'')}" placeholder="https://jiggie.fun/..."><button class="btn primary"><i data-lucide="save"></i>Save</button>${c.jiggie_url?`<a class="icon-btn" href="${esc(c.jiggie_url)}" target="_blank" rel="noopener" title="Open Jiggie"><i data-lucide="external-link"></i></a>`:''}</div></form></div><div class="collection-gallery">${c.items.map(collectionMedia).join('')}</div></div>`;
+  document.querySelector('#backCollections').onclick=()=>navigate('collections?screen=list');
+  document.querySelector('#copyCollectionSources').onclick=()=>copyCollectionSources(c);
+  document.querySelectorAll('.collection-library').forEach(node=>node.onclick=libraryLinkClick);
+  document.querySelector('#jiggieForm').onsubmit=async event=>{event.preventDefault();try{await api(`/api/v1/collections/${c.id}`,{method:'PATCH',body:JSON.stringify({jiggie_url:document.querySelector('#jiggieUrl').value})});toast('URL saved');}catch(error){toast(error.message,true);}};
   icons();
 }
 
+async function showCollectionBuilder() {
+  const epoch=renderEpoch;
+  setHeader('Collection builder','Draft saved in this tab',button('New draft','file-plus'));
+  const presets=await api('/api/v1/collection-presets');
+  if(epoch!==renderEpoch)return;
+  let draft=viewState('collections').draft || {id:`${Date.now()}-${Math.random()}`,name:'',query:'',requested_count:10,preset_id:null,preset_name:'',preview:null,rejectedIds:[]};
+  saveViewState('collections',{screen:'builder',draft});
+  let preview=draft.preview;
+  let rejectedIds=[...(draft.rejectedIds||[])];
+  let operation=0;
+  workspace.innerHTML = `<div class="page collection-builder"><section class="panel"><div class="panel-head"><i data-lucide="wand-sparkles"></i>Selection rules</div><div class="panel-body builder-fields"><div class="form-row"><label>Preset</label><select id="builderPreset" class="control"><option value="">No preset</option>${presets.items.map(item => `<option value="${item.id}">${esc(item.name)}</option>`).join('')}</select></div><div class="form-row"><label>Preset name</label><input id="builderPresetName" class="control" maxlength="120" placeholder="Name for a new preset"></div><div class="form-row"><label>Collection name</label><input id="builderName" class="control" maxlength="120"></div><div class="form-row"><label>Count</label><input id="builderCount" class="control" type="number" min="1" max="1000" value="10"></div><div class="form-row builder-search"><label>Search</label><input id="builderQuery" class="control" placeholder="portrait blue_eyes -comic author:artist"><div id="builderQueryChips" class="search-chips"></div></div><div class="builder-actions"><button id="savePreset" class="btn"><i data-lucide="bookmark-plus"></i>Save preset</button><button id="deletePreset" class="icon-btn danger" title="Delete selected preset"><i data-lucide="trash-2"></i></button><button id="generateCollection" class="btn primary"><i data-lucide="shuffle"></i>Generate</button></div></div></section><div id="builderSummary" class="builder-summary"></div><div id="builderPreview" class="collection-preview-grid"><div class="empty">Enter tags and generate a selection</div></div><div class="builder-savebar"><button id="cancelBuilder" class="btn"><i data-lucide="chevron-left"></i>Collections</button><span id="builderStatus">No collection generated yet</span><button id="commitCollection" class="btn primary" disabled><i data-lucide="save"></i>Save collection</button></div></div>`;
+  const root=document.querySelector('.collection-builder');
+  const input=id=>root.querySelector(`#${id}`);
+  input('builderName').value=draft.name||'';
+  input('builderQuery').value=draft.query||'';
+  input('builderCount').value=String(draft.requested_count||10);
+  input('builderPreset').value=String(draft.preset_id||'');
+  input('builderPresetName').value=draft.preset_name||'';
+  const fields=()=>({query:input('builderQuery').value.trim(),requested_count:Number(input('builderCount').value)});
+  const updateDraft=changes=>{
+    const current=viewState('collections').draft;
+    if(current?.id!==draft.id)return false;
+    draft={...current,...changes};preview=draft.preview;rejectedIds=[...(draft.rejectedIds||[])];
+    saveViewState('collections',{draft});
+    return true;
+  };
+  const saveDraft=()=>updateDraft({...fields(),name:input('builderName').value,preset_id:Number(input('builderPreset').value)||null,preset_name:input('builderPresetName').value});
+  const beginRequest=()=>{
+    saveDraft();const token=++collectionRequestSequence;
+    collectionDraftRequests.set(draft.id,token);++operation;return token;
+  };
+  const requestCurrent=token=>viewState('collections').draft?.id===draft.id&&collectionDraftRequests.get(draft.id)===token;
+  const finishRequest=(token,changes)=>{
+    if(!requestCurrent(token))return false;
+    collectionDraftRequests.delete(draft.id);updateDraft(changes);
+    if(root.isConnected)renderPreview();
+    else if(currentView==='collections'&&viewState('collections').screen==='builder')showCollectionBuilder();
+    return true;
+  };
+  const renderBuilderChips=()=>{
+    input('builderQueryChips').innerHTML=parseLibrarySearch(input('builderQuery').value).terms.map(tag=>`<span class="filter-chip${tag.startsWith('-')?' excluded':''}">${esc(tag)}</span>`).join('');
+  };
+  const canSave=()=>Boolean(!collectionDraftRequests.has(draft.id)&&preview?.can_save&&selectionRulesMatch(draft)&&input('builderName').value.trim());
+  const renderPreview=()=>{
+    if(!root.isConnected)return;
+    renderBuilderChips();
+    input('commitCollection').disabled=!canSave();
+    input('generateCollection').disabled=collectionDraftRequests.has(draft.id);
+    if(!preview){input('builderStatus').textContent='No collection generated yet';return;}
+    const similar=preview.most_similar_collection?`Similarity ${Math.round(preview.max_similarity*100)}% with "${esc(preview.most_similar_collection.name)}"`:'';
+    input('builderSummary').innerHTML=`<span class="badge ${preview.can_save?'good':'warn'}">Available ${preview.available_count}, selected ${preview.items.length} of ${preview.requested_count}</span>${similar?`<span>${similar}</span>`:''}`;
+    input('builderPreview').innerHTML=preview.items.map((item,index)=>`<article class="builder-card${item.author_limit_exceeded?' limit-warning':''}${item.issue?' invalid-selection':''}"><div class="builder-image"><img src="${item.thumbnail_url}" loading="lazy" alt="Media #${item.id}"><a class="icon-btn open-builder-library" data-media-id="${item.id}" href="${libraryHref(item.id)}" target="${libraryTarget()}" rel="noopener" title="Open in Library" aria-label="Open in Library"><i data-lucide="images"></i></a>${item.author_limit_exceeded?'<span class="limit-icon" title="Author item limit exceeded"><i data-lucide="triangle-alert"></i></span>':''}<button class="icon-btn swap-builder-item" data-index="${index}" title="Replace"><i data-lucide="refresh-cw"></i></button></div><div><strong>${esc(item.author||'Unknown author')}</strong><small>Media #${item.id} · ${item.usage_count} collections${item.last_used_at?` · ${esc(formatDateTime(item.last_used_at))}`:' · never used'}</small>${item.issue?`<p class="selection-issue">${esc(item.issue)}</p>`:''}</div></article>`).join('')||'<div class="empty">No matching images</div>';
+    input('builderStatus').textContent=!selectionRulesMatch(draft)?'Rules changed — Generate a new selection before saving':preview.can_save?'Selection is ready to save':preview.items.some(item=>item.issue)?'Review the highlighted files; your selection has not been replaced':'Not enough matching images';
+    root.querySelectorAll('.open-builder-library').forEach(node=>node.onclick=libraryLinkClick);
+    root.querySelectorAll('.swap-builder-item').forEach(node=>node.onclick=async()=>{
+      if(collectionDraftRequests.has(draft.id))return;
+      const index=Number(node.dataset.index),old=preview.items[index],version=beginRequest();
+      const requestPreview=preview,requestRejected=[...rejectedIds];
+      node.disabled=true;renderPreview();
+      try{
+        const replacement=await api('/api/v1/collection-previews/replacement',{method:'POST',body:JSON.stringify({...fields(),current_ids:preview.items.filter((_,i)=>i!==index).map(item=>item.id),rejected_ids:[...rejectedIds,old.id]})});
+        if(!requestCurrent(version))return;
+        const items=requestPreview.items.map((item,i)=>i===index?replacement:item);
+        finishRequest(version,{preview:{...requestPreview,items,can_save:items.length===requestPreview.requested_count&&!items.some(item=>item.issue)},rejectedIds:[...requestRejected,old.id]});
+      }catch(error){finishRequest(version,{});if(root.isConnected)toast(error.message,true);}finally{node.disabled=false;}
+    });
+    icons();
+  };
+  const presetSelect = () => input('builderPreset');
+  const presetNameInput = () => input('builderPresetName');
+  const selectedPreset = () => presets.items.find(item => item.id === Number(presetSelect().value)) || null;
+  presetSelect().onchange=()=>{
+    const preset=selectedPreset();
+    if(preset){input('builderQuery').value=preset.query||'';input('builderCount').value=preset.requested_count;presetNameInput().value = preset.name;}
+    else presetNameInput().value='';
+    saveDraft();renderPreview();
+  };
+  root.querySelectorAll('input').forEach(node=>node.addEventListener('input',()=>{node.classList.remove('invalid');saveDraft();renderPreview();}));
+  input('generateCollection').onclick=async()=>{
+    const rules=fields(),version=beginRequest();
+    renderPreview();
+    try{
+      const generated=await api('/api/v1/collection-previews',{method:'POST',body:JSON.stringify(rules)});
+      finishRequest(version,{preview:generated,rejectedIds:[],generatedRules:rules});
+    }catch(error){finishRequest(version,{});if(root.isConnected)toast(error.message,true);}
+  };
+  input('savePreset').onclick=async()=>{
+    const name=presetNameInput().value.trim();
+    if(!name){presetNameInput().classList.add('invalid');presetNameInput().focus();toast('Enter a preset name',true);return;}
+    const preset=selectedPreset();
+    try{
+      const saved=preset
+        ? await api(`/api/v1/collection-presets/${preset.id}`, {method:'PUT',body:JSON.stringify({name,...fields()})})
+        : await api('/api/v1/collection-presets',{method:'POST',body:JSON.stringify({name,...fields()})});
+      if(preset){Object.assign(preset, saved);presetSelect().querySelector(`option[value="${preset.id}"]`).textContent=saved.name;}
+      else{presets.items.push(saved);presetSelect().add(new Option(saved.name,String(saved.id),true,true));}
+      presetNameInput().value=saved.name;saveDraft();toast(preset?'Preset updated':'Preset saved');
+    }catch(error){toast(error.message,true);}
+  };
+  input('deletePreset').onclick=async()=>{
+    const id=Number(presetSelect().value);if(!id)return;
+    try{await api(`/api/v1/collection-presets/${id}`,{method:'DELETE'});presets.items=presets.items.filter(item=>item.id!==id);presetSelect().querySelector(`option[value="${id}"]`).remove();presetNameInput().value='';saveDraft();toast('Preset deleted');}catch(error){toast(error.message,true);}
+  };
+  input('commitCollection').onclick=async()=>{
+    if(!canSave())return;
+    input('commitCollection').disabled=true;
+    try{
+      await api('/api/v1/collections',{method:'POST',body:JSON.stringify({name:input('builderName').value.trim(),preset_id:Number(presetSelect().value)||null,...fields(),media_item_ids:preview.items.map(item=>item.id)})});
+      if(viewState('collections').draft?.id===draft.id)saveViewState('collections',{draft:null});
+      toast('Collection saved');if(root.isConnected)navigate('collections?screen=list');
+    }catch(error){if(root.isConnected){input('builderStatus').textContent=error.message;input('commitCollection').disabled=!canSave();if(/name already exists/i.test(error.message)){input('builderName').classList.add('invalid');input('builderName').focus();}toast(error.message,true);}}
+  };
+  input('cancelBuilder').onclick=()=>{saveDraft();navigate('collections?screen=list');};
+  actions.querySelector('button').onclick=()=>{
+    if((draft.preview||draft.name||draft.query)&&!confirm('Discard this draft and start a new collection?'))return;
+    ++operation;collectionDraftRequests.delete(draft.id);saveViewState('collections',{draft:null,scrollTop:0});navigate('collections?screen=builder',{replace:true});
+  };
+  saveDraft();renderPreview();icons();
+  if(preview&&!collectionDraftRequests.has(draft.id)){
+    const version=operation,requestSequence=collectionRequestSequence;
+    try{
+      const checked=await api('/api/v1/collection-previews/validate',{method:'POST',body:JSON.stringify({...fields(),media_item_ids:preview.items.map(item=>item.id)})});
+      if(!root.isConnected||version!==operation||requestSequence!==collectionRequestSequence||viewState('collections').draft?.id!==draft.id)return;
+      updateDraft({preview:{...preview,can_save:checked.can_save,items:checked.items.map((item,index)=>({...preview.items[index],...item}))}});
+      renderPreview();
+    }catch(error){if(root.isConnected){input('commitCollection').disabled=true;input('builderStatus').textContent=`Could not validate this draft: ${error.message}`;}}
+  }
+}
+
 async function showSettingsPage() {
+  const epoch=renderEpoch;
   setHeader('Settings', 'Interface, limits, and connections');
   const [data, tagConfig] = await Promise.all([
     api('/api/v1/settings'), api('/api/v1/tag-rules'),
   ]);
+  if(epoch!==renderEpoch)return;
   const prefs = libraryPrefs();
   const fontSize = savedFontSize();
   const defaultPaths = {media_path:'media', thumbnail_path:'thumbnails', import_staging_path:'import-staging', export_path:'collections'};
@@ -1967,12 +2110,13 @@ async function showSettingsPage() {
       <small class="field-hint settings-restart-note">New paths take full effect after restarting the application. Existing files are not moved automatically.</small>
     </div></details>
     <details class="settings-section" open><summary><span class="section-icon"><i data-lucide="monitor-cog"></i></span><span><strong>Interface</strong><small>Text size and library display</small></span><i data-lucide="chevron-down"></i></summary><div class="settings-section-body">
+      <label class="setting-line toggle-line"><span><strong>Open Library links in a new tab</strong><small>Keeps your current collection or editor open. Saved in this browser; on by default.</small></span><input id="openLibraryInNewTab" type="checkbox" ${prefs.openLibraryInNewTab?'checked':''}><span class="toggle" aria-hidden="true"></span></label>
       <div class="setting-line"><div><label>Text size</label><small>Applies immediately and is saved in this browser.</small></div><div class="size-options">${allowedFontSizes.map(size => `<button type="button" class="size-option${size === fontSize ? ' active' : ''}" data-font-size="${size}">${size} px</button>`).join('')}</div></div>
       <div class="setting-line"><div><label for="libraryPageSize">Items per page</label><small>More items reduce paging but use more memory.</small></div><select id="libraryPageSize" class="control compact-control">${[20,40,60,100].map(size => `<option value="${size}" ${size === prefs.pageSize ? 'selected' : ''}>${size}</option>`).join('')}</select></div>
       <div class="setting-line"><div><label for="libraryCardSize">Card size</label><small>Controls grid density on large screens.</small></div><select id="libraryCardSize" class="control compact-control"><option value="small" ${prefs.cardSize==='small'?'selected':''}>Compact</option><option value="medium" ${prefs.cardSize==='medium'?'selected':''}>Medium</option><option value="large" ${prefs.cardSize==='large'?'selected':''}>Large</option></select></div>
       <label class="setting-line toggle-line"><span><strong>Labels below images</strong><small>Author, source, and resolution are already available in the side panel.</small></span><input id="showCardInfo" type="checkbox" ${prefs.showCardInfo?'checked':''}><span class="toggle" aria-hidden="true"></span></label>
     </div></details>
-    <details class="settings-section" open><summary><span class="section-icon"><i data-lucide="sliders-horizontal"></i></span><span><strong>Import and limits</strong><small>Deleted media, collection, and export rules</small></span><i data-lucide="chevron-down"></i></summary><div class="settings-section-body"><label class="setting-line toggle-line"><span><strong>Never re-import deleted media</strong><small>When enabled, a deleted file is blocked immediately. When disabled, it is sent to Review for confirmation.</small></span><input name="block_previously_deleted" type="checkbox" ${data.block_previously_deleted?'checked':''}><span class="toggle" aria-hidden="true"></span></label><label class="setting-line toggle-line"><span><strong>Review videos and animations for trimming</strong><small>When enabled, imported videos and animated images wait in the Editor queue until you approve or split them. Off by default.</small></span><input name="trim_review_enabled" type="checkbox" ${data.trim_review_enabled?'checked':''}><span class="toggle" aria-hidden="true"></span></label><label class="setting-line toggle-line"><span><strong>Block exporting unreviewed clips</strong><small>When enabled, videos and animations that still wait for trim review are left out of automatic collection selection and cannot be exported until you confirm or split them.</small></span><input name="trim_block_unreviewed_export" type="checkbox" ${data.trim_block_unreviewed_export?'checked':''}><span class="toggle" aria-hidden="true"></span></label><div class="settings-fields-2">${field('max_items_per_author','Items per author',{type:'number',hint:'Maximum items by one author in a collection.'})}<div class="form-row"><label>Maximum image file, MB</label><small class="field-hint">Per exported image.</small><input class="control" name="max_image_export_size_mb" type="number" min="1" value="${Math.max(1,Math.round(data.max_image_export_size_bytes/1048576))}"></div><div class="form-row"><label>Maximum video file, MB</label><small class="field-hint">Per exported video.</small><input class="control" name="max_video_export_size_mb" type="number" min="1" value="${Math.max(1,Math.round(data.max_video_export_size_bytes/1048576))}"></div></div><div class="form-row"><label for="setting-collection_export_mode">Export destination</label><small class="field-hint">What the Export button delivers: a ZIP download in the browser, a folder on the server, or both.</small><select class="control" id="setting-collection_export_mode" name="collection_export_mode"><option value="download" ${data.collection_export_mode==='download'?'selected':''}>Browser download (ZIP)</option><option value="folder" ${data.collection_export_mode==='folder'?'selected':''}>Server folder</option><option value="both" ${data.collection_export_mode==='both'?'selected':''}>Folder and download</option></select></div><div class="form-row"><label>Export format conversions</label><small class="field-hint">Files are converted only in exported collections; library originals stay unchanged.</small><div id="exportFormatRules" class="format-rules"></div><button id="addExportFormatRule" class="btn" type="button"><i data-lucide="plus"></i>Add conversion</button></div></div></details>
+    <details class="settings-section" open><summary><span class="section-icon"><i data-lucide="sliders-horizontal"></i></span><span><strong>Import and limits</strong><small>Deleted media, collection, and export rules</small></span><i data-lucide="chevron-down"></i></summary><div class="settings-section-body"><label class="setting-line toggle-line"><span><strong>Never re-import deleted media</strong><small>When enabled, a deleted file is blocked immediately. When disabled, it is sent to Review for confirmation.</small></span><input name="block_previously_deleted" type="checkbox" ${data.block_previously_deleted?'checked':''}><span class="toggle" aria-hidden="true"></span></label><label class="setting-line toggle-line"><span><strong>Check crop before using new images in collections</strong><small>Checks newly accepted static images locally. A needed crop or failed check blocks automatic selection, manual additions and export until reviewed in Editor. Existing unchecked images are not scanned automatically. Off by default.</small></span><input name="crop_review_enabled" type="checkbox" ${data.crop_review_enabled?'checked':''}><span class="toggle" aria-hidden="true"></span></label><label class="setting-line toggle-line"><span><strong>Review videos and animations for trimming</strong><small>When enabled, imported videos and animated images wait in the Editor queue until you approve or split them. Off by default.</small></span><input name="trim_review_enabled" type="checkbox" ${data.trim_review_enabled?'checked':''}><span class="toggle" aria-hidden="true"></span></label><label class="setting-line toggle-line"><span><strong>Block exporting unreviewed clips</strong><small>When enabled, videos and animations that still wait for trim review are left out of automatic collection selection and cannot be exported until you confirm or split them.</small></span><input name="trim_block_unreviewed_export" type="checkbox" ${data.trim_block_unreviewed_export?'checked':''}><span class="toggle" aria-hidden="true"></span></label><div class="settings-fields-2">${field('max_items_per_author','Items per author',{type:'number',hint:'Maximum items by one author in a collection.'})}<div class="form-row"><label>Maximum image file, MB</label><small class="field-hint">Per exported image.</small><input class="control" name="max_image_export_size_mb" type="number" min="1" value="${Math.max(1,Math.round(data.max_image_export_size_bytes/1048576))}"></div><div class="form-row"><label>Maximum video file, MB</label><small class="field-hint">Per exported video.</small><input class="control" name="max_video_export_size_mb" type="number" min="1" value="${Math.max(1,Math.round(data.max_video_export_size_bytes/1048576))}"></div></div><div class="form-row"><label for="setting-collection_export_mode">Export destination</label><small class="field-hint">What the Export button delivers: a ZIP download in the browser, a folder on the server, or both.</small><select class="control" id="setting-collection_export_mode" name="collection_export_mode"><option value="download" ${data.collection_export_mode==='download'?'selected':''}>Browser download (ZIP)</option><option value="folder" ${data.collection_export_mode==='folder'?'selected':''}>Server folder</option><option value="both" ${data.collection_export_mode==='both'?'selected':''}>Folder and download</option></select></div><div class="form-row"><label>Export format conversions</label><small class="field-hint">Files are converted only in exported collections; library originals stay unchanged.</small><div id="exportFormatRules" class="format-rules"></div><button id="addExportFormatRule" class="btn" type="button"><i data-lucide="plus"></i>Add conversion</button></div></div></details>
     <details class="settings-section"><summary><span class="section-icon"><i data-lucide="waypoints"></i></span><span><strong>Sources</strong><small>Booru and FurAffinity credentials</small></span><i data-lucide="chevron-down"></i></summary><div class="settings-section-body settings-sources">
       ${provider('danbooru','Danbooru','Login and API key',[field('danbooru_login','Login'),field('danbooru_api_key','API key',{type:'password',secret:true})])}
       ${provider('e621','e621 / e926','Username and API key',[field('e621_login','Username'),field('e621_api_key','API key',{type:'password',secret:true})])}
@@ -2042,11 +2186,12 @@ async function showSettingsPage() {
     ];
     return pairs.filter(([, first, second]) => first !== second).map(([label]) => label).join(', ');
   };
+  document.querySelector('#openLibraryInNewTab').onchange = event => saveLibraryPrefs({openLibraryInNewTab:event.target.checked});
   document.querySelector('#settingsForm').onsubmit = async event => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const export_format_rules={};document.querySelectorAll('.format-rule').forEach(row=>export_format_rules[row.querySelector('.rule-source').value]=row.querySelector('.rule-target').value);
-    const payload = {media_path:form.get('media_path'),export_path:form.get('export_path'),thumbnail_path:form.get('thumbnail_path'),import_staging_path:form.get('import_staging_path'),max_items_per_author:Number(form.get('max_items_per_author')),max_image_export_size_bytes:Number(form.get('max_image_export_size_mb'))*1048576,max_video_export_size_bytes:Number(form.get('max_video_export_size_mb'))*1048576,export_format_rules,collection_export_mode:form.get('collection_export_mode'),block_previously_deleted:form.has('block_previously_deleted'),trim_review_enabled:form.has('trim_review_enabled'),trim_block_unreviewed_export:form.has('trim_block_unreviewed_export'),crop_vision_format:form.get('crop_vision_format'),crop_vision_url:form.get('crop_vision_url')||null,crop_vision_model:form.get('crop_vision_model')||null,crop_min_area_percent:Number(form.get('crop_min_area_percent')),crop_padding_percent:Number(form.get('crop_padding_percent')),crop_background_tolerance:Number(form.get('crop_background_tolerance')),crop_selected_analysis:form.get('crop_selected_analysis'),background_model:form.get('background_model')||'auto',background_device:form.get('background_device')||'auto'};
+    const payload = {media_path:form.get('media_path'),export_path:form.get('export_path'),thumbnail_path:form.get('thumbnail_path'),import_staging_path:form.get('import_staging_path'),max_items_per_author:Number(form.get('max_items_per_author')),max_image_export_size_bytes:Number(form.get('max_image_export_size_mb'))*1048576,max_video_export_size_bytes:Number(form.get('max_video_export_size_mb'))*1048576,export_format_rules,collection_export_mode:form.get('collection_export_mode'),block_previously_deleted:form.has('block_previously_deleted'),crop_review_enabled:form.has('crop_review_enabled'),trim_review_enabled:form.has('trim_review_enabled'),trim_block_unreviewed_export:form.has('trim_block_unreviewed_export'),crop_vision_format:form.get('crop_vision_format'),crop_vision_url:form.get('crop_vision_url')||null,crop_vision_model:form.get('crop_vision_model')||null,crop_min_area_percent:Number(form.get('crop_min_area_percent')),crop_padding_percent:Number(form.get('crop_padding_percent')),crop_background_tolerance:Number(form.get('crop_background_tolerance')),crop_selected_analysis:form.get('crop_selected_analysis'),background_model:form.get('background_model')||'auto',background_device:form.get('background_device')||'auto'};
     ['huggingface_token','crop_vision_key','danbooru_login','danbooru_api_key','e621_login','e621_api_key','gelbooru_user_id','gelbooru_api_key','rule34_user_id','rule34_api_key','furaffinity_cookie_a','furaffinity_cookie_b'].forEach(key => { if (form.get(key)) payload[key]=form.get(key); });
     const lines = name => String(form.get(name) || '').split(/\r?\n/).map(value => value.trim()).filter(Boolean);
     const aliases = {};
@@ -2095,12 +2240,55 @@ async function showSettingsPage() {
   icons(); restoreScrollState('settings');
 }
 
-async function refreshCounts(){try{const [reviews,crops,trims]=await Promise.all([api('/api/v1/review-items?limit=1'),api('/api/v1/crop-analyses?status=pending'),api('/api/v1/trim-reviews?status=pending')]);document.querySelector('#reviewCount').textContent=reviews.page.total||'';document.querySelector('#cropCount').textContent=crops.items.length||'';const trimBadge=document.querySelector('#trimCount');if(trimBadge)trimBadge.textContent=trims.total||'';}catch{}}
+function paintEditorCounts() {
+  for(const [name,label] of [['crop','Crop'],['background','Background'],['trim','Videos & animations']]){
+    document.querySelectorAll(`[data-editor-count="${name}"]`).forEach(node=>node.textContent=String(editorCounts[name]||0));
+    const shortcut=document.querySelector(`[data-editor-shortcut="${name}"]`);
+    if(shortcut){shortcut.hidden=!editorCounts[name];shortcut.title=`${label}: ${editorCounts[name]||0}`;shortcut.setAttribute('aria-label',shortcut.title);}
+  }
+}
+async function refreshCounts(){
+  try{
+    const state=viewState('editor');
+    const [reviews,counts]=await Promise.all([api('/api/v1/review-items?limit=1'),api(`/api/v1/editor-counts?background_tolerance=${state.backgroundTolerance||24}&background_minimum_area=${state.backgroundMinimumArea||25}`)]);
+    document.querySelector('#reviewCount').textContent=reviews.page.total||'';
+    editorCounts=counts;paintEditorCounts();
+  }catch{}
+}
 function formatBytes(value){if(value==null)return 'unknown size';const units=['B','KB','MB','GB'];let size=value,index=0;while(size>=1024&&index<3){size/=1024;index++;}return `${size.toFixed(index?1:0)} ${units[index]}`;}
 
 const views={library:showLibrary,import:showImport,review:showReview,duplicates:showDuplicates,editor:showEditor,collections:showCollections,settings:showSettingsPage};
-async function navigate(view){if(!views[view])view='library';saveScrollState();currentView=view;if(view==='review')reviewOffset=Math.max(0,Number(viewState('review').offset)||0);history.replaceState(null,'',`#${view}`);document.querySelectorAll('.nav-item').forEach(node=>node.classList.toggle('active',node.dataset.view===view));workspace.innerHTML='<div class="empty">Loading...</div>';try{await views[view]();restoreScrollState(view)}catch(error){workspace.innerHTML='<div class="empty">Could not load this section</div>';toast(error.message,true);}icons();}
+async function navigate(destination, options={}) {
+  const route=parseRoute(destination), view=route.view;
+  saveScrollState();
+  const epoch=++renderEpoch;
+  currentView=view;
+  if(view==='library'&&route.id){
+    selectedMedia=null;librarySearch=`id:${route.id}`;libraryOffset=0;
+    saveViewState('library',{search:librarySearch,offset:0,mediaType:'',selectedMediaId:route.id,scrollTop:0,galleryScrollTop:0});
+  }
+  if(view==='collections'){
+    if(route.id)saveViewState('collections',{screen:'detail',collectionId:route.id,scrollTop:0});
+    else if(['list','builder'].includes(route.params.get('screen')))saveViewState('collections',{screen:route.params.get('screen')});
+  }
+  if(view==='editor'){
+    const tab=route.params.get('tab'),tool=route.params.get('tool');
+    if(['crop','background','trim'].includes(tab))saveViewState('editor',{tab,targetMediaId:null,analysisId:null,trimTarget:false,trimMediaId:null,cropStatus:tab==='crop'?'needs_attention':viewState('editor').cropStatus});
+    if(route.mediaId)saveViewState('editor',{targetMediaId:route.mediaId,analysisId:null,requestedTool:['crop','background','trim'].includes(tool)?tool:null});
+  }
+  if(view==='review')reviewOffset=Math.max(0,Number(viewState('review').offset)||0);
+  const hash=`#${String(destination||view).replace(/^#/, '')}`;
+  if(options.history!==false&&location.hash!==hash)history[options.replace?'replaceState':'pushState'](null,'',hash);
+  document.querySelectorAll('.nav-item').forEach(node=>node.classList.toggle('active',node.dataset.view===view));
+  workspace.innerHTML='<div class="empty">Loading...</div>';
+  try{await views[view]();if(epoch===renderEpoch)restoreScrollState(view);}
+  catch(error){if(epoch===renderEpoch){workspace.innerHTML='<div class="empty">Could not load this section</div>';toast(error.message,true);}}
+  if(epoch===renderEpoch)icons();
+}
 document.querySelectorAll('.nav-item').forEach(node=>node.onclick=()=>navigate(node.dataset.view));
-window.addEventListener('hashchange',()=>navigate(location.hash.slice(1)||'library'));
+document.querySelectorAll('[data-editor-shortcut]').forEach(node=>node.onclick=()=>navigate(`editor?tab=${node.dataset.editorShortcut}`));
+window.addEventListener('hashchange',()=>navigate(location.hash||'library',{history:false}));
 window.addEventListener('beforeunload',saveScrollState);
-navigate(location.hash.slice(1)||'library');refreshCounts();restoreCropScanMonitor();restoreBackgroundScanMonitor();restoreSetImportMonitor();icons();
+window.addEventListener('pagehide',saveScrollState);
+window.addEventListener('focus',()=>{refreshCounts();});
+navigate(location.hash||'library',{history:false});refreshCounts();restoreCropScanMonitor();restoreBackgroundScanMonitor();restoreSetImportMonitor();icons();

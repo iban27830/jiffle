@@ -53,7 +53,9 @@ def active_scan():
 @crop_blueprint.get("/api/v1/crop-analyses")
 def list_analyses():
     status=request.args.get("status","pending")
-    where="" if status=="all" else "WHERE a.status=?"; params=() if status=="all" else (status,)
+    where="WHERE EXISTS (SELECT 1 FROM media_items m WHERE m.id=a.media_item_id AND m.active_revision_id=a.revision_id AND m.deleted_at IS NULL)"
+    if status != "all": where += " AND a.status=?"
+    params=() if status=="all" else (status,)
     connection=get_database()
     total=connection.execute(f"SELECT COUNT(*) FROM crop_analyses a JOIN media_revisions r ON r.id=a.revision_id {where}",params).fetchone()[0]
     page=""; page_params=params
@@ -112,7 +114,9 @@ def editor_state(media_id):
     if media is None:return _error("crop.media_not_found","Media item was not found.",404)
     analyses=connection.execute("SELECT id,revision_id,status,method FROM crop_analyses WHERE media_item_id=? ORDER BY id DESC",(media_id,)).fetchall()
     operations=active_edit_operations(connection,media_id)
-    return jsonify({"media_id":media_id,"active_revision_id":media["active_revision_id"],"is_edited":bool(operations),"edit_operations":list(operations),"analyses":[dict(row) for row in analyses],"content_url":f"/api/v1/media/{media_id}/content?revision={media['active_revision_id']}"})
+    from .review import media_review
+    review = media_review(connection, media_id, current_app.config["JIFFLE_SETTINGS"].crop_review_enabled)
+    return jsonify({"crop_review":review,"media_id":media_id,"active_revision_id":media["active_revision_id"],"is_edited":bool(operations),"edit_operations":list(operations),"analyses":[dict(row) for row in analyses],"content_url":f"/api/v1/media/{media_id}/content?revision={media['active_revision_id']}"})
 
 @crop_blueprint.post("/api/v1/media/<int:media_id>/reset-to-original")
 def reset_media(media_id):
@@ -186,3 +190,49 @@ def resume_crop_scans(database_path,settings):
     finally:connection.close()
     for row in rows:
         Thread(target=_run_scan,args=(database_path,settings,int(row["id"]),json.loads(row["parameters_json"])),daemon=True).start()
+
+
+@crop_blueprint.get("/api/v1/crop-reviews")
+def crop_reviews():
+    from .review import attention_count, attention_items
+    try:
+        limit, offset = int(request.args.get("limit", 40)), int(request.args.get("offset", 0))
+        if not 1 <= limit <= 100 or offset < 0:
+            raise ValueError()
+    except (ValueError, TypeError):
+        return _error("crop.invalid_query", "Invalid pagination.", 400)
+    connection = get_database()
+    return jsonify({"items": attention_items(connection, limit, offset), "total": attention_count(connection)})
+
+
+@crop_blueprint.post("/api/v1/media/<int:media_id>/crop-review/approve")
+def approve_crop_review(media_id):
+    from .review import record_check
+    payload = request.get_json(silent=True) or {}
+    connection = get_database()
+    row = connection.execute("SELECT active_revision_id FROM media_items WHERE id=? AND deleted_at IS NULL AND media_type='image'", (media_id,)).fetchone()
+    if row is None:
+        return _error("crop.media_not_found", "Image was not found.", 404)
+    if payload.get("revision_id") != row[0]:
+        return _error("crop.stale_analysis", "The active version changed. Open it again before confirming.", 409)
+    record_check(connection, row[0], "passed")
+    connection.execute("UPDATE crop_analyses SET status='no_crop_needed',resolved_at=CURRENT_TIMESTAMP WHERE revision_id=? AND status IN ('pending','deferred','failed')", (row[0],))
+    connection.commit()
+    return jsonify({"status": "no_crop_needed"})
+
+
+@crop_blueprint.get("/api/v1/editor-counts")
+def editor_counts():
+    from .review import attention_count
+    from jiffle.features.background_editor.workflow import detector_parameters, detector_signature, BackgroundFailure
+    try:
+        parameters = detector_parameters(request.args.get("background_tolerance", 24), request.args.get("background_minimum_area", 25))
+    except (ValueError, BackgroundFailure):
+        return _error("editor.invalid_query", "Invalid background detector parameters.", 400)
+    connection = get_database()
+    background = connection.execute(
+        "SELECT COUNT(*) FROM background_candidate_results c JOIN media_items m ON m.active_revision_id=c.revision_id "
+        "WHERE m.deleted_at IS NULL AND c.candidate_found=1 AND c.parameter_signature=?", (detector_signature(parameters),)
+    ).fetchone()[0]
+    trim = connection.execute("SELECT COUNT(*) FROM media_items WHERE deleted_at IS NULL AND derived_from_media_id IS NULL AND trim_review_status='pending'").fetchone()[0]
+    return jsonify({"crop": attention_count(connection), "background": int(background), "trim": int(trim)})

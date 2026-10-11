@@ -347,6 +347,7 @@ def trim_state(connection, settings, media_id: int) -> dict:
         "review_status": item["trim_review_status"],
         "source": {
             "id": editor_id,
+            "active_revision_id": editor["active_revision_id"],
             "media_type": editor["media_type"],
             "width": editor["width"],
             "height": editor["height"],

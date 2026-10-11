@@ -18,7 +18,32 @@ def media_path(root, stored):
     return candidate if candidate.is_relative_to(root) else None
 
 
-def analyze_image(connection, settings, media_id, method="local", min_area=10, padding=.02, tolerance=18):
+def analyze_image(connection, settings, media_id, method="local", min_area=10, padding=.02, tolerance=18, *, commit=True):
+    from .review import record_check, signature
+    row = connection.execute("SELECT active_revision_id FROM media_items WHERE id=? AND deleted_at IS NULL", (media_id,)).fetchone()
+    revision_id = row[0] if row else None
+    parameters = {"algorithm_version": 1, "min_area": float(min_area), "padding": float(padding), "tolerance": int(tolerance)}
+    try:
+        result = _analyze_image(connection, settings, media_id, method, min_area, padding, tolerance)
+    except CropFailure as error:
+        if revision_id and error.code not in {"crop.unsupported_media", "crop.vision_unavailable"}:
+            record_check(connection, revision_id, "passed" if error.code == "crop.animated_unsupported" else "failed",
+                         signature(parameters), error.code, error.message)
+            if commit:
+                connection.commit()
+        raise
+    if revision_id:
+        record_check(connection, revision_id, "needs_crop" if result is not None else "passed", signature(parameters))
+        connection.execute("INSERT OR REPLACE INTO crop_scan_results (revision_id,parameter_signature,candidate_found) VALUES (?,?,?)",
+                           (revision_id, signature(parameters), int(result is not None)))
+        if result is None:
+            connection.execute("UPDATE crop_analyses SET status='no_crop_needed',resolved_at=CURRENT_TIMESTAMP WHERE revision_id=? AND method=? AND status IN ('pending','deferred','failed')", (revision_id, method))
+    if commit:
+        connection.commit()
+    return result
+
+
+def _analyze_image(connection, settings, media_id, method="local", min_area=10, padding=.02, tolerance=18):
     row = connection.execute(
         "SELECT m.id,m.media_type,m.active_revision_id,r.file_path FROM media_items m "
         "JOIN media_revisions r ON r.id=m.active_revision_id WHERE m.id=? AND m.deleted_at IS NULL",
@@ -29,7 +54,7 @@ def analyze_image(connection, settings, media_id, method="local", min_area=10, p
     if row["media_type"] != "image":
         raise CropFailure("crop.unsupported_media", "Only static images can be cropped.")
     decision = connection.execute("SELECT status FROM crop_analyses WHERE revision_id=? AND method=?",(row["active_revision_id"],method)).fetchone()
-    if decision and decision["status"] in {"cropped","no_crop_needed"}:
+    if decision and decision["status"] == "no_crop_needed":
         return None
     path = media_path(settings.media_path, row["file_path"])
     if path is None or not path.is_file():
@@ -62,10 +87,9 @@ def analyze_image(connection, settings, media_id, method="local", min_area=10, p
         "INSERT INTO crop_analyses (media_item_id,revision_id,method,status,left_px,top_px,right_px,bottom_px,confidence,removed_area,parameters_json) "
         "VALUES (?,?,?,'pending',?,?,?,?,?,?,?) ON CONFLICT(revision_id,method) DO UPDATE SET "
         "left_px=excluded.left_px,top_px=excluded.top_px,right_px=excluded.right_px,bottom_px=excluded.bottom_px,confidence=excluded.confidence,removed_area=excluded.removed_area,parameters_json=excluded.parameters_json,"
-        "status=CASE WHEN crop_analyses.status IN ('cropped','no_crop_needed') THEN crop_analyses.status ELSE 'pending' END",
+        "status=CASE WHEN crop_analyses.status='no_crop_needed' THEN crop_analyses.status ELSE 'pending' END",
         (media_id,row["active_revision_id"],method,left,top,right,bottom,confidence,removed,parameters),
     )
-    connection.commit()
     return connection.execute("SELECT * FROM crop_analyses WHERE revision_id=? AND method=?", (row["active_revision_id"],method)).fetchone()
 
 
@@ -118,6 +142,9 @@ def apply_crop(connection, settings, analysis_id, box):
         rel=target.relative_to(settings.media_path).as_posix(); size=target.stat().st_size
         details=json.dumps({"analysis_id":analysis_id,"box":[left,top,right,bottom],"method":row["method"],"source_revision_id":row["active_revision_id"]})
         cursor=connection.execute("INSERT INTO media_revisions (media_item_id,parent_revision_id,file_path,operation,width,height,file_size,content_hash,details_json) VALUES (?,?,?,?,?,?,?,?,?)",(row["media_item_id"],row["active_revision_id"],rel,"crop",cropped.width,cropped.height,size,digest,details)); revision_id=int(cursor.lastrowid)
+        from .review import record_check
+        record_check(connection, row["active_revision_id"], "needs_crop")
+        record_check(connection, revision_id, "passed")
         connection.execute("UPDATE media_items SET active_revision_id=?,file_path=?,width=?,height=?,file_size=?,content_hash=? WHERE id=?",(revision_id,rel,cropped.width,cropped.height,size,digest,row["media_item_id"])); connection.execute("UPDATE crop_analyses SET status='cropped',resolved_at=CURRENT_TIMESTAMP WHERE id=?",(analysis_id,)); connection.execute("DELETE FROM media_fingerprints WHERE media_item_id=?",(row["media_item_id"],)); connection.execute("INSERT INTO operation_history (event_type,entity_type,entity_id,details_json) VALUES ('crop.applied','media',?,?)",(row["media_item_id"],json.dumps({"analysis_id":analysis_id,"revision_id":revision_id,"box":[left,top,right,bottom]}))); connection.commit(); return revision_id
     except Exception:
         connection.rollback()
@@ -134,6 +161,7 @@ def activate_revision(connection, settings, media_id, revision_id):
     if row is None: raise CropFailure("crop.revision_not_found","Revision was not found.")
     path=media_path(settings.media_path,row["file_path"])
     if path is None or not path.is_file(): raise CropFailure("crop.file_missing","Revision file is unavailable.")
+    connection.execute("UPDATE crop_analyses SET status='pending',resolved_at=NULL WHERE revision_id=? AND status='cropped'", (revision_id,))
     connection.execute("UPDATE media_items SET active_revision_id=?,file_path=?,width=?,height=?,file_size=?,content_hash=? WHERE id=?",(revision_id,row["file_path"],row["width"],row["height"],row["file_size"],row["content_hash"],media_id)); connection.execute("DELETE FROM media_fingerprints WHERE media_item_id=?",(media_id,)); connection.execute("INSERT INTO operation_history (event_type,entity_type,entity_id,details_json) VALUES ('revision.activated','media',?,?)",(media_id,json.dumps({"revision_id":revision_id}))); connection.commit()
 
 
@@ -149,6 +177,9 @@ def resolve_analysis(connection, analysis_id, status):
     if status not in {"no_crop_needed","deferred"}: raise CropFailure("crop.invalid_status","Crop status is invalid.")
     cursor=connection.execute("UPDATE crop_analyses SET status=?,resolved_at=CURRENT_TIMESTAMP WHERE id=? AND status='pending'",(status,analysis_id))
     if cursor.rowcount!=1: raise CropFailure("crop.analysis_not_found","Pending crop analysis was not found.")
+    from .review import record_check
+    revision_id = connection.execute("SELECT revision_id FROM crop_analyses WHERE id=?", (analysis_id,)).fetchone()[0]
+    record_check(connection, revision_id, "passed" if status == "no_crop_needed" else "needs_crop")
     connection.execute("INSERT INTO operation_history (event_type,entity_type,entity_id,details_json) VALUES (?,?,?,?)",(f"crop.{status}","crop_analysis",analysis_id,"{}"))
     connection.commit()
 
@@ -156,6 +187,9 @@ def resolve_analysis(connection, analysis_id, status):
 def reset_analysis(connection, analysis_id):
     cursor=connection.execute("UPDATE crop_analyses SET status='pending',resolved_at=NULL WHERE id=?",(analysis_id,))
     if cursor.rowcount!=1: raise CropFailure("crop.analysis_not_found","Crop analysis was not found.")
+    from .review import record_check
+    revision_id = connection.execute("SELECT revision_id FROM crop_analyses WHERE id=?", (analysis_id,)).fetchone()[0]
+    record_check(connection, revision_id, "needs_crop")
     connection.commit()
 
 

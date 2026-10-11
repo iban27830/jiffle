@@ -7,7 +7,7 @@ from urllib.parse import quote, urlsplit
 
 from jiffle.configuration.settings import Settings
 from jiffle.features.collections.workflow import (
-    CollectionFailure, build_collection_preview, build_tag_alias_map, create_export_job,
+    CollectionFailure, ensure_crop_eligible, build_collection_preview, build_tag_alias_map, create_export_job,
     expand_tag_aliases, export_archive_filename, export_archive_prefix,
     export_collection_directory, export_staging_directory, iter_export_archive,
     normalize_tags, parse_collection_query, preview_export, replace_collection_items,
@@ -72,6 +72,7 @@ def create_collection():
             if not isinstance(requested_count, int) or requested_count != len(media_ids):
                 raise CollectionFailure("collections.invalid_count", "The saved composition must be complete.")
             _validate_composition(get_database(), media_ids, included_tags, excluded_tags)
+            ensure_crop_eligible(get_database(), current_app.config["JIFFLE_SETTINGS"], media_ids)
         connection = get_database()
         preset = connection.execute("SELECT id, name, requested_count FROM collection_presets WHERE id=?", (preset_id,)).fetchone() if preset_id else None
         if preset_id and preset is None:
@@ -122,6 +123,7 @@ def create_collection_preview():
             get_database(), included, excluded, count, settings.max_items_per_author,
             tuple(excluded_ids),
             block_unreviewed=settings.trim_block_unreviewed_export,
+            block_crop=settings.crop_review_enabled,
         )
     except CollectionFailure as error:
         return _collection_error(error)
@@ -158,6 +160,7 @@ def replace_collection_preview_item():
             get_database(), included, excluded, 1, settings.max_items_per_author,
             tuple(dict.fromkeys((*current_ids, *rejected_ids))),
             block_unreviewed=settings.trim_block_unreviewed_export,
+            block_crop=settings.crop_review_enabled,
         )
         if not preview.items:
             raise CollectionFailure("collections.replacement_unavailable", "No replacement is available.")
@@ -290,7 +293,7 @@ def set_collection_items(collection_id: int):
     if not isinstance(media_ids, list) or not all(isinstance(value, int) for value in media_ids):
         return _error("collections.invalid_items", "media_item_ids must be an integer array.", 400)
     try:
-        replace_collection_items(get_database(), collection_id, media_ids)
+        replace_collection_items(get_database(), collection_id, media_ids, current_app.config["JIFFLE_SETTINGS"])
     except CollectionFailure as error:
         return _collection_error(error)
     return jsonify({"collection_id": collection_id, "item_count": len(media_ids)})
@@ -303,7 +306,11 @@ def get_export_preview(collection_id: int):
         preview = preview_export(get_database(), settings, collection_id)
     except CollectionFailure as error:
         return _collection_error(error)
+    from jiffle.features.crop_editor.review import blocked_media
+    member_ids = [row[0] for row in get_database().execute("SELECT media_item_id FROM collection_items WHERE collection_id=?", (collection_id,))]
+    blocked = blocked_media(get_database(), member_ids) if settings.crop_review_enabled else []
     return jsonify({
+        "blocked_media": blocked,
         "item_count": preview.item_count, "total_size": preview.total_size,
         "author_counts": preview.author_counts, "violations": list(preview.violations),
         "warnings": list(preview.warnings),
@@ -408,11 +415,11 @@ def get_archived_export(export_id: int):
 def _collection_error(error):
     if error.code in {"collections.not_found", "collections.preset_not_found"}:
         status = 404
-    elif error.code == "collections.duplicate_item":
+    elif error.code in {"collections.duplicate_item", "collections.crop_review_required"}:
         status = 409
     else:
         status = 400
-    return _error(error.code, error.message, status)
+    return jsonify({"error": {"code": error.code, "message": error.message, "details": error.details}}), status
 
 
 def _validate_composition(connection, media_ids, included_tags, excluded_tags):
@@ -510,3 +517,49 @@ def _archive_disposition(filename: str) -> str:
         for character in filename
     ) or "collection.zip"
     return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename, safe='')}"
+
+
+@collections_blueprint.post("/api/v1/collection-previews/validate")
+def validate_collection_preview():
+    """Refresh the exact selection, without running the random picker."""
+    payload = request.get_json(silent=True) or {}
+    ids = payload.get("media_item_ids")
+    if not isinstance(ids, list) or len(ids) > 1000 or not all(type(value) is int and value > 0 for value in ids):
+        return _error("collections.invalid_items", "Expected up to 1000 media IDs.", 400)
+    try:
+        included, excluded = parse_collection_query(payload.get("query", ""))
+    except CollectionFailure as error:
+        return _collection_error(error)
+    connection = get_database()
+    settings = current_app.config["JIFFLE_SETTINGS"]
+    items, issues = [], []
+    for media_id in ids:
+        row = connection.execute(
+            "SELECT m.*, (SELECT COUNT(*) FROM collection_items c WHERE c.media_item_id=m.id) usage_count, "
+            "(SELECT MAX(added_at) FROM collection_items c WHERE c.media_item_id=m.id) last_used_at "
+            "FROM media_items m WHERE m.id=? AND m.deleted_at IS NULL", (media_id,)
+        ).fetchone()
+        reason = None
+        if row is None:
+            reason = "This file is no longer in the library."
+        else:
+            try:
+                _validate_composition(connection, [media_id], included, excluded)
+                ensure_crop_eligible(connection, settings, [media_id])
+            except CollectionFailure as error:
+                reason = error.message
+            if settings.trim_block_unreviewed_export and row["trim_review_status"] == "pending" and row["derived_from_media_id"] is None:
+                reason = "This clip still needs trim review."
+        if reason:
+            issues.append({"media_id": media_id, "message": reason})
+        items.append({
+            "id": media_id, "author": row["author"] if row else None,
+            "media_type": row["media_type"] if row else "image",
+            "usage_count": row["usage_count"] if row else 0,
+            "last_used_at": row["last_used_at"] if row else None,
+            "thumbnail_url": f"/api/v1/media/{media_id}/thumbnail?revision={row['active_revision_id'] if row else 0}",
+            "content_url": f"/api/v1/media/{media_id}/content",
+            "issue": reason,
+        })
+    complete = type(payload.get("requested_count")) is int and len(ids) == payload["requested_count"] and len(set(ids)) == len(ids)
+    return jsonify({"items": items, "issues": issues, "can_save": bool(complete and not issues)})

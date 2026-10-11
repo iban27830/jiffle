@@ -58,6 +58,8 @@ def create_app(
         with app.app_context():
             migrate_database()
         if not resolved_settings.run_jobs_inline:
+            from jiffle.features.crop_editor.review import resume_pending_checks
+            resume_pending_checks(resolved_settings.database_path, resolved_settings)
             resume_crop_scans(resolved_settings.database_path, resolved_settings)
             resume_background_scans(resolved_settings.database_path, resolved_settings)
             resume_review_scans(resolved_settings.database_path, resolved_settings)

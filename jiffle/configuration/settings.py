@@ -42,6 +42,7 @@ class Settings:
     max_video_export_size_bytes: int = 50 * 1024 * 1024
     export_format_rules: tuple[tuple[str, str], ...] = DEFAULT_EXPORT_FORMAT_RULES
     block_previously_deleted: bool = False
+    crop_review_enabled: bool = False
     trim_review_enabled: bool = False
     # When enabled, media still waiting in the trim review queue are excluded
     # from automatic collection selection and are never exported.  Manual
@@ -85,20 +86,21 @@ class Settings:
     @classmethod
     def from_environment(cls) -> "Settings":
         project_root = Path(__file__).resolve().parents[2]
-        data_root = Path(os.environ.get("JIFFLE_DATA_ROOT", project_root / "jiffle-data")).resolve()
+        data_root = Path(os.environ.get("DATA_DIR") or os.environ.get("JIFFLE_DATA_ROOT", project_root / "jiffle-data")).resolve()
+        managed_data = bool(os.environ.get("DATA_DIR") or os.environ.get("JIFFLE_DATA_ROOT"))
         configuration_path = Path(
-            os.environ.get("JIFFLE_CONFIG_PATH", project_root / "settings.json")
+            os.environ.get("JIFFLE_CONFIG_PATH", (data_root if managed_data else project_root) / "settings.json")
         ).resolve()
         settings = cls(
             database_path=data_root / "jiffle-v2.db",
-            media_path=Path(os.environ.get("JIFFLE_MEDIA_PATH", project_root / "media")).resolve(),
+            media_path=Path(os.environ.get("JIFFLE_MEDIA_PATH", (data_root if managed_data else project_root) / "media")).resolve(),
             thumbnail_path=Path(
-                os.environ.get("JIFFLE_THUMBNAIL_PATH", project_root / "thumbnails")
+                os.environ.get("JIFFLE_THUMBNAIL_PATH", (data_root if managed_data else project_root) / "thumbnails")
             ).resolve(),
             configuration_file_path=configuration_path,
-            import_staging_path=project_root / "import-staging",
+            import_staging_path=Path(os.environ.get("JIFFLE_IMPORT_STAGING_PATH", (data_root if managed_data else project_root) / "import-staging")).resolve(),
             export_path=Path(
-                os.environ.get("JIFFLE_EXPORT_PATH", project_root / "collections")
+                os.environ.get("JIFFLE_EXPORT_PATH", (data_root if managed_data else project_root) / "collections")
             ).resolve(),
             collection_export_mode=collection_export_mode_value(
                 os.environ.get("JIFFLE_COLLECTION_EXPORT_MODE", COLLECTION_EXPORT_MODE_DEFAULT)
@@ -127,6 +129,7 @@ class Settings:
                 "max_items_per_author", "max_image_export_size_bytes",
                 "max_video_export_size_bytes", "export_format_rules",
                 "block_previously_deleted",
+                "crop_review_enabled",
                 "trim_review_enabled",
                 "trim_block_unreviewed_export",
                 "crop_vision_url", "crop_vision_key", "crop_vision_model", "crop_vision_format",
@@ -188,6 +191,7 @@ def persist_settings(settings: Settings) -> None:
         "max_video_export_size_bytes": settings.max_video_export_size_bytes,
         "export_format_rules": dict(settings.export_format_rules),
         "block_previously_deleted": settings.block_previously_deleted,
+        "crop_review_enabled": settings.crop_review_enabled,
         "trim_review_enabled": settings.trim_review_enabled,
         "trim_block_unreviewed_export": settings.trim_block_unreviewed_export,
         "crop_vision_url": settings.crop_vision_url,

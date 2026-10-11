@@ -16,6 +16,8 @@ services:
       JIFFLE_NO_BROWSER: 1
       JIFFLE_NO_AUTO_INSTALL: 1
       JIFFLE_DISABLE_LOCAL_BACKGROUND: 1
+      DATA_DIR: /data
+      JIFFLE_IMPORT_STAGING_PATH: /data/import-staging
       JIFFLE_DATA_ROOT: /data
       JIFFLE_CONFIG_PATH: /data/settings.json
       JIFFLE_MEDIA_PATH: /media/pics

@@ -32,7 +32,9 @@ def get_media(media_id: int):
     item = _repository().get_media(media_id)
     if item is None:
         return _error("library.media_not_found", "Media item was not found.", 404)
-    return jsonify(serialize_media(item))
+    from jiffle.features.crop_editor.review import media_review
+    return jsonify({**serialize_media(item), "crop_review": media_review(
+        get_database(), media_id, current_app.config["JIFFLE_SETTINGS"].crop_review_enabled)})
 
 @library_blueprint.delete("/api/v1/media/<int:media_id>")
 def delete_media(media_id: int):

@@ -1,7 +1,7 @@
 import json
 
 
-def create_original_revision(connection, media_item_id: int) -> int:
+def create_original_revision(connection, media_item_id: int, settings=None) -> int:
     row = connection.execute(
         "SELECT file_path, width, height, file_size, content_hash, active_revision_id "
         "FROM media_items WHERE id=?",
@@ -19,6 +19,8 @@ def create_original_revision(connection, media_item_id: int) -> int:
     )
     revision_id = int(cursor.lastrowid)
     connection.execute("UPDATE media_items SET active_revision_id=? WHERE id=?", (revision_id, media_item_id))
+    from jiffle.features.crop_editor.review import check_new_media
+    check_new_media(connection, settings, media_item_id)
     return revision_id
 
 
