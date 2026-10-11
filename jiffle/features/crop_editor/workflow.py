@@ -120,6 +120,69 @@ def _verify_full_resolution(image, box, tolerance):
     left,top,right,bottom=box; return min(left,bounds[0]),min(top,bounds[1]),max(right,bounds[2]),max(bottom,bounds[3])
 
 
+def create_manual_analysis(connection, settings, media_id):
+    """Open a free-form crop session for an image even when the detector finds nothing.
+
+    The automatic detector only produces an analysis row when it finds removable
+    margins, which used to make the crop editor unreachable for images that did
+    not match those conditions.  A manual analysis always exists so the user can
+    set the crop box themselves, starting from the whole image.
+    """
+    row = connection.execute(
+        "SELECT m.id,m.media_type,m.active_revision_id,r.file_path FROM media_items m "
+        "JOIN media_revisions r ON r.id=m.active_revision_id WHERE m.id=? AND m.deleted_at IS NULL",
+        (media_id,),
+    ).fetchone()
+    if row is None:
+        raise CropFailure("crop.media_not_found", "Media item was not found.")
+    if row["media_type"] != "image":
+        raise CropFailure("crop.unsupported_media", "Only static images can be cropped.")
+    revision_id = row["active_revision_id"]
+    path = media_path(settings.media_path, row["file_path"])
+    if path is None or not path.is_file():
+        raise CropFailure("crop.file_missing", "Media file is unavailable.")
+    try:
+        with Image.open(path) as source:
+            if getattr(source, "is_animated", False):
+                raise CropFailure("crop.animated_unsupported", "Animated images are not cropped here.")
+            # Match the coordinate space of apply_crop (which honours EXIF
+            # orientation) without decoding the pixels just to read the size.
+            width, height = source.size
+            try:
+                orientation = int(source.getexif().get(0x0112, 1) or 1)
+            except (TypeError, ValueError, AttributeError):
+                orientation = 1
+            if orientation in (5, 6, 7, 8):
+                width, height = height, width
+    except CropFailure:
+        raise
+    except (OSError, ValueError) as error:
+        raise CropFailure("crop.decode_failed", "Image could not be opened for cropping.") from error
+    parameters = json.dumps({"manual": True, "source_size": [width, height], "algorithm_version": 1})
+    existing = connection.execute(
+        "SELECT id,status FROM crop_analyses WHERE revision_id=? AND method='manual'",
+        (revision_id,),
+    ).fetchone()
+    if existing is None:
+        connection.execute(
+            "INSERT INTO crop_analyses (media_item_id,revision_id,method,status,left_px,top_px,right_px,bottom_px,confidence,removed_area,parameters_json) "
+            "VALUES (?,?,'manual','pending',0,0,?,?,0,0,?)",
+            (media_id, revision_id, width, height, parameters),
+        )
+    elif existing["status"] != "pending":
+        # Reopening a version whose manual decision was already resolved starts
+        # from the whole image instead of the previous box.
+        connection.execute(
+            "UPDATE crop_analyses SET status='pending',left_px=0,top_px=0,right_px=?,bottom_px=?,confidence=0,removed_area=0,parameters_json=?,resolved_at=NULL WHERE id=?",
+            (width, height, parameters, existing["id"]),
+        )
+    connection.commit()
+    return connection.execute(
+        "SELECT * FROM crop_analyses WHERE revision_id=? AND method='manual'",
+        (revision_id,),
+    ).fetchone()
+
+
 def apply_crop(connection, settings, analysis_id, box):
     row=connection.execute("SELECT a.*,m.active_revision_id,r.file_path FROM crop_analyses a JOIN media_items m ON m.id=a.media_item_id JOIN media_revisions r ON r.id=m.active_revision_id WHERE a.id=? AND a.status='pending' AND a.revision_id=m.active_revision_id",(analysis_id,)).fetchone()
     if row is None: raise CropFailure("crop.stale_analysis","Crop analysis is missing or stale.")
@@ -132,6 +195,7 @@ def apply_crop(connection, settings, analysis_id, box):
         with Image.open(source) as opened:
             image=ImageOps.exif_transpose(opened); original_format=opened.format or "PNG"
             if not (0<=left<right<=image.width and 0<=top<bottom<=image.height): raise CropFailure("crop.invalid_box","Crop box is outside the image.")
+            if (right-left)*(bottom-top) >= image.width*image.height: raise CropFailure("crop.empty_box","Choose a crop area smaller than the whole image.")
             cropped=image.crop((left,top,right,bottom)); suffix=source.suffix.lower(); directory=settings.media_path/"revisions"; directory.mkdir(parents=True,exist_ok=True)
             target=directory/f"media-{row['media_item_id']}-{analysis_id}-{uuid4().hex}{suffix}"; temporary=target.with_suffix(target.suffix+".tmp"); kwargs={}
             if suffix in {".jpg",".jpeg"}: kwargs={"quality":95,"subsampling":0,"icc_profile":opened.info.get("icc_profile"),"exif":opened.getexif().tobytes()}

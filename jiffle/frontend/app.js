@@ -1494,15 +1494,27 @@ async function showEditor() {
     else if(tab==='trim')await renderTrimTab();
     else await renderCropTab();
   };
-  const openMediaEditor = async (mediaId,requestedTool=null) => {
+  const openMediaEditor = async (mediaId,requestedTool=null,autoCrop=true) => {
     const sequence=++editorRenderSequence;
     const [state,revisions,savedPreview]=await Promise.all([api(`/api/v1/media/${mediaId}/editor-state`),api(`/api/v1/media/${mediaId}/revisions`),api(`/api/v1/media/${mediaId}/background-preview`).catch(()=>({status:'none'}))]);
     if(editorEpoch!==renderEpoch||sequence!==editorRenderSequence)return;
     activateImageDraft(mediaId,state.active_revision_id,requestedTool||viewState('editor').requestedTool);
-    saveViewState('editor',{requestedTool:null});
+    saveViewState('editor',{requestedTool:null,analysisId:null});
     const chosenTool=viewState('editor').tool;
     const existing=state.analyses.find(item=>Number(item.revision_id)===Number(state.active_revision_id)&&['pending','deferred'].includes(item.status));
-    if(chosenTool==='crop'&&existing&&state.crop_review?.status!=='passed')return openCrop(existing.id);
+    if(chosenTool==='crop'){
+      // Crop is a manual tool: reuse a pending proposal when one exists, and
+      // otherwise start a free-form session from the whole image. It must not
+      // depend on the automatic detector having found removable margins.
+      if(existing&&state.crop_review?.status!=='passed')return openCrop(existing.id);
+      if(autoCrop){
+        try{
+          const manual=await api(`/api/v1/media/${mediaId}/crop-manual-analysis`,{method:'POST'});
+          if(editorEpoch!==renderEpoch||sequence!==editorRenderSequence)return;
+          if(manual?.id)return openCrop(manual.id);
+        }catch(error){toast(error.message,true);}
+      }
+    }
     syncEditorRoute(mediaId,chosenTool);
     const active=revisions.items.find(revision=>revision.active);
     const original=[...revisions.items].reverse().find(revision=>revision.operation==='original'&&!revision.parent_revision_id);
@@ -1536,7 +1548,7 @@ async function showEditor() {
      </div>`;
     document.querySelector('#backEditor').onclick=()=>{saveViewState('editor',{targetMediaId:null,analysisId:null,backgroundOpen:false});render({tab:chosenTool})};
     document.querySelector('#cropOpenLibrary').onclick=libraryLinkClick;
-    document.querySelector('#approveCurrentCrop').onclick=async()=>{if(!confirm('Confirm that the current image needs no crop?'))return;try{await api(`/api/v1/media/${mediaId}/crop-review/approve`,{method:'POST',body:JSON.stringify({revision_id:state.active_revision_id})});toast('Image approved');refreshCounts();await openMediaEditor(mediaId,'crop');}catch(error){toast(error.message,true);}};
+    document.querySelector('#approveCurrentCrop').onclick=async()=>{if(!confirm('Confirm that the current image needs no crop?'))return;try{await api(`/api/v1/media/${mediaId}/crop-review/approve`,{method:'POST',body:JSON.stringify({revision_id:state.active_revision_id})});toast('Image approved');refreshCounts();await openMediaEditor(mediaId,'crop',false);}catch(error){toast(error.message,true);}};
     document.querySelector('#analyzeCurrent').onclick=async()=>{try{const method=cropSettings.crop_selected_analysis;const result=method==='vision'?await api(`/api/v1/media/${mediaId}/crop-vision-analysis`,{method:'POST'}):await api('/api/v1/crop-analyses',{method:'POST',body:JSON.stringify({media_id:mediaId,min_area:cropSettings.crop_min_area_percent,padding:cropSettings.crop_padding_percent/100,tolerance:cropSettings.crop_background_tolerance})});if(result.id)await openCrop(result.id);else toast('No removable margins found')}catch(error){toast(error.message,true)}};
     const panel=document.querySelector('#backgroundPanel');
     const toggleBackground=document.querySelector('#toggleBackgroundEditor');
@@ -1615,12 +1627,12 @@ async function showEditor() {
     document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!modal.hidden)closeModal()},{once:false});
     blur.oninput=()=>{document.querySelector('#backgroundBlurValue').value=blur.value;saveViewState('editor',{backgroundBlur:Number(blur.value)});scheduleLocalPreview()};
     previewModeButtons.forEach(button=>button.onclick=()=>{previewMode=button.dataset.previewMode==='mask'?'mask':'cutout';previewModeButtons.forEach(item=>{const active=item.dataset.previewMode===previewMode;item.classList.toggle('primary',active);item.setAttribute('aria-pressed',String(active))});saveViewState('editor',{backgroundPreviewMode:previewMode});scheduleLocalPreview()});
-    applyBackground.onclick=async()=>{if(!preview||!selectedBackground||!compositionReady)return;applyBackground.disabled=true;setBackgroundStatus('Saving and activating new version...');try{await api(`/api/v1/media/${mediaId}/background-compose`,{method:'POST',body:JSON.stringify({preview_id:preview.preview_id,background_id:selectedBackground,blur:Number(blur.value)})});toast('Background version created and activated');saveViewState('editor',{backgroundOpen:true});await openMediaEditor(mediaId)}catch(error){setBackgroundStatus(error.message,'error');updateApply()}};
-    document.querySelector('#resetOriginal').onclick=async()=>{if(!confirm('Reset this image to the original version? Saved versions will remain available.'))return;try{await api(`/api/v1/media/${mediaId}/reset-to-original`,{method:'POST'});toast('Original restored');await openMediaEditor(mediaId)}catch(error){toast(error.message,true)}};
+    applyBackground.onclick=async()=>{if(!preview||!selectedBackground||!compositionReady)return;applyBackground.disabled=true;setBackgroundStatus('Saving and activating new version...');try{await api(`/api/v1/media/${mediaId}/background-compose`,{method:'POST',body:JSON.stringify({preview_id:preview.preview_id,background_id:selectedBackground,blur:Number(blur.value)})});toast('Background version created and activated');saveViewState('editor',{backgroundOpen:true});await openMediaEditor(mediaId,null,false)}catch(error){setBackgroundStatus(error.message,'error');updateApply()}};
+    document.querySelector('#resetOriginal').onclick=async()=>{if(!confirm('Reset this image to the original version? Saved versions will remain available.'))return;try{await api(`/api/v1/media/${mediaId}/reset-to-original`,{method:'POST'});toast('Original restored');await openMediaEditor(mediaId,null,false)}catch(error){toast(error.message,true)}};
     updateSelectedSummary();
     if(preview){await resolveSelectedBackground().catch(()=>{});prepareForeground().catch(error=>setBackgroundStatus(error.message,'error'));}
     requestAnimationFrame(()=>{const saved=viewState('editor');sourcePane.scrollLeft=Number(saved.backgroundScrollLeft||0);sourcePane.scrollTop=Number(saved.backgroundScrollTop||0);previewPane.scrollLeft=sourcePane.scrollLeft;previewPane.scrollTop=sourcePane.scrollTop;applyZoom()});
-    document.querySelectorAll('.restore-revision').forEach(node=>node.onclick=async()=>{if(!confirm('Restore this version?'))return;await api(`/api/v1/media/${mediaId}/revisions/${node.dataset.id}/activate`,{method:'POST'});toast('Version restored');await openMediaEditor(mediaId)}); bindImageTools(mediaId); icons();
+    document.querySelectorAll('.restore-revision').forEach(node=>node.onclick=async()=>{if(!confirm('Restore this version?'))return;await api(`/api/v1/media/${mediaId}/revisions/${node.dataset.id}/activate`,{method:'POST'});toast('Version restored');await openMediaEditor(mediaId,null,false)}); bindImageTools(mediaId); icons();
   };
   const openCrop = async id => {
     const sequence=++editorRenderSequence;
@@ -1632,20 +1644,23 @@ async function showEditor() {
     activateImageDraft(item.media_id,item.revision_id,'crop');
     saveViewState('editor',{analysisId:id,targetMediaId:item.media_id,requestedTool:null});
     syncEditorRoute(item.media_id,'crop');
-    workspace.innerHTML=`<div class="page editor-page"><div class="page-head"><button class="btn" id="backEditor"><i data-lucide="chevron-left"></i>Editor</button><h2>Media #${item.media_id}</h2><span class="badge" id="proposalMethod">${esc(item.method)}</span></div>${imageToolTabs("crop")}<div class="crop-workspace"><div class="crop-source"><img id="cropSource" src="${item.content_url}" alt=""></div><canvas id="cropPreview"></canvas></div><div class="crop-controls">${['Left','Top','Right','Bottom'].map((name,index)=>`<label>${name}<input class="control crop-coordinate" data-index="${index}" type="number" value="${item.box[index]}"></label>`).join('')}<button id="resetCrop" class="icon-btn" title="Reset suggested crop"><i data-lucide="rotate-ccw"></i></button></div><div class="actions"><button class="btn" id="visionCrop"><i data-lucide="scan-eye"></i>Vision model</button><button class="btn primary" id="applyCrop"><i data-lucide="check"></i>Apply crop</button><button class="btn" id="noCrop">No crop needed</button><button class="btn" id="skipCrop">Skip</button></div><section class="revision-list"><h3>Versions</h3>${revisions.items.map(r=>`<article><img src="${r.content_url}" alt=""><span>${esc(r.operation)} · ${r.width}×${r.height} · ${formatBytes(r.file_size)}</span><button class="btn restore-revision" data-id="${r.id}" ${r.active?'disabled':''}>${r.active?'Active':'Restore'}</button></article>`).join('')}</section></div>`;
+    const isManual=item.method==='manual';
+    const methodLabel=isManual?'Manual crop':item.method;
+    workspace.innerHTML=`<div class="page editor-page"><div class="page-head"><button class="btn" id="backEditor"><i data-lucide="chevron-left"></i>Editor</button><h2>Media #${item.media_id}</h2><span class="badge" id="proposalMethod">${esc(methodLabel)}</span></div>${imageToolTabs("crop")}<div class="crop-workspace"><div class="crop-source"><img id="cropSource" src="${item.content_url}" alt=""></div><canvas id="cropPreview"></canvas></div><div class="crop-controls">${['Left','Top','Right','Bottom'].map((name,index)=>`<label>${name}<input class="control crop-coordinate" data-index="${index}" type="number" value="${item.box[index]}"></label>`).join('')}<button id="resetCrop" class="icon-btn" title="${isManual?'Reset to full image':'Reset suggested crop'}"><i data-lucide="rotate-ccw"></i></button></div><div class="actions"><button class="btn" id="analyzeCrop"><i data-lucide="scan-line"></i>Analyze</button><button class="btn" id="visionCrop"><i data-lucide="scan-eye"></i>Vision model</button><button class="btn primary" id="applyCrop"><i data-lucide="check"></i>Apply crop</button><button class="btn" id="noCrop">No crop needed</button>${isManual?'':'<button class="btn" id="skipCrop">Skip</button>'}</div><section class="revision-list"><h3>Versions</h3>${revisions.items.map(r=>`<article><img src="${r.content_url}" alt=""><span>${esc(r.operation)} · ${r.width}×${r.height} · ${formatBytes(r.file_size)}</span><button class="btn restore-revision" data-id="${r.id}" ${r.active?'disabled':''}>${r.active?'Active':'Restore'}</button></article>`).join('')}</section></div>`;
     document.querySelector('#backEditor').insertAdjacentHTML('afterend',`<a class="icon-btn" id="cropOpenLibrary" title="Open in Library" href="${libraryHref(item.media_id)}" target="${libraryTarget()}" rel="noopener" aria-label="Open in Library"><i data-lucide="images"></i></a>`);
     document.querySelector('#cropOpenLibrary').onclick=libraryLinkClick;
     document.querySelector('#backEditor').onclick=()=>{saveViewState('editor',{analysisId:null,targetMediaId:null});render({tab:'crop'})};
     bindImageTools(item.media_id);
     const openNextPending = async () => {
       refreshCounts();
-      if(!viewState('editor').fromQueue)return openMediaEditor(item.media_id,'crop');
+      if(!viewState('editor').fromQueue)return openMediaEditor(item.media_id,'crop',false);
       await render('needs_attention');
       const next = document.querySelector('.open-crop-media');
       if (next) await openMediaEditor(Number(next.dataset.mediaId),'crop');
     };
     document.querySelector('#noCrop').onclick=async()=>{try{await api(`/api/v1/media/${item.media_id}/crop-review/approve`,{method:'POST',body:JSON.stringify({revision_id:item.revision_id})});await openNextPending()}catch(error){toast(error.message,true)}};
-    document.querySelector('#skipCrop').onclick=async()=>{try{if(item.status==='pending')await api(`/api/v1/crop-analyses/${id}/deferred`,{method:'POST'});await render({tab:'crop',cropStatus:'needs_attention'});refreshCounts()}catch(error){toast(error.message,true)}};
+    const skipCrop=document.querySelector('#skipCrop');
+    if(skipCrop)skipCrop.onclick=async()=>{try{if(item.status==='pending')await api(`/api/v1/crop-analyses/${id}/deferred`,{method:'POST'});await render({tab:'crop',cropStatus:'needs_attention'});refreshCounts()}catch(error){toast(error.message,true)}};
     const source=document.querySelector('#cropSource'),canvas=document.querySelector('#cropPreview'),inputs=[...document.querySelectorAll('.crop-coordinate')];
     const savedState=viewState('editor'); const savedBox=Number(savedState.boxRevisionId)===Number(item.revision_id)?savedState.box:null;
     if(Array.isArray(savedBox)&&savedBox.length===4)inputs.forEach((n,i)=>n.value=savedBox[i]);
@@ -1653,15 +1668,16 @@ async function showEditor() {
     document.querySelector('.crop-workspace').insertAdjacentHTML('beforebegin',`<label class="crop-zoom">Zoom <input id="cropZoom" type="range" min="100" max="400" value="${Number(viewState('editor').zoom || 100)}"><output id="cropZoomValue">100%</output></label>`);
     const box=()=>inputs.map(n=>Number(n.value));
     const applyZoom=()=>{if(!source.naturalWidth||!canvas.width)return;const factor=Number(document.querySelector('#cropZoom').value)/100;const leftPane=source.parentElement;const base=Math.min(leftPane.clientWidth/source.naturalWidth,previewPane.clientWidth/canvas.width,1);source.style.maxWidth='none';source.style.maxHeight='none';source.style.width=`${source.naturalWidth*base*factor}px`;canvas.style.width=`${canvas.width*base*factor}px`;canvas.style.height=`${canvas.height*base*factor}px`;document.querySelector('#cropZoomValue').value=`${Math.round(factor*100)}%`};
-    const draw=()=>{if(!source.naturalWidth)return;const [l,t,r,b]=box();canvas.width=Math.max(1,r-l);canvas.height=Math.max(1,b-t);canvas.getContext('2d').drawImage(source,l,t,r-l,b-t,0,0,r-l,b-t);saveViewState('editor',{box:box(),boxRevisionId:item.revision_id});applyZoom()}; source.onload=draw; inputs.forEach(n=>n.oninput=draw);document.querySelector('#cropZoom').oninput=()=>{saveViewState('editor',{zoom:Number(document.querySelector('#cropZoom').value)});applyZoom()};document.querySelector('#resetCrop').title='Restore proposal';document.querySelector('#resetCrop').onclick=()=>{inputs.forEach((n,i)=>n.value=item.box[i]);draw()};
+    const draw=()=>{if(!source.naturalWidth)return;const [l,t,r,b]=box();canvas.width=Math.max(1,r-l);canvas.height=Math.max(1,b-t);canvas.getContext('2d').drawImage(source,l,t,r-l,b-t,0,0,r-l,b-t);saveViewState('editor',{box:box(),boxRevisionId:item.revision_id});applyZoom()}; source.onload=draw; inputs.forEach(n=>n.oninput=draw);document.querySelector('#cropZoom').oninput=()=>{saveViewState('editor',{zoom:Number(document.querySelector('#cropZoom').value)});applyZoom()};document.querySelector('#resetCrop').title=isManual?'Reset to full image':'Reset suggested crop';document.querySelector('#resetCrop').onclick=()=>{inputs.forEach((n,i)=>n.value=item.box[i]);draw()};
     let syncingPan=false;
     const syncPan=(from,to)=>{if(syncingPan)return;syncingPan=true;const maxX=Math.max(1,from.scrollWidth-from.clientWidth),maxY=Math.max(1,from.scrollHeight-from.clientHeight);to.scrollLeft=(from.scrollLeft/maxX)*Math.max(0,to.scrollWidth-to.clientWidth);to.scrollTop=(from.scrollTop/maxY)*Math.max(0,to.scrollHeight-to.clientHeight);syncingPan=false};
     const bindPan=(pane,other)=>{pane.onscroll=()=>{syncPan(pane,other);if(pane===source.parentElement)saveViewState('editor',{cropScrollLeft:pane.scrollLeft,cropScrollTop:pane.scrollTop});};let start=null;pane.onpointerdown=event=>{if(event.button!==0)return;start={x:event.clientX,y:event.clientY,left:pane.scrollLeft,top:pane.scrollTop};pane.setPointerCapture(event.pointerId);pane.classList.add('panning')};pane.onpointermove=event=>{if(!start)return;pane.scrollLeft=start.left-(event.clientX-start.x);pane.scrollTop=start.top-(event.clientY-start.y)};pane.onpointerup=event=>{start=null;pane.classList.remove('panning');if(pane.hasPointerCapture(event.pointerId))pane.releasePointerCapture(event.pointerId)}};
     bindPan(source.parentElement,previewPane);bindPan(previewPane,source.parentElement);
     source.addEventListener('load',()=>requestAnimationFrame(()=>{source.parentElement.scrollLeft=savedState.cropScrollLeft||0;source.parentElement.scrollTop=savedState.cropScrollTop||0;}),{once:true});
+    document.querySelector('#analyzeCrop').onclick=async()=>{try{const result=await api('/api/v1/crop-analyses',{method:'POST',body:JSON.stringify({media_id:item.media_id,min_area:cropSettings.crop_min_area_percent,padding:cropSettings.crop_padding_percent/100,tolerance:cropSettings.crop_background_tolerance})});if(result.id)await openCrop(result.id);else toast('No removable margins found')}catch(error){toast(error.message,true)}};
     document.querySelector('#visionCrop').onclick=async()=>{try{const proposal=await api(`/api/v1/media/${item.media_id}/crop-vision-analysis`,{method:'POST'});inputs.forEach((n,i)=>n.value=proposal.box[i]);document.querySelector('#proposalMethod').textContent='vision';draw();toast('Vision proposal loaded')}catch(error){toast(error.message,true)}};
     document.querySelector('#applyCrop').onclick=async()=>{if(!confirm('Apply this crop? The original is kept in version history.'))return;try{if(item.status!=='pending')await api(`/api/v1/crop-analyses/${id}/reset`,{method:'POST'});await api(`/api/v1/crop-analyses/${id}/apply`,{method:'POST',body:JSON.stringify({box:box()})});toast('Crop applied');await openNextPending()}catch(error){toast(error.message,true)}};
-    document.querySelectorAll('.restore-revision').forEach(n=>n.onclick=async()=>{if(!confirm('Restore this version?'))return;await api(`/api/v1/media/${item.media_id}/revisions/${n.dataset.id}/activate`,{method:'POST'});toast('Version restored');openMediaEditor(item.media_id)}); icons();
+    document.querySelectorAll('.restore-revision').forEach(n=>n.onclick=async()=>{if(!confirm('Restore this version?'))return;await api(`/api/v1/media/${item.media_id}/revisions/${n.dataset.id}/activate`,{method:'POST'});toast('Version restored');openMediaEditor(item.media_id,null,false)}); icons();
   };
   const openTrim = async mediaId => {
     const sequence=++editorRenderSequence;

@@ -16,7 +16,7 @@ Drafts preserve tool parameters in the current browser tab. Switching a tool or 
 
 ## Crop an image
 
-1. Open the image in Editor. Select **Analyze current** if it has no proposal, or open it from **Crop → Needs attention**.
+1. Open the image in **Library → Open in Editor**. The crop editor starts from the whole image, so you can crop any static image even when the detector finds no margins; a queued image with a suggestion opens with that proposal instead.
 2. Compare the source and preview. Adjust **Left**, **Top**, **Right**, and **Bottom**, and use **Zoom** for a closer look.
 3. Choose:
 
@@ -24,10 +24,11 @@ Drafts preserve tool parameters in the current browser tab. Switching a tool or 
    |---|---|
    | **Apply crop** | Create and activate a new version; keep the source in Versions |
    | **No crop needed** | Explicitly approve this version without changing its pixels |
-   | **Skip** | Leave the decision unresolved; it remains in Needs attention |
-   | **Restore proposal** | Reset the coordinate fields to the suggested box |
+   | **Analyze** | Run the local detector and use its proposal when it finds one |
+   | **Restore proposal** / **Reset to full image** | Reset the coordinate fields to the suggestion, or to the whole image in a manual session |
+   | **Skip** | Leave a queued decision unresolved; it remains in Needs attention |
 
-The local detector looks for near-uniform or transparent margins. **Find crop candidates** scans the existing library on request. Repeating a scan can reuse previous results. **Reopen review** lets you reconsider an earlier decision.
+The local detector looks for near-uniform or transparent margins, but cropping does not depend on it: a manual session starts from the whole image so you can always pick the area yourself. **Find crop candidates** scans the existing library on request. Repeating a scan can reuse previous results. **Reopen review** lets you reconsider an earlier decision.
 
 Configure sensitivity, minimum removable area, and padding in **Settings → Crop analysis**. Optional **Vision model** analysis sends the current image to the endpoint you configured, only after your explicit request; normal scans and automatic import checks use the local detector.
 

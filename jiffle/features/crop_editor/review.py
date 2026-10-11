@@ -77,7 +77,7 @@ def attention_items(connection, limit=40, offset=0):
         "c.status,c.error_message,a.id analysis_id,a.confidence,a.removed_area "
         "FROM crop_review_checks c JOIN media_items m ON m.active_revision_id=c.revision_id "
         "LEFT JOIN crop_analyses a ON a.id=(SELECT MAX(latest.id) FROM crop_analyses latest "
-        "WHERE latest.revision_id=m.active_revision_id AND latest.status IN ('pending','deferred')) "
+        "WHERE latest.revision_id=m.active_revision_id AND latest.method<>'manual' AND latest.status IN ('pending','deferred')) "
         "WHERE m.deleted_at IS NULL AND c.status IN ('pending','needs_crop','failed') "
         "ORDER BY m.id DESC LIMIT ? OFFSET ?", (limit, offset),
     ).fetchall()

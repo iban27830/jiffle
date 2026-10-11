@@ -3,7 +3,7 @@ from hashlib import sha256
 from threading import Thread
 from flask import Blueprint, current_app, jsonify, request, send_file
 from jiffle.infrastructure.database.connection import connect_database, get_database
-from .workflow import CropFailure, activate_revision, analyze_image, apply_crop, list_revisions, media_path, reset_analysis, reset_to_original, resolve_analysis
+from .workflow import CropFailure, activate_revision, analyze_image, apply_crop, create_manual_analysis, list_revisions, media_path, reset_analysis, reset_to_original, resolve_analysis
 from jiffle.infrastructure.media_revisions import active_edit_operations, revision_details
 from .vision import analyze_with_vision
 
@@ -33,6 +33,14 @@ def create_vision_analysis(media_id):
     except CropFailure as error:return _crop_error(error)
     return jsonify(_serialize(row)),201
 
+@crop_blueprint.post("/api/v1/media/<int:media_id>/crop-manual-analysis")
+def create_manual(media_id):
+    # Manual sessions let the user crop any static image, even when the local
+    # detector finds no removable margins and therefore creates no proposal.
+    try: row=create_manual_analysis(get_database(),current_app.config["JIFFLE_SETTINGS"],int(media_id))
+    except (TypeError,ValueError,CropFailure) as e: return _crop_error(e)
+    return jsonify(_serialize(row)),201
+
 @crop_blueprint.post("/api/v1/crop-scan-jobs/<int:job_id>/cancel")
 def cancel_scan(job_id):
     cursor=get_database().execute("UPDATE crop_scan_jobs SET cancel_requested=1 WHERE job_id=?",(job_id,)); get_database().commit()
@@ -53,7 +61,7 @@ def active_scan():
 @crop_blueprint.get("/api/v1/crop-analyses")
 def list_analyses():
     status=request.args.get("status","pending")
-    where="WHERE EXISTS (SELECT 1 FROM media_items m WHERE m.id=a.media_item_id AND m.active_revision_id=a.revision_id AND m.deleted_at IS NULL)"
+    where="WHERE a.method<>'manual' AND EXISTS (SELECT 1 FROM media_items m WHERE m.id=a.media_item_id AND m.active_revision_id=a.revision_id AND m.deleted_at IS NULL)"
     if status != "all": where += " AND a.status=?"
     params=() if status=="all" else (status,)
     connection=get_database()
