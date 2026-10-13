@@ -36,10 +36,12 @@ let monitoredCropJob = null;
 let monitoredBackgroundJob = null;
 let monitoredSetJob = null;
 let reloadBackgroundCandidates = null;
+let closeActiveLightbox = null;
+let cleanupEditorModalKey = () => {};
 
 const UI_STATE_KEY = 'jiffle-session-state-v1';
-let uiState = (() => { try { return JSON.parse(sessionStorage.getItem(UI_STATE_KEY) || '{}'); } catch { return {}; } })();
-function viewState(view) { return uiState[view] || {}; }
+let uiState = (() => { try { const parsed = JSON.parse(sessionStorage.getItem(UI_STATE_KEY) || '{}'); return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}; } catch { return {}; } })();
+function viewState(view) { const state = uiState[view]; return state && typeof state === 'object' && !Array.isArray(state) ? state : {}; }
 function saveViewState(view, changes) {
   const next = {...viewState(view), ...changes};
   if (view === 'editor' && next.editingMediaId && Number(next.editingMediaId)===Number(next.targetMediaId) && next.editingRevisionId && imageDraftFields.some(key => key in changes)) {
@@ -582,7 +584,7 @@ async function monitorSetImport(job) {
       await new Promise(resolve => setTimeout(resolve, 700));
     }
   } catch {}
-  if (monitoredSetJob === job.id) { monitoredSetJob = null; jobStatus.textContent = ''; }
+  if (monitoredSetJob === job.id) { monitoredSetJob = null; jobStatus.textContent = ''; refreshCounts(); if (currentView === 'import') showImport(); }
 }
 
 async function restoreSetImportMonitor() {
@@ -603,8 +605,6 @@ async function monitorCropScan(job) {
     let current=job;
     for (;;) {
       render(current);
-      const state=await api(current.status_url);
-      if(state.status==='completed'||state.status==='failed')break;
       await new Promise(resolve=>setTimeout(resolve,700));
       const active=await api('/api/v1/crop-scan-jobs/active');
       if(!active.job)break; current=active.job;
@@ -629,8 +629,6 @@ async function monitorBackgroundScan(job) {
     let current=job;
     for (;;) {
       render(current);
-      const state=await api(current.status_url);
-      if(state.status==='completed'||state.status==='failed')break;
       await new Promise(resolve=>setTimeout(resolve,700));
       const active=await api('/api/v1/background-scan-jobs/active');
       if(!active.job)break;
@@ -678,7 +676,7 @@ async function showLibrary() {
     meta.textContent = `${data.page.total} files`;
     statusText.textContent = `Showing ${data.items.length}`;
     document.querySelector('#activeFilters').innerHTML = activeFiltersHtml();
-    document.querySelector('#gallery').innerHTML = data.items.length ? data.items.map(item => `<button class="media-card" data-id="${item.id}"><span class="media-card-preview"><img loading="lazy" src="${item.thumbnail_url}" alt="">${item.is_edited?`<span class="edited-marker" title="Edited: ${esc(editSummary(item.edit_operations))}"><i data-lucide="wand-sparkles"></i></span>`:''}${item.has_parent?`<span class="parent-marker" data-parent-media-id="${item.parent_media_id || ''}" data-parent-remote-id="${esc(item.parent_id || '')}" title="Has parent"><i data-lucide="corner-left-up"></i></span>`:''}${item.has_family?`<span class="family-marker" title="Relatives: ${item.relatives?.length || item.family_members?.length || 0}"><i data-lucide="users-round"></i></span>`:''}${item.derived_from_media_id?`<span class="fragment-marker" title="Fragment of Media #${item.derived_from_media_id}"><i data-lucide="scissors"></i></span>`:''}${item.fragment_count?`<span class="fragment-count-marker" title="${item.fragment_count} fragment(s) - excluded from automatic collections"><i data-lucide="git-branch"></i>${item.fragment_count}</span>`:''}</span><span class="media-card-body"><strong>${esc(item.author || 'Unknown author')}</strong><small>${esc(item.domain || item.type)} · ${item.width || '?'}×${item.height || '?'}</small></span></button>`).join('') : '<div class="empty">The library is empty</div>';
+    document.querySelector('#gallery').innerHTML = data.items.length ? data.items.map(item => `<button class="media-card" data-id="${item.id}"><span class="media-card-preview"><img loading="lazy" src="${esc(item.thumbnail_url)}" alt="">${item.is_edited?`<span class="edited-marker" title="Edited: ${esc(editSummary(item.edit_operations))}"><i data-lucide="wand-sparkles"></i></span>`:''}${item.has_parent?`<span class="parent-marker" data-parent-media-id="${item.parent_media_id || ''}" data-parent-remote-id="${esc(item.parent_id || '')}" title="Has parent"><i data-lucide="corner-left-up"></i></span>`:''}${item.has_family?`<span class="family-marker" title="Relatives: ${item.relatives?.length || item.family_members?.length || 0}"><i data-lucide="users-round"></i></span>`:''}${item.derived_from_media_id?`<span class="fragment-marker" title="Fragment of Media #${item.derived_from_media_id}"><i data-lucide="scissors"></i></span>`:''}${item.fragment_count?`<span class="fragment-count-marker" title="${item.fragment_count} fragment(s) - excluded from automatic collections"><i data-lucide="git-branch"></i>${item.fragment_count}</span>`:''}</span><span class="media-card-body"><strong>${esc(item.author || 'Unknown author')}</strong><small>${esc(item.domain || item.type)} · ${item.width || '?'}×${item.height || '?'}</small></span></button>`).join('') : '<div class="empty">The library is empty</div>';
     document.querySelectorAll('.media-card').forEach(card => card.onclick = () => inspectMedia(Number(card.dataset.id)));
     document.querySelectorAll('.parent-marker').forEach(marker => marker.onclick = event => { event.stopPropagation(); const localId=Number(marker.dataset.parentMediaId||0); appendSearchTerm(localId ? `id:${localId}` : `parent:${marker.dataset.parentRemoteId}`); });
     if (selectedMedia) document.querySelector(`.media-card[data-id="${selectedMedia.id}"]`)?.classList.add('selected');
@@ -764,9 +762,6 @@ async function inspectMedia(id) {
   pane.innerHTML = `<button id="closeInspector" class="icon-btn inspector-close" title="Close"><i data-lucide="x"></i></button>${preview}<h2>${esc(selectedMedia.author || 'Unknown author')}</h2><div class="field"><label>Media ID</label><button type="button" id="searchMediaId" class="text-link">${selectedMedia.id}</button></div><div class="field"><label>Source</label><a href="${safeHref(selectedMedia.source_url)}" target="_blank" rel="noopener" class="ellipsis">${esc(selectedMedia.source_url || 'Not specified')}</a></div>${fileSourceField}${parentField}${relatives}${fragmentField}${fragmentNotice}${characters}<div class="field"><label>Size</label>${selectedMedia.width || '?'} × ${selectedMedia.height || '?'} · ${formatBytes(selectedMedia.file_size)}</div>${edits}${selectedMedia.crop_review?.blocked?`<div class="field crop-admission-notice"><strong>Crop review required</strong><small>${esc(selectedMedia.crop_review.error_message || "Not eligible for collections until reviewed in Crop.")}</small></div>`:""}${tagsSectionHtml(selectedMedia)}<div class="form-actions inspector-actions"><a class="icon-btn" href="${esc(selectedMedia.content_url)}" target="_blank" rel="noopener" title="Open full size"><i data-lucide="maximize-2"></i></a>${selectedMedia.source_url?'<button id="refreshMetadata" class="btn"><i data-lucide="refresh-cw"></i>Refresh metadata</button>':''}<button id="openEditor" class="btn"><i data-lucide="panel-top-open"></i>Open in Editor</button>${selectedMedia.type==='image'&&!selectedMedia.is_animated?'<button id="replaceMediaBackground" class="btn"><i data-lucide="image-plus"></i>Replace background</button>':''}<button id="addCollection" class="btn"><i data-lucide="folder-plus"></i>Build collection</button><button id="deleteMedia" class="icon-btn danger" title="Delete"><i data-lucide="trash-2"></i></button></div>`;
   const authorHeading = pane.querySelector('h2');
   authorHeading.insertAdjacentHTML('beforebegin', '<div class="field author-field"><label>Author</label></div>');
-  authorHeading.className = 'author-value';
-  authorHeading.dataset.includeAuthor = selectedMedia.author || '';
-  authorHeading.title = selectedMedia.author ? 'Search by author' : '';
   authorHeading.outerHTML = `<div class="tags author-tags">${authorHtml(selectedMedia.author)}</div>`;
   bindAuthorFilters(pane);
   document.querySelector('#closeInspector').onclick = () => { pane.classList.remove('has-media'); selectedMedia=null; saveViewState('library',{selectedMediaId:null}); };
@@ -974,7 +969,7 @@ function acceptOutcomeMessage(result, fallback) {
 }
 
 function openMediaLightbox({contentUrl, type = 'image', title = '', candidates = [], reviewId = null}) {
-  document.querySelector('.media-lightbox')?.remove();
+  closeActiveLightbox?.();
   const media = type === 'video'
     ? `<video src="${esc(contentUrl)}" controls autoplay playsinline></video>`
     : `<img src="${esc(contentUrl)}" alt="">`;
@@ -996,7 +991,8 @@ function openMediaLightbox({contentUrl, type = 'image', title = '', candidates =
   node.innerHTML = `<div class="media-lightbox-backdrop" data-close></div><figure class="media-lightbox-window"><div class="media-lightbox-head"><strong>${esc(title)}</strong>${manual}<a class="icon-btn" href="${esc(contentUrl)}" target="_blank" rel="noopener" title="Open in a new tab"><i data-lucide="external-link"></i></a><button type="button" class="icon-btn" data-close title="Close"><i data-lucide="x"></i></button></div>${body}${actions}</figure>`;
   document.body.appendChild(node);
   let index = 0;
-  const close = () => { node.remove(); document.removeEventListener('keydown', onKey); };
+  const close = () => { if (closeActiveLightbox === close) closeActiveLightbox = null; node.remove(); document.removeEventListener('keydown', onKey); };
+  closeActiveLightbox = close;
   const useButton = node.querySelector('.use-lightbox-candidate');
   const showCandidate = () => {
     if (!compare) return;
@@ -1085,23 +1081,26 @@ function reviewAttemptHtml(attempt, latest = false) {
 }
 
 function openReviewSearchLog(reviewId, title = 'Search results') {
-  document.querySelector('.review-log-lightbox')?.remove();
+  closeActiveLightbox?.();
   const node = document.createElement('div');
   node.className = 'media-lightbox review-log-lightbox';
   node.innerHTML = `<div class="media-lightbox-backdrop" data-close></div><figure class="media-lightbox-window review-log-window"><div class="media-lightbox-head"><strong>${esc(title)}</strong><button type="button" class="icon-btn" data-close title="Close"><i data-lucide="x"></i></button></div><div class="review-log-body"><div class="empty">Loading...</div></div></figure>`;
   document.body.appendChild(node);
-  const close = () => { node.remove(); document.removeEventListener('keydown', onKey); };
+  const close = () => { if (closeActiveLightbox === close) closeActiveLightbox = null; node.remove(); document.removeEventListener('keydown', onKey); };
+  closeActiveLightbox = close;
   const onKey = event => { if (event.key === 'Escape') close(); };
   document.addEventListener('keydown', onKey);
   node.querySelectorAll('[data-close]').forEach(element => element.onclick = close);
   icons();
   api(`/api/v1/review-items/${reviewId}/search-log`).then(data => {
+    if (!node.isConnected) return;
     const items = data.items || [];
     node.querySelector('.review-log-body').innerHTML = items.length
       ? items.map((item, index) => reviewAttemptHtml(item, index === items.length - 1)).join('')
       : '<div class="empty">No searches were recorded for this card.</div>';
     icons();
   }).catch(error => {
+    if (!node.isConnected) return;
     node.querySelector('.review-log-body').innerHTML = `<div class="empty">${esc(error.message)}</div>`;
   });
 }
@@ -1334,7 +1333,7 @@ async function showDuplicates() {
   const threshold=Math.min(100,Math.max(70,Number(duplicateState.threshold)||90));
   const data = await api('/api/v1/duplicate-matches');
   if (epoch !== renderEpoch || currentView !== 'duplicates') return;
-  workspace.innerHTML = `<div class="duplicates-toolbar"><label for="duplicateThreshold">Similarity threshold</label><input id="duplicateThreshold" type="range" min="70" max="100" step="1" value="${threshold}"><output id="duplicateThresholdValue" for="duplicateThreshold">${threshold}%</output><button id="scanDuplicates" class="btn primary"><i data-lucide="scan-search"></i>Scan</button></div><div class="page item-list">${data.items.length ? data.items.map(match => `<section class="panel"><div class="panel-head">Match ${match.confidence}%</div><div class="panel-body"><div class="compare"><img src="${match.left.thumbnail_url}" alt=""><img src="${match.right.thumbnail_url}" alt=""></div><div class="actions" style="margin-top:10px"><button class="btn resolve" data-id="${match.id}" data-keep="left">Keep left</button><button class="btn resolve" data-id="${match.id}" data-keep="right">Keep right</button><button class="btn family" data-id="${match.id}"><i data-lucide="users-round"></i>Family</button><button class="btn ignore" data-id="${match.id}">Ignore</button></div></div></section>`).join('') : '<div class="empty">No matches</div>'}</div>`;
+  workspace.innerHTML = `<div class="duplicates-toolbar"><label for="duplicateThreshold">Similarity threshold</label><input id="duplicateThreshold" type="range" min="70" max="100" step="1" value="${threshold}"><output id="duplicateThresholdValue" for="duplicateThreshold">${threshold}%</output><button id="scanDuplicates" class="btn primary"><i data-lucide="scan-search"></i>Scan</button></div><div class="page item-list">${data.items.length ? data.items.map(match => `<section class="panel"><div class="panel-head">Match ${match.confidence}%</div><div class="panel-body"><div class="compare"><img src="${esc(match.left.thumbnail_url)}" alt=""><img src="${esc(match.right.thumbnail_url)}" alt=""></div><div class="actions" style="margin-top:10px"><button class="btn resolve" data-id="${match.id}" data-keep="left">Keep left</button><button class="btn resolve" data-id="${match.id}" data-keep="right">Keep right</button><button class="btn family" data-id="${match.id}"><i data-lucide="users-round"></i>Family</button><button class="btn ignore" data-id="${match.id}">Ignore</button></div></div></section>`).join('') : '<div class="empty">No matches</div>'}</div>`;
   const slider=document.querySelector('#duplicateThreshold');
   slider.oninput=()=>{document.querySelector('#duplicateThresholdValue').value=`${slider.value}%`;saveViewState('duplicates',{threshold:Number(slider.value)});};
   document.querySelector('#scanDuplicates').onclick = async () => { try { await runJob(() => api('/api/v1/duplicate-scan-jobs',{method:'POST',body:JSON.stringify({threshold:Number(slider.value)})})); showDuplicates(); } catch(error){toast(error.message,true);} };
@@ -1349,7 +1348,6 @@ async function showEditor() {
   const editorEpoch=renderEpoch;
   let editorRenderSequence=0;
   let tabRenderSequence = 0;
-  let cleanupBackgroundModalKey = null;
   let cropSettings=await api('/api/v1/settings');
   if(editorEpoch!==renderEpoch)return;
 
@@ -1397,7 +1395,7 @@ async function showEditor() {
       ${pageSizeControl(pageSize,'crop')}
     </div>
     <div class="page-head"><h2>Crop candidates</h2><span class="badge">${total}</span></div>
-    <div class="item-list">${items.map(item=>`<article class="queue-item"><img src="${item.thumbnail_url}" alt=""><div><strong>Media #${item.media_id}</strong><small>${esc(item.error_message || item.status)}${item.confidence!=null?` · ${Number(item.confidence).toFixed(0)}% confidence`:""}${item.removed_area!=null?` · removes ${Number(item.removed_area).toFixed(1)}%`:""}</small></div><div class="actions"><a class="icon-btn open-library" data-media-id="${item.media_id}" title="Open in Library" href="${libraryHref(item.media_id)}" target="${libraryTarget()}" rel="noopener" aria-label="Open in Library"><i data-lucide="images"></i></a>${status==='needs_attention'?`<button class="btn open-crop-media" data-media-id="${item.media_id}"><i data-lucide="crop"></i>Review</button>`:item.status==='pending'?`<button class="btn open-crop" data-id="${item.id}"><i data-lucide="scan-line"></i>Review</button>`:`<button class="btn reset-crop" data-id="${item.id}"><i data-lucide="rotate-ccw"></i>Reopen review</button>`}</div></article>`).join('')||'<div class="empty">No items for this status</div>'}</div>
+    <div class="item-list">${items.map(item=>`<article class="queue-item"><img src="${esc(item.thumbnail_url)}" alt=""><div><strong>Media #${item.media_id}</strong><small>${esc(item.error_message || item.status)}${item.confidence!=null?` · ${Number(item.confidence).toFixed(0)}% confidence`:""}${item.removed_area!=null?` · removes ${Number(item.removed_area).toFixed(1)}%`:""}</small></div><div class="actions"><a class="icon-btn open-library" data-media-id="${item.media_id}" title="Open in Library" href="${libraryHref(item.media_id)}" target="${libraryTarget()}" rel="noopener" aria-label="Open in Library"><i data-lucide="images"></i></a>${status==='needs_attention'?`<button class="btn open-crop-media" data-media-id="${item.media_id}"><i data-lucide="crop"></i>Review</button>`:item.status==='pending'?`<button class="btn open-crop" data-id="${item.id}"><i data-lucide="scan-line"></i>Review</button>`:`<button class="btn reset-crop" data-id="${item.id}"><i data-lucide="rotate-ccw"></i>Reopen review</button>`}</div></article>`).join('')||'<div class="empty">No items for this status</div>'}</div>
     ${pagerHtml(offset,total,pageSize,'crop')}`;
     const statusSelect=document.querySelector('#cropStatus');statusSelect.value=status;statusSelect.onchange=event=>{saveViewState('editor',{cropStatus:event.target.value,cropOffset:0});renderCropTab();};
     document.querySelector('#cropPreset').value=String(cropSettings.crop_background_tolerance);document.querySelector('#cropArea').value=String(cropSettings.crop_min_area_percent);document.querySelector('#cropPadding').value=String(cropSettings.crop_padding_percent);document.querySelector('#cropSelectedMethod').value=cropSettings.crop_selected_analysis;
@@ -1430,7 +1428,7 @@ async function showEditor() {
     const items=data.items||[];
     pane.innerHTML=`<div class="background-scan-toolbar"><label>Edge tolerance <input id="backgroundTolerance" class="control" type="number" min="5" max="80" value="${tolerance}"></label><label>Minimum background, % <input id="backgroundMinimumArea" class="control" type="number" min="5" max="95" value="${minimumArea}"></label><button id="analyzeSelectedBackground" class="btn"><i data-lucide="scan-line"></i>Analyze selected</button><button id="scanBackgrounds" class="btn primary"><i data-lucide="scan-search"></i>Find background candidates</button>${pageSizeControl(pageSize,'background')}</div>
     <div class="page-head"><h2>Background candidates</h2><span class="badge">${total}</span></div>
-    <div class="item-list background-candidate-list">${items.map(item=>`<article class="queue-item background-candidate"><img src="${item.thumbnail_url}" alt=""><div><strong>Media #${item.media_id}</strong><small><span class="background-color-swatch" style="background:${colorCss(item.background_color)}"></span>${asPercent(item.confidence).toFixed(0)}% confidence · ${asPercent(item.background_area_percent).toFixed(1)}% background</small></div><div class="actions"><a class="icon-btn open-background-library" data-media-id="${item.media_id}" title="Open in Library" href="${libraryHref(item.media_id)}" target="${libraryTarget()}" rel="noopener" aria-label="Open in Library"><i data-lucide="images"></i></a><button class="btn open-background-editor" data-media-id="${item.media_id}"><i data-lucide="image-plus"></i>Replace background</button></div></article>`).join('')||'<div class="empty">No background candidates</div>'}</div>
+    <div class="item-list background-candidate-list">${items.map(item=>`<article class="queue-item background-candidate"><img src="${esc(item.thumbnail_url)}" alt=""><div><strong>Media #${item.media_id}</strong><small><span class="background-color-swatch" style="background:${colorCss(item.background_color)}"></span>${asPercent(item.confidence).toFixed(0)}% confidence · ${asPercent(item.background_area_percent).toFixed(1)}% background</small></div><div class="actions"><a class="icon-btn open-background-library" data-media-id="${item.media_id}" title="Open in Library" href="${libraryHref(item.media_id)}" target="${libraryTarget()}" rel="noopener" aria-label="Open in Library"><i data-lucide="images"></i></a><button class="btn open-background-editor" data-media-id="${item.media_id}"><i data-lucide="image-plus"></i>Replace background</button></div></article>`).join('')||'<div class="empty">No background candidates</div>'}</div>
     ${pagerHtml(offset,total,pageSize,'background')}`;
     const saveBackgroundOptions=()=>{const values={tolerance:Number(document.querySelector('#backgroundTolerance').value),min_background_percent:Number(document.querySelector('#backgroundMinimumArea').value)};saveViewState('editor',{backgroundTolerance:values.tolerance,backgroundMinimumArea:values.min_background_percent,backgroundOffset:0});return values};
     ['backgroundTolerance','backgroundMinimumArea'].forEach(id=>document.querySelector(`#${id}`).onchange=()=>{saveBackgroundOptions();renderBackgroundTab()});
@@ -1494,6 +1492,7 @@ async function showEditor() {
     options=options||{};
     if(editorEpoch!==renderEpoch)return;
     ++editorRenderSequence;
+    cleanupEditorModalKey();
     saveViewState('editor',{analysisId:null,targetMediaId:null,backgroundOpen:false,...(options.cropStatus?{cropStatus:options.cropStatus,status:options.cropStatus}:{})});
     const tab=options.tab||editorPrefs().tab;
     saveEditorPrefs({tab});
@@ -1542,12 +1541,12 @@ async function showEditor() {
       <div class="page-head"><button class="btn" id="backEditor"><i data-lucide="chevron-left"></i>Editor</button><a class="icon-btn" id="cropOpenLibrary" title="Open in Library" href="${libraryHref(mediaId)}" target="${libraryTarget()}" rel="noopener" aria-label="Open in Library"><i data-lucide="images"></i></a><h2>Media #${mediaId}</h2>${state.is_edited?`<span class="badge good">${esc(editSummary(state.edit_operations))}</span>`:'<span class="badge">Original</span>'}</div>
       ${imageToolTabs(chosenTool)}
       ${state.crop_review?.blocked?`<div class="crop-admission-notice"><strong>Crop review required before collections</strong><p>${esc(state.crop_review.error_message||"Review the current version and apply a crop or confirm No crop needed.")}</p></div>`:""}
-      <div class="editor-version-compare"><section><h3>Current version</h3><img src="${active?.content_url||state.content_url}" alt=""></section><section><h3>Original</h3><img src="${original?.content_url||state.content_url}" alt=""></section></div>
+      <div class="editor-version-compare"><section><h3>Current version</h3><img src="${esc(active?.content_url||state.content_url)}" alt=""></section><section><h3>Original</h3><img src="${esc(original?.content_url||state.content_url)}" alt=""></section></div>
       <div class="actions editor-state-actions"><button class="btn primary" id="analyzeCurrent" ${chosenTool!=='crop'?'hidden':''}><i data-lucide="scan-line"></i>Analyze current</button><button class="btn" id="approveCurrentCrop" ${chosenTool!=='crop'?'hidden':''}><i data-lucide="check"></i>No crop needed</button><button class="btn danger" id="resetOriginal" ${state.is_edited?'':'disabled'}><i data-lucide="rotate-ccw"></i>Reset to original</button></div>
        <section id="backgroundPanel" class="background-panel" ${backgroundOpen?'':'hidden'}>
          <div class="background-panel-head"><div><h3>Background replacement</h3><span id="backgroundStatus" class="background-status">${savedPreview?.status==='ready'?'Preview ready':'Preview required'}</span></div><div class="actions"><button id="analyzeBackgroundCurrent" class="btn"><i data-lucide="scan-search"></i>Check candidate</button><button id="removeBackgroundPreview" class="btn primary"><i data-lucide="scan-eye"></i>${savedPreview?.status==='ready'?'Regenerate automatic mask':'Remove background / Preview'}</button></div></div>
          <div class="background-zoom-control"><label for="backgroundZoom">Zoom <output id="backgroundZoomValue" for="backgroundZoom">100%</output></label><input id="backgroundZoom" type="range" min="100" max="400" value="${Number(editorState.backgroundZoom || 100)}"></div>
-         <div class="background-preview-comparison"><figure><figcaption>Source</figcaption><div id="backgroundSourcePane" class="background-zoom-pane"><img id="backgroundSourceImage" src="${active?.content_url||state.content_url}" alt=""></div></figure><figure class="transparent-preview"><figcaption>Removed background</figcaption><div id="backgroundPreviewPane" class="background-zoom-pane"><div id="backgroundPreviewResult" class="background-preview-placeholder"><canvas id="backgroundPreviewCanvas" aria-label="Removed background preview"></canvas><i data-lucide="image"></i></div></div></figure></div>
+         <div class="background-preview-comparison"><figure><figcaption>Source</figcaption><div id="backgroundSourcePane" class="background-zoom-pane"><img id="backgroundSourceImage" src="${esc(active?.content_url||state.content_url)}" alt=""></div></figure><figure class="transparent-preview"><figcaption>Removed background</figcaption><div id="backgroundPreviewPane" class="background-zoom-pane"><div id="backgroundPreviewResult" class="background-preview-placeholder"><canvas id="backgroundPreviewCanvas" aria-label="Removed background preview"></canvas><i data-lucide="image"></i></div></div></figure></div>
          <div class="background-preview-modes" role="group" aria-label="Preview mode"><span>Preview</span><button type="button" class="btn${savedPreviewMode==='cutout'?' primary':''}" data-preview-mode="cutout" aria-pressed="${savedPreviewMode==='cutout'}">Cutout</button><button type="button" class="btn${savedPreviewMode==='mask'?' primary':''}" data-preview-mode="mask" aria-pressed="${savedPreviewMode==='mask'}">Mask</button></div>
          <div id="backgroundAfterPreview" class="background-after-preview" ${savedPreview?.status==='ready'?'':'hidden'}>
            <div class="background-generation-note">The automatic mask is ready. Choose a background and apply the result.</div>
@@ -1557,7 +1556,7 @@ async function showEditor() {
            <div id="backgroundLibraryModal" class="background-modal" hidden role="dialog" aria-modal="true" aria-labelledby="backgroundLibraryTitle"><div class="background-modal-backdrop" data-close-background-modal></div><div class="background-modal-window"><div class="background-modal-head"><h3 id="backgroundLibraryTitle">Choose background</h3><button id="closeBackgroundModal" class="icon-btn" title="Close"><i data-lucide="x"></i></button></div><div class="background-library-toolbar"><label>Category <select id="backgroundCategoryFilter" class="control"><option value="">All backgrounds</option></select></label><label>Import category <input id="backgroundImportCategory" class="control" list="backgroundCategoryNames" maxlength="80" placeholder="Category"></label><datalist id="backgroundCategoryNames"></datalist><input id="backgroundFileInput" type="file" accept="image/*" hidden><button id="chooseBackgroundFile" class="btn"><i data-lucide="upload"></i>Import background</button></div><div id="backgroundLibrary" class="background-grid"><div class="empty">No backgrounds</div></div><div class="background-modal-actions"><button id="cancelBackground" class="btn">Cancel</button><button id="selectBackground" class="btn primary" disabled><i data-lucide="check"></i>Select background</button></div></div></div>
          </div>
        </section>
-       <section class="revision-list"><h3>Versions</h3>${revisions.items.map(revision=>`<article class="${revision.in_active_chain?'active-chain':''}"><img src="${revision.content_url}" alt=""><span><strong>${esc(operationDetails(revision))}</strong><small>${revision.width}×${revision.height} · ${formatBytes(revision.file_size)}${revision.active?' · Active':''}</small></span><button class="btn restore-revision" data-id="${revision.id}" ${revision.active?'disabled':''}>${revision.active?'Active':'Restore'}</button></article>`).join('')}</section>
+       <section class="revision-list"><h3>Versions</h3>${revisions.items.map(revision=>`<article class="${revision.in_active_chain?'active-chain':''}"><img src="${esc(revision.content_url)}" alt=""><span><strong>${esc(operationDetails(revision))}</strong><small>${revision.width}×${revision.height} · ${formatBytes(revision.file_size)}${revision.active?' · Active':''}</small></span><button class="btn restore-revision" data-id="${revision.id}" ${revision.active?'disabled':''}>${revision.active?'Active':'Restore'}</button></article>`).join('')}</section>
      </div>`;
     document.querySelector('#backEditor').onclick=()=>{saveViewState('editor',{targetMediaId:null,analysisId:null,backgroundOpen:false});render({tab:chosenTool})};
     document.querySelector('#cropOpenLibrary').onclick=libraryLinkClick;
@@ -1611,7 +1610,7 @@ async function showEditor() {
       categoryNames.innerHTML=categories.map(item=>`<option value="${esc(item.name)}"></option>`).join('');
       if(!categoryInput.value&&categories.length)categoryInput.value=categories[0].name;
       chooseFile.disabled=!categoryInput.value.trim();
-      document.querySelector('#backgroundLibrary').innerHTML=assetItems.length?assetItems.map(asset=>`<button type="button" class="background-choice${Number(asset.id)===temporaryBackground?' selected':''}" data-id="${asset.id}"><img src="${asset.content_url}" loading="lazy" alt=""><span><strong>${esc(asset.original_name)}</strong><small>${esc(asset.category)} · ${asset.width||'?'}×${asset.height||'?'}</small></span></button>`).join(''):'<div class="empty">No backgrounds in this category</div>';
+      document.querySelector('#backgroundLibrary').innerHTML=assetItems.length?assetItems.map(asset=>`<button type="button" class="background-choice${Number(asset.id)===temporaryBackground?' selected':''}" data-id="${asset.id}"><img src="${esc(asset.content_url)}" loading="lazy" alt=""><span><strong>${esc(asset.original_name)}</strong><small>${esc(asset.category)} · ${asset.width||'?'}×${asset.height||'?'}</small></span></button>`).join(''):'<div class="empty">No backgrounds in this category</div>';
       document.querySelectorAll('.background-choice').forEach(node=>node.onclick=()=>{temporaryBackground=Number(node.dataset.id);document.querySelectorAll('.background-choice').forEach(choice=>choice.classList.toggle('selected',choice===node));selectBackground.disabled=false});
       const matching=assetItems.find(asset=>Number(asset.id)===selectedBackground); if(matching)selectedBackgroundData=matching;
       selectBackground.disabled=!temporaryBackground;
@@ -1626,8 +1625,8 @@ async function showEditor() {
     document.querySelector('#analyzeBackgroundCurrent').onclick=async()=>{const button=document.querySelector('#analyzeBackgroundCurrent');const saved=viewState('editor');const parameters={tolerance:Number(saved.backgroundTolerance)||24,min_background_percent:Number(saved.backgroundMinimumArea)||25};button.disabled=true;setBackgroundStatus('Analyzing background...');try{const result=await api(`/api/v1/media/${mediaId}/background-analysis`,{method:'POST',body:JSON.stringify(parameters)});if(result.status==='candidate'){const candidate=result.candidate;setBackgroundStatus(`Candidate · ${Number(candidate.background_area_percent).toFixed(1)}% background`,'good')}else setBackgroundStatus('No replaceable background found','warn')}catch(error){setBackgroundStatus(error.message,'error')}finally{button.disabled=false}};
     document.querySelector('#removeBackgroundPreview').onclick=async()=>{const button=document.querySelector('#removeBackgroundPreview');const previousPreview=preview;button.disabled=true;setBackgroundStatus(previousPreview?'Regenerating automatic mask...':'Preparing the automatic background removal...');try{preview=await api(`/api/v1/media/${mediaId}/background-preview`,{method:'POST',body:JSON.stringify({force:Boolean(previousPreview)})});button.innerHTML='<i data-lucide="scan-eye"></i>Regenerate automatic mask';const sameAsPrevious=Boolean(preview.same_as_previous);foregroundImage=null;selectedBackgroundImage=null;compositionReady=false;await resolveSelectedBackground().catch(()=>{});await prepareForeground();if(sameAsPrevious)setBackgroundStatus('The automatic model produced the same mask again.','warn')}catch(error){if(error.message&&preview!==previousPreview){setBackgroundStatus(error.message,'error');afterPreview.hidden=false;updateApply();}else{preview=previousPreview;if(previousPreview){afterPreview.hidden=false;setBackgroundStatus(error.message,'error');updateApply()}else{afterPreview.hidden=true;setBackgroundStatus(error.message,'error')}}}finally{button.disabled=false;icons()}};
     const onKey=event=>{if(event.key==='Escape'&&!modal.hidden)closeModal()};
-    cleanupBackgroundModalKey?.();
-    cleanupBackgroundModalKey=()=>document.removeEventListener('keydown',onKey);
+    cleanupEditorModalKey();
+    cleanupEditorModalKey=()=>document.removeEventListener('keydown',onKey);
     const openModal=async()=>{temporaryBackground=selectedBackground;modal.hidden=false;document.addEventListener('keydown',onKey);await loadAssets(modalFilter.value||'');document.querySelector('#selectBackground').focus()};
     const closeModal=()=>{document.removeEventListener('keydown',onKey);modal.hidden=true;chooseBackground.focus()};
     chooseBackground.onclick=openModal;document.querySelector('#closeBackgroundModal').onclick=closeModal;document.querySelector('#cancelBackground').onclick=closeModal;modal.querySelector('[data-close-background-modal]').onclick=closeModal;
@@ -1654,6 +1653,7 @@ async function showEditor() {
     const item=await api(`/api/v1/crop-analyses/${id}`);
     const revisions=await api(`/api/v1/media/${item.media_id}/revisions`);
     if(editorEpoch!==renderEpoch||sequence!==editorRenderSequence)return;
+    cleanupEditorModalKey();
     const active=revisions.items.find(revision=>revision.active);
     if(Number(active?.id)!==Number(item.revision_id))return openMediaEditor(item.media_id,'crop');
     activateImageDraft(item.media_id,item.revision_id,'crop');
@@ -1661,7 +1661,7 @@ async function showEditor() {
     syncEditorRoute(item.media_id,'crop');
     const isManual=item.method==='manual';
     const methodLabel=isManual?'Manual crop':item.method;
-    workspace.innerHTML=`<div class="page editor-page"><div class="page-head"><button class="btn" id="backEditor"><i data-lucide="chevron-left"></i>Editor</button><h2>Media #${item.media_id}</h2><span class="badge" id="proposalMethod">${esc(methodLabel)}</span></div>${imageToolTabs("crop")}<div class="crop-workspace"><div class="crop-source"><img id="cropSource" src="${item.content_url}" alt=""></div><canvas id="cropPreview"></canvas></div><div class="crop-controls">${['Left','Top','Right','Bottom'].map((name,index)=>`<label>${name}<input class="control crop-coordinate" data-index="${index}" type="number" value="${item.box[index]}"></label>`).join('')}<button id="resetCrop" class="icon-btn" title="${isManual?'Reset to full image':'Reset suggested crop'}"><i data-lucide="rotate-ccw"></i></button></div><div class="actions"><button class="btn" id="analyzeCrop"><i data-lucide="scan-line"></i>Analyze</button><button class="btn" id="visionCrop"><i data-lucide="scan-eye"></i>Vision model</button><button class="btn primary" id="applyCrop"><i data-lucide="check"></i>Apply crop</button><button class="btn" id="noCrop">No crop needed</button>${isManual?'':'<button class="btn" id="skipCrop">Skip</button>'}</div><section class="revision-list"><h3>Versions</h3>${revisions.items.map(r=>`<article><img src="${r.content_url}" alt=""><span>${esc(r.operation)} · ${r.width}×${r.height} · ${formatBytes(r.file_size)}</span><button class="btn restore-revision" data-id="${r.id}" ${r.active?'disabled':''}>${r.active?'Active':'Restore'}</button></article>`).join('')}</section></div>`;
+    workspace.innerHTML=`<div class="page editor-page"><div class="page-head"><button class="btn" id="backEditor"><i data-lucide="chevron-left"></i>Editor</button><h2>Media #${item.media_id}</h2><span class="badge" id="proposalMethod">${esc(methodLabel)}</span></div>${imageToolTabs("crop")}<div class="crop-workspace"><div class="crop-source"><img id="cropSource" src="${esc(item.content_url)}" alt=""></div><canvas id="cropPreview"></canvas></div><div class="crop-controls">${['Left','Top','Right','Bottom'].map((name,index)=>`<label>${name}<input class="control crop-coordinate" data-index="${index}" type="number" value="${item.box[index]}"></label>`).join('')}<button id="resetCrop" class="icon-btn" title="${isManual?'Reset to full image':'Reset suggested crop'}"><i data-lucide="rotate-ccw"></i></button></div><div class="actions"><button class="btn" id="analyzeCrop"><i data-lucide="scan-line"></i>Analyze</button><button class="btn" id="visionCrop"><i data-lucide="scan-eye"></i>Vision model</button><button class="btn primary" id="applyCrop"><i data-lucide="check"></i>Apply crop</button><button class="btn" id="noCrop">No crop needed</button>${isManual?'':'<button class="btn" id="skipCrop">Skip</button>'}</div><section class="revision-list"><h3>Versions</h3>${revisions.items.map(r=>`<article><img src="${esc(r.content_url)}" alt=""><span>${esc(r.operation)} · ${r.width}×${r.height} · ${formatBytes(r.file_size)}</span><button class="btn restore-revision" data-id="${r.id}" ${r.active?'disabled':''}>${r.active?'Active':'Restore'}</button></article>`).join('')}</section></div>`;
     document.querySelector('#backEditor').insertAdjacentHTML('afterend',`<a class="icon-btn" id="cropOpenLibrary" title="Open in Library" href="${libraryHref(item.media_id)}" target="${libraryTarget()}" rel="noopener" aria-label="Open in Library"><i data-lucide="images"></i></a>`);
     document.querySelector('#cropOpenLibrary').onclick=libraryLinkClick;
     document.querySelector('#backEditor').onclick=()=>{saveViewState('editor',{analysisId:null,targetMediaId:null});render({tab:'crop'})};
@@ -1698,6 +1698,7 @@ async function showEditor() {
     const sequence=++editorRenderSequence;
     const state=await api(`/api/v1/media/${mediaId}/trim-state`);
     if(editorEpoch!==renderEpoch||sequence!==editorRenderSequence)return;
+    cleanupEditorModalKey();
     const source=state.source; let durationMs=Number(state.duration_ms)||0;
     const editorKey=Number(source.id);
     const revisionKey=editorDraftKey(editorKey,source.active_revision_id);
@@ -1723,7 +1724,7 @@ async function showEditor() {
       <div class="page-head"><button class="btn" id="backEditor"><i data-lucide="chevron-left"></i>Editor</button><a class="icon-btn" id="trimOpenLibrary" title="Open in Library" href="${libraryHref(source.id)}" target="${libraryTarget()}" rel="noopener" aria-label="Open in Library"><i data-lucide="images"></i></a><h2>Trim ${isVideo?'video':'animation'}</h2><span class="badge">Media #${source.id}</span>${state.derived_from_media_id?`<span class="badge">Part ${state.trim_index||'?'}</span>`:''}</div>
       <div class="trim-layout">
         <div class="trim-stage">
-          <div class="trim-preview">${isVideo?`<video id="trimSource" src="${source.content_url}" controls preload="metadata" playsinline></video>`:`<img id="trimSource" src="${source.content_url}" alt="">`}</div>
+          <div class="trim-preview">${isVideo?`<video id="trimSource" src="${esc(source.content_url)}" controls preload="metadata" playsinline></video>`:`<img id="trimSource" src="${esc(source.content_url)}" alt="">`}</div>
           ${isVideo?`<div class="trim-timeline-wrap">
             <div class="trim-zoom-bar">
               <button type="button" class="icon-btn" id="trimZoomOut" title="Zoom out"><i data-lucide="zoom-out"></i></button>
@@ -1811,7 +1812,7 @@ async function showEditor() {
     };
     const segmentStateIcon=state=>{if(state==='saved')return 'check-circle';if(state==='encoding')return 'loader-circle';if(state==='queued')return 'clock';if(state==='error')return 'triangle-alert';return 'circle-dashed';};
     const segmentStateHtml=(state,index)=>`<span class="trim-segment-state ${esc(state||'new')}" data-segment-state="${index}"><i data-lucide="${segmentStateIcon(state)}" class="${state==='encoding'?'spin':''}"></i>${esc(segmentStateLabel(state))}</span>`;
-    const updateSegmentState=index=>{const node=document.querySelector(`[data-segment-state="${index}"]`);if(!node)return;const state=segments[index]?.state;node.className=`trim-segment-state ${state||'new'}`;node.innerHTML=segmentStateHtml(state,index);icons();};
+    const updateSegmentState=index=>{const node=document.querySelector(`[data-segment-state="${index}"]`);if(!node)return;const state=segments[index]?.state;node.outerHTML=segmentStateHtml(state,index);icons();};
     const build=()=>{
       const list=segments.map((segment,index)=>`<article class="trim-segment"><span><strong>${esc(describeSegment(segment,index+1))}</strong><small>${formatDuration(segmentDurationMs(segment))}</small></span>${segmentStateHtml(segment.state,index)}<div class="actions"><button type="button" class="btn trim-edit" data-index="${index}"><i data-lucide="pencil"></i>Edit</button><button type="button" class="icon-btn danger trim-remove" data-index="${index}" title="Remove"><i data-lucide="trash-2"></i></button></div></article>`).join('');
       document.querySelector('#trimSegmentList').innerHTML=list||'<div class="empty">No segments yet. Set a range and add it.</div>';
@@ -1940,7 +1941,7 @@ async function showCollections() {
     const byDate = String(right.created_at || '').localeCompare(String(left.created_at || ''));
     return byDate || Number(right.id) - Number(left.id);
   });
-  const prefs = JSON.parse(localStorage.getItem('jiffle.collection-prefs') || '{"pageSize":20,"view":"list"}');
+  const prefs = (() => { try { const saved = JSON.parse(localStorage.getItem('jiffle.collection-prefs') || '{}'); return {pageSize: 20, view: 'list', ...(saved && typeof saved === 'object' ? saved : {})}; } catch { return {pageSize: 20, view: 'list'}; } })();
   let page = Number(collectionState.page || 1);
   const render = async () => {
     const query = (document.querySelector('#collectionSearch')?.value || '').trim().toLowerCase();
@@ -1951,7 +1952,7 @@ async function showCollections() {
     saveViewState('collections',{search:document.querySelector('#collectionSearch')?.value || '',page});
     const smart = document.querySelector('#collectionView')?.value === 'cards';
     const warning = item => Number(item.author_warning_count) > 0 ? `<span class="badge warn" title="Author limit exceeded"><i data-lucide="triangle-alert"></i>${item.author_warning_count}</span>` : '';
-    const body = smart ? visible.map(item => `<article class="smart-collection"><div class="smart-previews">${item.cover_urls.map(url => `<img src="${url}" loading="lazy" alt="">`).join('') || '<div class="empty">No files</div>'}</div><div class="smart-body"><strong>${esc(item.name)}</strong><small>${item.item_count} files · ${esc(formatDateTime(item.created_at || ''))}</small><div class="actions">${warning(item)}<button class="btn open" data-id="${item.id}"><i data-lucide="eye"></i>Open</button><button class="btn export" data-id="${item.id}"><i data-lucide="download"></i>Export</button><button class="icon-btn archive" data-id="${item.id}" title="Download ZIP"><i data-lucide="file-archive"></i></button><button class="icon-btn danger delete" data-id="${item.id}" title="Delete"><i data-lucide="trash-2"></i></button></div></div></article>`).join('') : visible.map(item => `<article class="collection-item"><i data-lucide="folder"></i><div><strong>${esc(item.name)}</strong><small>${item.item_count} files · created ${esc(formatDateTime(item.created_at || ''))}</small></div><div class="actions">${warning(item)}<button class="btn open" data-id="${item.id}"><i data-lucide="eye"></i>Open</button><button class="btn export" data-id="${item.id}"><i data-lucide="download"></i>Export</button><button class="icon-btn archive" data-id="${item.id}" title="Download ZIP"><i data-lucide="file-archive"></i></button><button class="icon-btn danger delete" data-id="${item.id}" title="Delete"><i data-lucide="trash-2"></i></button></div></article>`).join('');
+    const body = smart ? visible.map(item => `<article class="smart-collection"><div class="smart-previews">${item.cover_urls.map(url => `<img src="${esc(url)}" loading="lazy" alt="">`).join('') || '<div class="empty">No files</div>'}</div><div class="smart-body"><strong>${esc(item.name)}</strong><small>${item.item_count} files · ${esc(formatDateTime(item.created_at || ''))}</small><div class="actions">${warning(item)}<button class="btn open" data-id="${item.id}"><i data-lucide="eye"></i>Open</button><button class="btn export" data-id="${item.id}"><i data-lucide="download"></i>Export</button><button class="icon-btn archive" data-id="${item.id}" title="Download ZIP"><i data-lucide="file-archive"></i></button><button class="icon-btn danger delete" data-id="${item.id}" title="Delete"><i data-lucide="trash-2"></i></button></div></div></article>`).join('') : visible.map(item => `<article class="collection-item"><i data-lucide="folder"></i><div><strong>${esc(item.name)}</strong><small>${item.item_count} files · created ${esc(formatDateTime(item.created_at || ''))}</small></div><div class="actions">${warning(item)}<button class="btn open" data-id="${item.id}"><i data-lucide="eye"></i>Open</button><button class="btn export" data-id="${item.id}"><i data-lucide="download"></i>Export</button><button class="icon-btn archive" data-id="${item.id}" title="Download ZIP"><i data-lucide="file-archive"></i></button><button class="icon-btn danger delete" data-id="${item.id}" title="Delete"><i data-lucide="trash-2"></i></button></div></article>`).join('');
     document.querySelector('#collectionResults').innerHTML = body || '<div class="empty">No collections found</div>';
     document.querySelector('#collectionPager').innerHTML = `<span>${filtered.length} collections</span><button class="icon-btn" id="collectionPrev" title="Previous" ${page===1?'disabled':''}><i data-lucide="chevron-left"></i></button><span>Page ${page} of ${totalPages}</span><button class="icon-btn" id="collectionNext" title="Next" ${page===totalPages?'disabled':''}><i data-lucide="chevron-right"></i></button>`;
     document.querySelector('#collectionPrev').onclick=()=>{page--;render()}; document.querySelector('#collectionNext').onclick=()=>{page++;render()};
@@ -1959,7 +1960,7 @@ async function showCollections() {
   };
   workspace.innerHTML = `<div class="page"><div class="collection-toolbar"><input id="collectionSearch" class="control" placeholder="Search by name"><select id="collectionPageSize" class="control"><option value="10">10 per page</option><option value="20">20 per page</option><option value="50">50 per page</option></select><select id="collectionView" class="control"><option value="list">List</option><option value="cards">Smart cards</option></select></div><div id="collectionResults" class="item-list"></div><div id="collectionPager" class="collection-pager"></div></div>`;
   document.querySelector('#collectionSearch').value=collectionState.search || ''; document.querySelector('#collectionPageSize').value=String(prefs.pageSize); document.querySelector('#collectionView').value=prefs.view;
-  document.querySelector('#collectionSearch').oninput=()=>{page=1;render()}; document.querySelector('#collectionPageSize').onchange=event=>{prefs.pageSize=Number(event.target.value);localStorage.setItem('jiffle.collection-prefs',JSON.stringify(prefs));page=1;render()}; document.querySelector('#collectionView').onchange=event=>{prefs.view=event.target.value;localStorage.setItem('jiffle.collection-prefs',JSON.stringify(prefs));render()};
+  document.querySelector('#collectionSearch').oninput=()=>{page=1;render()}; document.querySelector('#collectionPageSize').onchange=event=>{prefs.pageSize=Number(event.target.value);try{localStorage.setItem('jiffle.collection-prefs',JSON.stringify(prefs));}catch{}page=1;render()}; document.querySelector('#collectionView').onchange=event=>{prefs.view=event.target.value;try{localStorage.setItem('jiffle.collection-prefs',JSON.stringify(prefs));}catch{}render()};
   await render();
   function bindCollectionActions(){
     document.querySelectorAll('.export').forEach(node=>node.onclick=()=>exportCollection(node.dataset.id));
@@ -2047,7 +2048,7 @@ async function showCollectionBuilder() {
     if(!preview){input('builderStatus').textContent='No collection generated yet';return;}
     const similar=preview.most_similar_collection?`Similarity ${Math.round(preview.max_similarity*100)}% with "${esc(preview.most_similar_collection.name)}"`:'';
     input('builderSummary').innerHTML=`<span class="badge ${preview.can_save?'good':'warn'}">Available ${preview.available_count}, selected ${preview.items.length} of ${preview.requested_count}</span>${similar?`<span>${similar}</span>`:''}`;
-    input('builderPreview').innerHTML=preview.items.map((item,index)=>`<article class="builder-card${item.author_limit_exceeded?' limit-warning':''}${item.issue?' invalid-selection':''}"><div class="builder-image"><img src="${item.thumbnail_url}" loading="lazy" alt="Media #${item.id}"><a class="icon-btn open-builder-library" data-media-id="${item.id}" href="${libraryHref(item.id)}" target="${libraryTarget()}" rel="noopener" title="Open in Library" aria-label="Open in Library"><i data-lucide="images"></i></a>${item.author_limit_exceeded?'<span class="limit-icon" title="Author item limit exceeded"><i data-lucide="triangle-alert"></i></span>':''}<button class="icon-btn swap-builder-item" data-index="${index}" title="Replace"><i data-lucide="refresh-cw"></i></button></div><div><strong>${esc(item.author||'Unknown author')}</strong><small>Media #${item.id} · ${item.usage_count} collections${item.last_used_at?` · ${esc(formatDateTime(item.last_used_at))}`:' · never used'}</small>${item.issue?`<p class="selection-issue">${esc(item.issue)}</p>`:''}</div></article>`).join('')||'<div class="empty">No matching images</div>';
+    input('builderPreview').innerHTML=preview.items.map((item,index)=>`<article class="builder-card${item.author_limit_exceeded?' limit-warning':''}${item.issue?' invalid-selection':''}"><div class="builder-image"><img src="${esc(item.thumbnail_url)}" loading="lazy" alt="Media #${item.id}"><a class="icon-btn open-builder-library" data-media-id="${item.id}" href="${libraryHref(item.id)}" target="${libraryTarget()}" rel="noopener" title="Open in Library" aria-label="Open in Library"><i data-lucide="images"></i></a>${item.author_limit_exceeded?'<span class="limit-icon" title="Author item limit exceeded"><i data-lucide="triangle-alert"></i></span>':''}<button class="icon-btn swap-builder-item" data-index="${index}" title="Replace"><i data-lucide="refresh-cw"></i></button></div><div><strong>${esc(item.author||'Unknown author')}</strong><small>Media #${item.id} · ${item.usage_count} collections${item.last_used_at?` · ${esc(formatDateTime(item.last_used_at))}`:' · never used'}</small>${item.issue?`<p class="selection-issue">${esc(item.issue)}</p>`:''}</div></article>`).join('')||'<div class="empty">No matching images</div>';
     input('builderStatus').textContent=!selectionRulesMatch(draft)?'Rules changed — Generate a new selection before saving':preview.can_save?'Selection is ready to save':preview.items.some(item=>item.issue)?'Review the highlighted files; your selection has not been replaced':'Not enough matching images';
     root.querySelectorAll('.open-builder-library').forEach(node=>node.onclick=libraryLinkClick);
     root.querySelectorAll('.swap-builder-item').forEach(node=>node.onclick=async()=>{
@@ -2295,6 +2296,8 @@ function formatBytes(value){if(value==null)return 'unknown size';const units=['B
 const views={library:showLibrary,import:showImport,review:showReview,duplicates:showDuplicates,editor:showEditor,collections:showCollections,settings:showSettingsPage};
 async function navigate(destination, options={}) {
   const route=parseRoute(destination), view=route.view;
+  closeActiveLightbox?.();
+  cleanupEditorModalKey();
   saveScrollState();
   const epoch=++renderEpoch;
   currentView=view;
@@ -2305,6 +2308,7 @@ async function navigate(destination, options={}) {
   if(view==='collections'){
     if(route.id)saveViewState('collections',{screen:'detail',collectionId:route.id,scrollTop:0});
     else if(['list','builder'].includes(route.params.get('screen')))saveViewState('collections',{screen:route.params.get('screen')});
+    else saveViewState('collections',{screen:'list',collectionId:null});
   }
   if(view==='editor'){
     const tab=route.params.get('tab'),tool=route.params.get('tool');
