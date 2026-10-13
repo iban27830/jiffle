@@ -3,6 +3,8 @@ from dataclasses import replace
 import json
 import os
 from pathlib import Path
+import re
+from uuid import uuid4
 
 from jiffle.features.background_editor.workflow import (
     DEFAULT_BACKGROUND_DEVICE,
@@ -16,6 +18,47 @@ DEFAULT_EXPORT_FORMAT_RULES = (("gif", "mp4"), ("webm", "mp4"))
 
 COLLECTION_EXPORT_MODES = ("download", "folder", "both")
 COLLECTION_EXPORT_MODE_DEFAULT = "download"
+
+STORAGE_PATH_ENV_VARS = {
+    "media_path": "JIFFLE_MEDIA_PATH",
+    "thumbnail_path": "JIFFLE_THUMBNAIL_PATH",
+    "import_staging_path": "JIFFLE_IMPORT_STAGING_PATH",
+    "export_path": "JIFFLE_EXPORT_PATH",
+}
+
+
+def _is_compatible_saved_path(value: object) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    text = value.strip()
+    if os.name != "nt" and ("\\" in text or re.match(r"^[A-Za-z]:", text)):
+        return False
+    return True
+
+
+def default_storage_paths(fallback_root: Path | None = None) -> dict[str, Path]:
+    if fallback_root is None:
+        project_root = Path(__file__).resolve().parents[2]
+        data_root = Path(
+            os.environ.get("DATA_DIR")
+            or os.environ.get("JIFFLE_DATA_ROOT", project_root / "jiffle-data")
+        ).resolve()
+        managed_data = bool(os.environ.get("DATA_DIR") or os.environ.get("JIFFLE_DATA_ROOT"))
+        base_root = data_root if managed_data else project_root
+    else:
+        base_root = fallback_root.resolve()
+    defaults = {
+        "media_path": base_root / "media",
+        "thumbnail_path": base_root / "thumbnails",
+        "import_staging_path": base_root / "import-staging",
+        "export_path": base_root / "collections",
+    }
+    return {
+        field: Path(os.environ.get(env_var) or default_path).resolve()
+        for field, (env_var, default_path) in (
+            (key, (STORAGE_PATH_ENV_VARS[key], defaults[key])) for key in defaults
+        )
+    }
 
 
 def collection_export_mode_value(value: object) -> str:
@@ -167,8 +210,12 @@ class Settings:
                     values["export_format_rules"] = tuple(rules.items())
                 elif isinstance(rules, list):
                     values["export_format_rules"] = tuple(tuple(rule) for rule in rules)
-            for key in ("media_path", "thumbnail_path", "import_staging_path", "export_path"):
-                if key in values and values[key]:
+            for key, env_var in STORAGE_PATH_ENV_VARS.items():
+                if key not in values:
+                    continue
+                if os.environ.get(env_var) or not _is_compatible_saved_path(values[key]):
+                    values.pop(key, None)
+                else:
                     values[key] = Path(values[key]).resolve()
             settings = replace(settings, **values)
             if legacy_ai_keys.intersection(payload):
@@ -179,7 +226,7 @@ class Settings:
 def persist_settings(settings: Settings) -> None:
     path = settings.configuration_path
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
+    temporary = path.with_name(f".{path.stem}-{uuid4().hex}.tmp")
     payload = {
         "media_path": str(settings.media_path),
         "thumbnail_path": str(settings.thumbnail_path),
@@ -216,8 +263,11 @@ def persist_settings(settings: Settings) -> None:
         "furaffinity_cookie_a": settings.furaffinity_cookie_a,
         "furaffinity_cookie_b": settings.furaffinity_cookie_b,
     }
-    with temporary.open("w", encoding="utf-8") as file:
-        json.dump(payload, file, indent=2)
-        file.flush()
-        os.fsync(file.fileno())
-    os.replace(temporary, path)
+    try:
+        with temporary.open("w", encoding="utf-8") as file:
+            json.dump(payload, file, indent=2)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)

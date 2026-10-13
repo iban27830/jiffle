@@ -5,6 +5,8 @@ import time
 
 import requests
 
+from jiffle.features.imports.url_normalization import ensure_public_url
+
 
 # Never honour a server-provided Retry-After longer than this.  Without a cap
 # a rate-limited or overloaded CDN can park an import worker for hours.
@@ -33,9 +35,11 @@ class RequestsMediaDownloader:
     read_timeout = 45
     max_attempts = 3
     chunk_size = 64 * 1024
+    max_bytes = 512 * 1024 * 1024
     transient_statuses = {408, 429, 500, 502, 503, 504}
 
     def download(self, url: str, destination: Path, referer: str | None = None) -> None:
+        ensure_public_url(url)
         headers = {"User-Agent": "Jiffle/2.0"}
         if referer:
             headers["Referer"] = referer
@@ -49,8 +53,12 @@ class RequestsMediaDownloader:
                     timeout=(self.connect_timeout, self.read_timeout),
                     stream=True,
                 )
+                final_url = getattr(response, "url", None)
+                if isinstance(final_url, str) and final_url:
+                    ensure_public_url(final_url)
                 status = getattr(response, "status_code", None)
-                content_type = str((getattr(response, "headers", None) or {}).get("Content-Type", ""))
+                response_headers = getattr(response, "headers", None) or {}
+                content_type = str(response_headers.get("Content-Type", ""))
                 if "text/html" in content_type.lower() and status not in {401, 403, 404}:
                     raise ValueError("Source returned HTML instead of media")
                 if status in self.transient_statuses:
@@ -74,9 +82,27 @@ class RequestsMediaDownloader:
                     response.raise_for_status()
                 if "text/html" in content_type.lower():
                     raise ValueError("Source returned HTML instead of media")
+                content_length = response_headers.get("Content-Length")
+                if content_length is not None:
+                    try:
+                        declared_bytes = int(content_length)
+                    except (TypeError, ValueError):
+                        declared_bytes = 0
+                    if declared_bytes > self.max_bytes:
+                        raise MediaDownloadError(
+                            "import.file_too_large",
+                            "Source media exceeds the maximum allowed download size.",
+                        )
+                written = 0
                 with destination.open("wb") as file:
                     for chunk in response.iter_content(self.chunk_size):
                         if chunk:
+                            written += len(chunk)
+                            if written > self.max_bytes:
+                                raise MediaDownloadError(
+                                    "import.file_too_large",
+                                    "Source media exceeds the maximum allowed download size.",
+                                )
                             file.write(chunk)
                 return
             except MediaDownloadError:

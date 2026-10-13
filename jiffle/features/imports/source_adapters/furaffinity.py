@@ -1,3 +1,4 @@
+from pathlib import Path
 import re
 from urllib.parse import unquote, urlparse
 
@@ -66,13 +67,17 @@ class FurAffinitySourceProvider:
             )
         )
         tags = add_platform_tags(tags, self.provider_name, "furaffinity.net")
+        raw_suffix = Path(urlparse(direct_url).path).suffix.lower()
+        file_extension = (
+            raw_suffix if re.fullmatch(r"\.[a-z0-9]{1,10}", raw_suffix) else ".jpg"
+        )
         return SourceMedia(
             canonical_url=f"https://www.furaffinity.net/view/{match.group(1)}/",
             direct_media_url=direct_url, provider=self.provider_name,
             remote_id=match.group(1),
             author=title.group("author").strip() if title else None,
             domain="furaffinity.net", tags=tags,
-            file_extension="." + direct_url.rsplit(".", 1)[-1].split("?", 1)[0].lower(),
+            file_extension=file_extension,
         )
 
     def fetch_metadata(self, url):

@@ -435,6 +435,13 @@ def _ensure_dependencies():
     if not missing:
         _verify_dependency_imports()
         return
+    if os.environ.get("JIFFLE_NO_AUTO_INSTALL") == "1":
+        raise BackgroundFailure(
+            "background.runtime_install_disabled",
+            "Automatic package installation is disabled (JIFFLE_NO_AUTO_INSTALL=1). "
+            "Install required packages manually: " + ", ".join(missing) + ".",
+            {"missing_packages": missing},
+        )
     try:
         subprocess.run(
             [

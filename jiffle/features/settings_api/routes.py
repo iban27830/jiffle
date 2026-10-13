@@ -1,4 +1,5 @@
 from dataclasses import replace
+import os
 from pathlib import Path
 import platform
 from flask import Blueprint, current_app, jsonify, request
@@ -7,6 +8,7 @@ import requests
 from jiffle.configuration.settings import (
     Settings,
     collection_export_mode_value,
+    default_storage_paths,
     persist_settings,
 )
 from jiffle.configuration.credentials import absorb_pasted_credentials
@@ -138,6 +140,16 @@ def choose_directory():
     initial_path = payload.get("initial_path")
     if initial_path is not None and not isinstance(initial_path, str):
         return _error("settings.invalid_path", "initial_path must be a string.", 400)
+    if (
+        os.environ.get("DATA_DIR")
+        or os.environ.get("JIFFLE_NO_AUTO_INSTALL") == "1"
+        or os.environ.get("JIFFLE_DISABLE_DIRECTORY_PICKER") == "1"
+    ):
+        return _error(
+            "settings.directory_picker_unavailable",
+            "A native directory picker is not available on this server.",
+            501,
+        )
     if platform.system() == "Android":
         return _error(
             "settings.directory_picker_unavailable",
@@ -269,12 +281,7 @@ def _validated_update(settings, payload):
             continue
         value = values[field]
         if value is None or (isinstance(value, str) and not value.strip()):
-            defaults = {
-                "media_path": settings.configuration_path.parent / "media",
-                "thumbnail_path": settings.configuration_path.parent / "thumbnails",
-                "import_staging_path": settings.configuration_path.parent / "import-staging",
-                "export_path": settings.configuration_path.parent / "collections",
-            }
+            defaults = default_storage_paths(settings.configuration_path.parent)
             values[field] = defaults[field]
         elif not isinstance(value, str):
             raise ValueError(f"{field} must be a path or empty.")

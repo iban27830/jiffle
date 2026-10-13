@@ -8,6 +8,16 @@ __pycache__
 .pytest_cache
 .mypy_cache
 .ruff_cache
+.codex
+.opencode
+.idea
+.vscode
+AGENTS.md
+docs
+tests
+run-tests.ps1
+run.bat
+update.bat
 state
 .env
 settings.json
@@ -21,3 +31,4 @@ media
 *.db-wal
 *.db-shm
 *.log
+*.tmp

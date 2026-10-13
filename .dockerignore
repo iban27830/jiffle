@@ -1,7 +1,18 @@
 # В контекст сборки попадает только код (deploy.ps1 не копирует state/ и данные),
 # поэтому здесь минимум, чтобы случайно не вырезать пакеты кода.
 /.git
+/.gitignore
 /.env
+/.codex
+/.opencode
+/.idea
+/.vscode
+/AGENTS.md
+/docs
+/tests
+/run-tests.ps1
+/run.bat
+/update.bat
 /state
 /settings.json
 /jiffle-data
@@ -12,3 +23,8 @@
 /media
 /__pycache__
 *.pyc
+*.db
+*.db-wal
+*.db-shm
+*.log
+*.tmp

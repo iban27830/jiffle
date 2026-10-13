@@ -17,7 +17,11 @@ from jiffle.features.duplicates.scan import (
     register_pending_match,
 )
 from jiffle.features.imports.history import finalize_review_history
-from jiffle.features.imports.local_import import atomic_copy, inspect_media
+from jiffle.features.imports.local_import import (
+    _safe_media_path,
+    atomic_copy,
+    inspect_media,
+)
 from jiffle.features.imports.source_adapters.contracts import SourceMedia, SourceProvider
 from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
 from jiffle.features.imports.source_adapters.platform_tags import add_platform_tags
@@ -610,8 +614,8 @@ def _stage_reverse_candidates(
         name = f"candidate-{uuid4().hex}{_extension(media_url)}"
         path = settings.resolved_import_staging_path / name
         try:
-            local_candidate = Path(str(media_url))
-            if local_candidate.is_file():
+            local_candidate = _safe_media_path(settings.media_path, str(media_url))
+            if local_candidate is not None and local_candidate.is_file():
                 shutil.copy2(local_candidate, path)
             else:
                 downloader.download(media_url, path, match.canonical_url)

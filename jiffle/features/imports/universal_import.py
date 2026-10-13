@@ -24,6 +24,7 @@ from jiffle.configuration.settings import Settings
 from jiffle.features.imports.history import create_import_history, update_import_history
 from jiffle.features.imports.local_import import (
     ImportFailure,
+    _safe_media_path,
     atomic_copy,
     find_exact_perceptual_duplicate,
     inspect_media,
@@ -529,8 +530,8 @@ def run_universal_import_job(
                 continue
             path = settings.resolved_import_staging_path / f"candidate-{uuid4().hex}{_extension(media_url)}"
             try:
-                local_candidate = Path(str(media_url))
-                if local_candidate.is_file():
+                local_candidate = _safe_media_path(settings.media_path, str(media_url))
+                if local_candidate is not None and local_candidate.is_file():
                     shutil.copy2(local_candidate, path)
                 else:
                     downloader.download(media_url, path, match.canonical_url)

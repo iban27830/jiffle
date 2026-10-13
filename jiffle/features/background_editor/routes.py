@@ -62,7 +62,25 @@ def import_asset():
         # Keep the previous local-path API working for existing local clients.
         payload = request.get_json(silent=True)
         payload = payload if isinstance(payload, dict) else {}
-        legacy_path = Path(str(payload.get("path", ""))).expanduser()
+        raw_path = str(payload.get("path", "")).strip()
+        if not raw_path:
+            return _error("background.file_missing", "Background file was not found.", 404)
+        settings = current_app.config["JIFFLE_SETTINGS"]
+        try:
+            legacy_path = Path(raw_path).expanduser().resolve()
+        except (OSError, ValueError):
+            return _error("background.invalid_path", "Background path is invalid.", 400)
+        allowed_roots = (
+            settings.media_path.resolve(),
+            settings.resolved_import_staging_path.resolve(),
+            background_root(settings).resolve(),
+        )
+        if not any(legacy_path.is_relative_to(root) for root in allowed_roots):
+            return _error(
+                "background.invalid_path",
+                "Background path must be inside the media, staging, or backgrounds directory.",
+                400,
+            )
         if not legacy_path.is_file():
             return _error("background.file_missing", "Background file was not found.", 404)
         original_name = legacy_path.name

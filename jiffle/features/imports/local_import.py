@@ -373,9 +373,13 @@ def _is_readable_image(source: Path) -> bool:
 def _safe_media_path(root: Path, stored_path: str | None) -> Path | None:
     if not stored_path:
         return None
+    text = str(stored_path).strip()
+    if text.lower().startswith(("http://", "https://")):
+        return None
     try:
-        candidate = (root / stored_path).resolve()
-        return candidate if candidate.is_relative_to(root) else None
+        resolved_root = root.resolve()
+        candidate = (resolved_root / text).resolve()
+        return candidate if candidate.is_relative_to(resolved_root) else None
     except (OSError, ValueError, TypeError):
         return None
 

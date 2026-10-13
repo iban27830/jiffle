@@ -1,4 +1,5 @@
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from hashlib import md5, sha256
 from pathlib import Path
@@ -44,8 +45,8 @@ def create_import_resolve_job():
         if not uploaded.filename:
             return _error("import.invalid_request", "A file is required.", 400)
         settings.resolved_import_staging_path.mkdir(parents=True, exist_ok=True)
-        target = settings.resolved_import_staging_path / (
-            f"upload-{uuid4().hex}-{Path(uploaded.filename).name}"
+        target = _staged_upload_target(
+            settings.resolved_import_staging_path, uploaded.filename
         )
         uploaded.save(target)
         submitted_input, input_kind = str(target), "file"
@@ -132,7 +133,9 @@ def create_upload_import_job():
         return _error("import.invalid_request", "A file is required.", 400)
     settings: Settings = current_app.config["JIFFLE_SETTINGS"]
     settings.resolved_import_staging_path.mkdir(parents=True, exist_ok=True)
-    target = settings.resolved_import_staging_path / ("upload-" + Path(uploaded.filename).name)
+    target = _staged_upload_target(
+        settings.resolved_import_staging_path, uploaded.filename
+    )
     uploaded.save(target)
     command = LocalImportCommand(source_path=target, accept_without_source=False)
     job_id = create_local_import_job(get_database(), command)
@@ -208,9 +211,16 @@ def search_sources():
     if uploaded is not None:
         if not uploaded.filename:
             return _error("import.invalid_request", "A file is required.", 400)
-        raw = uploaded.read()
-        digest = md5(raw).hexdigest()
-        sha256_digest = sha256(raw).hexdigest()
+        md5_hasher = md5()
+        sha256_hasher = sha256()
+        while True:
+            chunk = uploaded.stream.read(64 * 1024)
+            if not chunk:
+                break
+            md5_hasher.update(chunk)
+            sha256_hasher.update(chunk)
+        digest = md5_hasher.hexdigest()
+        sha256_digest = sha256_hasher.hexdigest()
     elif isinstance(source_url, str) and source_url.strip():
         try:
             normalized_url = normalize_source_url(source_url)
@@ -356,6 +366,15 @@ def create_implicit_tags_job():
     else:
         Thread(target=run_implicit_tag_job, args=arguments, daemon=True).start()
     return jsonify({"job_id": job_id, "status_url": f"/api/v1/jobs/{job_id}"}), 202
+
+
+def _staged_upload_target(staging_root: Path, filename: str) -> Path:
+    raw_name = Path(filename or "upload").name
+    suffix = Path(raw_name).suffix.lower()
+    safe_suffix = suffix if re.fullmatch(r"\.[a-z0-9]{1,10}", suffix) else ""
+    stem_source = raw_name[: -len(safe_suffix)] if safe_suffix else raw_name
+    safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem_source).strip("._-")[:64] or "file"
+    return staging_root / f"upload-{uuid4().hex}-{safe_stem}{safe_suffix}"
 
 
 def _error(code: str, message: str, status: int):
