@@ -12,7 +12,7 @@ Open **Library** and enter a query. Examples:
 | `portrait -comic` | Portraits without the comic tag |
 | `author:artist_name` | Items attributed to an author |
 | `id:123` | One exact library item |
-| `parent:123` | Items associated with a source parent post |
+| `parent:123` | Find a parent post in the library by its source post ID |
 
 Tag aliases apply to searches and collection rules. Select a displayed tag or author to adjust the query. Clicking an author keeps your existing search terms. Use the media-type filter to separate images and videos.
 

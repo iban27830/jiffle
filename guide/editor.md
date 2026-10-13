@@ -25,7 +25,7 @@ Drafts preserve tool parameters in the current browser tab. Switching a tool or 
    | **Apply crop** | Create and activate a new version; keep the source in Versions |
    | **No crop needed** | Explicitly approve this version without changing its pixels |
    | **Analyze** | Run the local detector and use its proposal when it finds one |
-   | **Restore proposal** / **Reset to full image** | Reset the coordinate fields to the suggestion, or to the whole image in a manual session |
+   | **Reset suggested crop** / **Reset to full image** | Reset the coordinate fields to the suggestion, or to the whole image in a manual session |
    | **Skip** | Leave a queued decision unresolved; it remains in Needs attention |
 
 The local detector looks for near-uniform or transparent margins, but cropping does not depend on it: a manual session starts from the whole image so you can always pick the area yourself. **Find crop candidates** scans the existing library on request. Repeating a scan can reuse previous results. **Reopen review** lets you reconsider an earlier decision.

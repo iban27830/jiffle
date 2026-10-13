@@ -53,4 +53,8 @@ For Gelbooru/Rule34, you can paste the account's `&api_key=…&user_id=…` line
 
 Storage paths are on the machine running Jiffle. In Docker, use the mounted container paths, not the drive letters on your browsing computer. Do not change them casually for an existing library; keep a backup and ensure existing files remain accessible.
 
-Tag rules let you manage exclusions and aliases. Aliases affect Library searches and collection selection. They do not remove the original image files.
+Tag rules let you manage preferred tags, exclusions, and aliases:
+
+- **Preferred tags:** one tag per line for your curated tag list.
+- **Blocked tags:** one tag per line, excluded when importing source tags.
+- **Aliases:** `canonical_tag = alias_1, alias_2` rules that map alternative names to a canonical tag during imports, Library searches, and collection selection. They do not remove the original image files.

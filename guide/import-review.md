@@ -45,9 +45,9 @@ Reverse-image searches send a small preview to the configured search services; a
 
 A source selection can merge into an existing library item rather than creating a second copy. A likely duplicate may need a separate choice; read the comparison before accepting.
 
-**Run import again** rechecks one card. Tick several cards and use **Recheck selected** to queue them. This is useful after adding credentials or when a source was temporarily unavailable. The log button shows the original import search and later rechecks, grouped by stage. **Select all on screen** only selects the current page.
+**Run the source search again** (or **Search again** when candidates were already found) rechecks one card. Tick several cards and use **Recheck selected** to queue them. This is useful after adding credentials or when a source was temporarily unavailable. The log button shows the original import search and later rechecks, grouped by stage. **Select all on screen** only selects the current page.
 
-Metadata refreshes appear separately as **Metadata update** suggestions. Select **Apply** to accept the new information; ignoring one does not replace the file.
+Metadata refreshes appear separately as **Metadata update** suggestions. Select **Apply metadata** to accept the new information; **Ignore** dismisses the suggestion without replacing the file.
 
 ## Importing sets and large files
 
