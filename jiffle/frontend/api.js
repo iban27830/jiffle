@@ -16,6 +16,7 @@ export async function waitForJob(statusUrl, onProgress) {
     onProgress?.(job);
     if (job.status === 'completed') return job;
     if (job.status === 'failed') throw new Error(job.error?.message || 'The job failed');
+    if (job.status === 'cancelled' || job.status === 'canceled') throw new Error(job.error?.message || job.message || 'The job was cancelled');
     await new Promise(resolve => setTimeout(resolve, 500));
   }
 }

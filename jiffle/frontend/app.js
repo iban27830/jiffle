@@ -648,6 +648,7 @@ async function restoreBackgroundScanMonitor(){try{const active=await api('/api/v
 
 async function showLibrary() {
   const epoch=renderEpoch;
+  let loadSeq = 0;
   const state = viewState('library');
   librarySearch = state.search ?? librarySearch;
   libraryOffset = Number(state.offset ?? libraryOffset);
@@ -660,6 +661,7 @@ async function showLibrary() {
   document.querySelector('#search').value = librarySearch;
   document.querySelector('#mediaType').value = state.mediaType || '';
   const load = async () => {
+    const seq = ++loadSeq;
     const pageSize = libraryPrefs().pageSize;
     librarySearch = document.querySelector('#search').value.trim();
     const parsedSearch = parseLibrarySearch(librarySearch);
@@ -672,7 +674,7 @@ async function showLibrary() {
     saveViewState('library', {search:librarySearch, offset:libraryOffset, mediaType:type});
     if(parseRoute(location.hash).id && librarySearch!==`id:${parseRoute(location.hash).id}`)history.replaceState(null,'','#library');
     const data = await api(`/api/v1/media?limit=${pageSize}&offset=${libraryOffset}&q=${query}&type=${type}${authorFilter}${idFilter}${parentFilter}${filters}`);
-    if(epoch!==renderEpoch||!document.querySelector('#gallery'))return;
+    if (epoch !== renderEpoch || seq !== loadSeq || !document.querySelector('#gallery')) return;
     meta.textContent = `${data.page.total} files`;
     statusText.textContent = `Showing ${data.items.length}`;
     document.querySelector('#activeFilters').innerHTML = activeFiltersHtml();
@@ -738,10 +740,13 @@ function bindInspectorResize() {
   };
 }
 
+let inspectSeq = 0;
+
 async function inspectMedia(id) {
   const epoch=renderEpoch;
+  const seq = ++inspectSeq;
   const loadedMedia = await api(`/api/v1/media/${id}`);
-  if(epoch!==renderEpoch||currentView!=='library')return;
+  if (epoch !== renderEpoch || seq !== inspectSeq || currentView !== 'library') return;
   selectedMedia=loadedMedia;
   saveViewState('library', {selectedMediaId:id});
   document.querySelectorAll('.media-card').forEach(card => card.classList.toggle('selected', Number(card.dataset.id) === id));
@@ -1323,15 +1328,17 @@ function openMediaInLibrary(mediaId) {
 }
 
 async function showDuplicates() {
+  const epoch = renderEpoch;
   setHeader('Duplicates','');
   const duplicateState=viewState('duplicates');
   const threshold=Math.min(100,Math.max(70,Number(duplicateState.threshold)||90));
   const data = await api('/api/v1/duplicate-matches');
+  if (epoch !== renderEpoch || currentView !== 'duplicates') return;
   workspace.innerHTML = `<div class="duplicates-toolbar"><label for="duplicateThreshold">Similarity threshold</label><input id="duplicateThreshold" type="range" min="70" max="100" step="1" value="${threshold}"><output id="duplicateThresholdValue" for="duplicateThreshold">${threshold}%</output><button id="scanDuplicates" class="btn primary"><i data-lucide="scan-search"></i>Scan</button></div><div class="page item-list">${data.items.length ? data.items.map(match => `<section class="panel"><div class="panel-head">Match ${match.confidence}%</div><div class="panel-body"><div class="compare"><img src="${match.left.thumbnail_url}" alt=""><img src="${match.right.thumbnail_url}" alt=""></div><div class="actions" style="margin-top:10px"><button class="btn resolve" data-id="${match.id}" data-keep="left">Keep left</button><button class="btn resolve" data-id="${match.id}" data-keep="right">Keep right</button><button class="btn family" data-id="${match.id}"><i data-lucide="users-round"></i>Family</button><button class="btn ignore" data-id="${match.id}">Ignore</button></div></div></section>`).join('') : '<div class="empty">No matches</div>'}</div>`;
   const slider=document.querySelector('#duplicateThreshold');
   slider.oninput=()=>{document.querySelector('#duplicateThresholdValue').value=`${slider.value}%`;saveViewState('duplicates',{threshold:Number(slider.value)});};
   document.querySelector('#scanDuplicates').onclick = async () => { try { await runJob(() => api('/api/v1/duplicate-scan-jobs',{method:'POST',body:JSON.stringify({threshold:Number(slider.value)})})); showDuplicates(); } catch(error){toast(error.message,true);} };
-  document.querySelectorAll('.ignore').forEach(node => node.onclick = async () => { await api(`/api/v1/duplicate-matches/${node.dataset.id}/ignore`,{method:'POST'}); showDuplicates(); });
+  document.querySelectorAll('.ignore').forEach(node => node.onclick = async () => { try { await api(`/api/v1/duplicate-matches/${node.dataset.id}/ignore`,{method:'POST'}); showDuplicates(); } catch (error) { toast(error.message, true); } });
   document.querySelectorAll('.resolve').forEach(node => node.onclick = async () => { try { await api(`/api/v1/duplicate-matches/${node.dataset.id}/resolve`,{method:'POST',body:JSON.stringify({keep:node.dataset.keep,merge_metadata:true})}); showDuplicates(); } catch(error){toast(error.message,true);} }); icons();
   document.querySelectorAll('.family').forEach(node => node.onclick = async () => { try { await api(`/api/v1/duplicate-matches/${node.dataset.id}/family`,{method:'POST'}); toast('Both files were added to the family'); showDuplicates(); } catch(error){toast(error.message,true);} }); icons();
 }
@@ -1341,6 +1348,8 @@ async function showEditor() {
   const editorState=viewState('editor');
   const editorEpoch=renderEpoch;
   let editorRenderSequence=0;
+  let tabRenderSequence = 0;
+  let cleanupBackgroundModalKey = null;
   let cropSettings=await api('/api/v1/settings');
   if(editorEpoch!==renderEpoch)return;
 
@@ -1367,13 +1376,14 @@ async function showEditor() {
   };
 
   const renderCropTab=async()=>{
+    const tabSeq = ++tabRenderSequence;
     const pane=document.querySelector('#editorPane');
     const pageSize=editorPrefs().pageSize;
     let status=viewState('editor').cropStatus||viewState('editor').status||'needs_attention';
     let offset=Math.max(0,Number(viewState('editor').cropOffset)||0);
     const load=()=>api(status==='needs_attention'?`/api/v1/crop-reviews?limit=${pageSize}&offset=${offset}`:`/api/v1/crop-analyses?status=${encodeURIComponent(status)}&limit=${pageSize}&offset=${offset}`);
-    let data=await load();if(editorEpoch!==renderEpoch||!pane.isConnected)return;let total=Number(data.total)||0;
-    if(!data.items.length&&total>0&&offset>0){offset=Math.max(0,(Math.ceil(total/pageSize)-1)*pageSize);data=await load();total=Number(data.total)||0;}
+    let data=await load();if(editorEpoch!==renderEpoch||tabSeq!==tabRenderSequence||!pane?.isConnected)return;let total=Number(data.total)||0;
+    if(!data.items.length&&total>0&&offset>0){offset=Math.max(0,(Math.ceil(total/pageSize)-1)*pageSize);data=await load();if(editorEpoch!==renderEpoch||tabSeq!==tabRenderSequence||!pane?.isConnected)return;total=Number(data.total)||0;}
     saveViewState('editor',{cropStatus:status,cropOffset:offset});
     const items=data.items||[];
     pane.innerHTML=`<div class="editor-toolbar crop-toolbar">
@@ -1399,13 +1409,14 @@ async function showEditor() {
     document.querySelectorAll('.open-library').forEach(n=>n.onclick=libraryLinkClick);
     document.querySelectorAll('.open-crop').forEach(n=>n.onclick=()=>{saveViewState('editor',{fromQueue:true});openCrop(Number(n.dataset.id));});
     document.querySelectorAll('.open-crop-media').forEach(n=>n.onclick=()=>{saveViewState('editor',{fromQueue:true});openMediaEditor(Number(n.dataset.mediaId),'crop');});
-    document.querySelectorAll('.reset-crop').forEach(n=>n.onclick=async()=>{await api(`/api/v1/crop-analyses/${n.dataset.id}/reset`,{method:'POST'});renderCropTab()});
+    document.querySelectorAll('.reset-crop').forEach(n=>n.onclick=async()=>{try{await api(`/api/v1/crop-analyses/${n.dataset.id}/reset`,{method:'POST'});renderCropTab()}catch(error){toast(error.message,true)}});
     bindEditorPager('crop',offset,pageSize,newOffset=>{saveViewState('editor',{cropOffset:newOffset});renderCropTab()},newSize=>{saveEditorPrefs({pageSize:newSize});saveViewState('editor',{cropOffset:0});renderCropTab()});
     refreshCounts();
     icons();
   };
 
   const renderBackgroundTab=async()=>{
+    const tabSeq = ++tabRenderSequence;
     const pane=document.querySelector('#editorPane');
     const pageSize=editorPrefs().pageSize;
     const savedState=viewState('editor');
@@ -1413,8 +1424,8 @@ async function showEditor() {
     const minimumArea=Math.min(95,Math.max(5,Number(savedState.backgroundMinimumArea)||25));
     let offset=Math.max(0,Number(viewState('editor').backgroundOffset)||0);
     const load=()=>api(`/api/v1/background-candidates?tolerance=${tolerance}&min_background_percent=${minimumArea}&limit=${pageSize}&offset=${offset}`);
-    let data=await load();if(editorEpoch!==renderEpoch||!pane.isConnected)return;let total=Number(data.total)||0;
-    if(!data.items.length&&total>0&&offset>0){offset=Math.max(0,(Math.ceil(total/pageSize)-1)*pageSize);data=await load();total=Number(data.total)||0;}
+    let data=await load();if(editorEpoch!==renderEpoch||tabSeq!==tabRenderSequence||!pane?.isConnected)return;let total=Number(data.total)||0;
+    if(!data.items.length&&total>0&&offset>0){offset=Math.max(0,(Math.ceil(total/pageSize)-1)*pageSize);data=await load();if(editorEpoch!==renderEpoch||tabSeq!==tabRenderSequence||!pane?.isConnected)return;total=Number(data.total)||0;}
     saveViewState('editor',{backgroundTolerance:tolerance,backgroundMinimumArea:minimumArea,backgroundOffset:offset});
     const items=data.items||[];
     pane.innerHTML=`<div class="background-scan-toolbar"><label>Edge tolerance <input id="backgroundTolerance" class="control" type="number" min="5" max="80" value="${tolerance}"></label><label>Minimum background, % <input id="backgroundMinimumArea" class="control" type="number" min="5" max="95" value="${minimumArea}"></label><button id="analyzeSelectedBackground" class="btn"><i data-lucide="scan-line"></i>Analyze selected</button><button id="scanBackgrounds" class="btn primary"><i data-lucide="scan-search"></i>Find background candidates</button>${pageSizeControl(pageSize,'background')}</div>
@@ -1432,13 +1443,14 @@ async function showEditor() {
   };
 
   const renderTrimTab=async()=>{
+    const tabSeq = ++tabRenderSequence;
     const pane=document.querySelector('#editorPane');
     const pageSize=editorPrefs().pageSize;
     const trimEnabled=Boolean(cropSettings.trim_review_enabled);
     let offset=Math.max(0,Number(viewState('editor').trimOffset)||0);
     const load=()=>api(`/api/v1/trim-reviews?status=pending&limit=${pageSize}&offset=${offset}`);
-    let data=await load();if(editorEpoch!==renderEpoch||!pane.isConnected)return;let total=Number(data.total)||0;
-    if(!data.items.length&&total>0&&offset>0){offset=Math.max(0,(Math.ceil(total/pageSize)-1)*pageSize);data=await load();total=Number(data.total)||0;}
+    let data=await load();if(editorEpoch!==renderEpoch||tabSeq!==tabRenderSequence||!pane?.isConnected)return;let total=Number(data.total)||0;
+    if(!data.items.length&&total>0&&offset>0){offset=Math.max(0,(Math.ceil(total/pageSize)-1)*pageSize);data=await load();if(editorEpoch!==renderEpoch||tabSeq!==tabRenderSequence||!pane?.isConnected)return;total=Number(data.total)||0;}
     saveViewState('editor',{trimOffset:offset});
     const items=data.items||[];
     const cards=items.map(item=>{
@@ -1613,8 +1625,11 @@ async function showEditor() {
     toggleBackground.onclick=()=>{const open=panel.hidden;panel.hidden=!open;toggleBackground.setAttribute('aria-expanded',String(open));saveViewState('editor',{backgroundOpen:open});if(open)panel.scrollIntoView({behavior:'smooth',block:'start'})};
     document.querySelector('#analyzeBackgroundCurrent').onclick=async()=>{const button=document.querySelector('#analyzeBackgroundCurrent');const saved=viewState('editor');const parameters={tolerance:Number(saved.backgroundTolerance)||24,min_background_percent:Number(saved.backgroundMinimumArea)||25};button.disabled=true;setBackgroundStatus('Analyzing background...');try{const result=await api(`/api/v1/media/${mediaId}/background-analysis`,{method:'POST',body:JSON.stringify(parameters)});if(result.status==='candidate'){const candidate=result.candidate;setBackgroundStatus(`Candidate · ${Number(candidate.background_area_percent).toFixed(1)}% background`,'good')}else setBackgroundStatus('No replaceable background found','warn')}catch(error){setBackgroundStatus(error.message,'error')}finally{button.disabled=false}};
     document.querySelector('#removeBackgroundPreview').onclick=async()=>{const button=document.querySelector('#removeBackgroundPreview');const previousPreview=preview;button.disabled=true;setBackgroundStatus(previousPreview?'Regenerating automatic mask...':'Preparing the automatic background removal...');try{preview=await api(`/api/v1/media/${mediaId}/background-preview`,{method:'POST',body:JSON.stringify({force:Boolean(previousPreview)})});button.innerHTML='<i data-lucide="scan-eye"></i>Regenerate automatic mask';const sameAsPrevious=Boolean(preview.same_as_previous);foregroundImage=null;selectedBackgroundImage=null;compositionReady=false;await resolveSelectedBackground().catch(()=>{});await prepareForeground();if(sameAsPrevious)setBackgroundStatus('The automatic model produced the same mask again.','warn')}catch(error){if(error.message&&preview!==previousPreview){setBackgroundStatus(error.message,'error');afterPreview.hidden=false;updateApply();}else{preview=previousPreview;if(previousPreview){afterPreview.hidden=false;setBackgroundStatus(error.message,'error');updateApply()}else{afterPreview.hidden=true;setBackgroundStatus(error.message,'error')}}}finally{button.disabled=false;icons()}};
-    const openModal=async()=>{temporaryBackground=selectedBackground;modal.hidden=false;await loadAssets(modalFilter.value||'');document.querySelector('#selectBackground').focus()};
-    const closeModal=()=>{modal.hidden=true;chooseBackground.focus()};
+    const onKey=event=>{if(event.key==='Escape'&&!modal.hidden)closeModal()};
+    cleanupBackgroundModalKey?.();
+    cleanupBackgroundModalKey=()=>document.removeEventListener('keydown',onKey);
+    const openModal=async()=>{temporaryBackground=selectedBackground;modal.hidden=false;document.addEventListener('keydown',onKey);await loadAssets(modalFilter.value||'');document.querySelector('#selectBackground').focus()};
+    const closeModal=()=>{document.removeEventListener('keydown',onKey);modal.hidden=true;chooseBackground.focus()};
     chooseBackground.onclick=openModal;document.querySelector('#closeBackgroundModal').onclick=closeModal;document.querySelector('#cancelBackground').onclick=closeModal;modal.querySelector('[data-close-background-modal]').onclick=closeModal;
     modalFilter.onchange=async()=>{try{await loadAssets(modalFilter.value)}catch(error){toast(error.message,true)}};
     categoryInput.oninput=()=>{chooseFile.disabled=!categoryInput.value.trim()};chooseFile.onclick=()=>fileInput.click();
@@ -1625,7 +1640,6 @@ async function showEditor() {
     // The server compose preview endpoint remains available for API clients and
     // older integrations.
     const legacyComposePreviewEndpoint=media=>`/api/v1/media/${media}/background-compose-preview`;
-    document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!modal.hidden)closeModal()},{once:false});
     blur.oninput=()=>{document.querySelector('#backgroundBlurValue').value=blur.value;saveViewState('editor',{backgroundBlur:Number(blur.value)});scheduleLocalPreview()};
     previewModeButtons.forEach(button=>button.onclick=()=>{previewMode=button.dataset.previewMode==='mask'?'mask':'cutout';previewModeButtons.forEach(item=>{const active=item.dataset.previewMode===previewMode;item.classList.toggle('primary',active);item.setAttribute('aria-pressed',String(active))});saveViewState('editor',{backgroundPreviewMode:previewMode});scheduleLocalPreview()});
     applyBackground.onclick=async()=>{if(!preview||!selectedBackground||!compositionReady)return;applyBackground.disabled=true;setBackgroundStatus('Saving and activating new version...');try{await api(`/api/v1/media/${mediaId}/background-compose`,{method:'POST',body:JSON.stringify({preview_id:preview.preview_id,background_id:selectedBackground,blur:Number(blur.value)})});toast('Background version created and activated');saveViewState('editor',{backgroundOpen:true});await openMediaEditor(mediaId,null,false)}catch(error){setBackgroundStatus(error.message,'error');updateApply()}};
@@ -1633,7 +1647,7 @@ async function showEditor() {
     updateSelectedSummary();
     if(preview){await resolveSelectedBackground().catch(()=>{});prepareForeground().catch(error=>setBackgroundStatus(error.message,'error'));}
     requestAnimationFrame(()=>{const saved=viewState('editor');sourcePane.scrollLeft=Number(saved.backgroundScrollLeft||0);sourcePane.scrollTop=Number(saved.backgroundScrollTop||0);previewPane.scrollLeft=sourcePane.scrollLeft;previewPane.scrollTop=sourcePane.scrollTop;applyZoom()});
-    document.querySelectorAll('.restore-revision').forEach(node=>node.onclick=async()=>{if(!confirm('Restore this version?'))return;await api(`/api/v1/media/${mediaId}/revisions/${node.dataset.id}/activate`,{method:'POST'});toast('Version restored');await openMediaEditor(mediaId,null,false)}); bindImageTools(mediaId); icons();
+    document.querySelectorAll('.restore-revision').forEach(node=>node.onclick=async()=>{if(!confirm('Restore this version?'))return;try{await api(`/api/v1/media/${mediaId}/revisions/${node.dataset.id}/activate`,{method:'POST'});toast('Version restored');await openMediaEditor(mediaId,null,false)}catch(error){toast(error.message,true)}}); bindImageTools(mediaId); icons();
   };
   const openCrop = async id => {
     const sequence=++editorRenderSequence;
@@ -1678,7 +1692,7 @@ async function showEditor() {
     document.querySelector('#analyzeCrop').onclick=async()=>{try{const result=await api('/api/v1/crop-analyses',{method:'POST',body:JSON.stringify({media_id:item.media_id,min_area:cropSettings.crop_min_area_percent,padding:cropSettings.crop_padding_percent/100,tolerance:cropSettings.crop_background_tolerance})});if(result.id)await openCrop(result.id);else toast('No removable margins found')}catch(error){toast(error.message,true)}};
     document.querySelector('#visionCrop').onclick=async()=>{try{const proposal=await api(`/api/v1/media/${item.media_id}/crop-vision-analysis`,{method:'POST'});inputs.forEach((n,i)=>n.value=proposal.box[i]);document.querySelector('#proposalMethod').textContent='vision';draw();toast('Vision proposal loaded')}catch(error){toast(error.message,true)}};
     document.querySelector('#applyCrop').onclick=async()=>{if(!confirm('Apply this crop? The original is kept in version history.'))return;try{if(item.status!=='pending')await api(`/api/v1/crop-analyses/${id}/reset`,{method:'POST'});await api(`/api/v1/crop-analyses/${id}/apply`,{method:'POST',body:JSON.stringify({box:box()})});toast('Crop applied');await openNextPending()}catch(error){toast(error.message,true)}};
-    document.querySelectorAll('.restore-revision').forEach(n=>n.onclick=async()=>{if(!confirm('Restore this version?'))return;await api(`/api/v1/media/${item.media_id}/revisions/${n.dataset.id}/activate`,{method:'POST'});toast('Version restored');openMediaEditor(item.media_id,null,false)}); icons();
+    document.querySelectorAll('.restore-revision').forEach(n=>n.onclick=async()=>{if(!confirm('Restore this version?'))return;try{await api(`/api/v1/media/${item.media_id}/revisions/${n.dataset.id}/activate`,{method:'POST'});toast('Version restored');openMediaEditor(item.media_id,null,false)}catch(error){toast(error.message,true)}}); icons();
   };
   const openTrim = async mediaId => {
     const sequence=++editorRenderSequence;
@@ -1951,8 +1965,12 @@ async function showCollections() {
     document.querySelectorAll('.export').forEach(node=>node.onclick=()=>exportCollection(node.dataset.id));
     document.querySelectorAll('.delete').forEach(node=>node.onclick=async()=>{
       if(!confirm('Delete this collection? Library files are kept.'))return;
-      await api(`/api/v1/collections/${node.dataset.id}`,{method:'DELETE'});
-      if(currentView==='collections')await showCollections();
+      try {
+        await api(`/api/v1/collections/${node.dataset.id}`,{method:'DELETE'});
+        if(currentView==='collections')await showCollections();
+      } catch (error) {
+        toast(error.message, true);
+      }
     });
     document.querySelectorAll('.open').forEach(node=>node.onclick=()=>navigate(`collections?id=${node.dataset.id}`));
   }
@@ -2151,7 +2169,7 @@ async function showSettingsPage() {
     </div></details>
     <details class="settings-section" open><summary><span class="section-icon"><i data-lucide="crop"></i></span><span><strong>Crop analysis</strong><small>Local detector thresholds and selected-image analysis mode</small></span><i data-lucide="chevron-down"></i></summary><div class="settings-section-body"><div class="settings-fields-2"><div class="form-row"><label>Detector preset</label><select class="control" name="crop_background_tolerance"><option value="14" ${data.crop_background_tolerance===14?'selected':''}>Cautious</option><option value="20" ${data.crop_background_tolerance===20?'selected':''}>Normal</option><option value="28" ${data.crop_background_tolerance===28?'selected':''}>Sensitive</option></select></div><div class="form-row"><label>Selected image analysis</label><select class="control" name="crop_selected_analysis"><option value="local" ${data.crop_selected_analysis==='local'?'selected':''}>Local</option><option value="vision" ${data.crop_selected_analysis==='vision'?'selected':''}>Vision model</option></select></div><div class="form-row"><label>Minimum removable area, %</label><input class="control" name="crop_min_area_percent" type="number" min="1" max="50" step="1" value="${data.crop_min_area_percent}"></div><div class="form-row"><label>Content padding, %</label><input class="control" name="crop_padding_percent" type="number" min="0" max="10" step=".5" value="${data.crop_padding_percent}"></div></div></div></details>
     <details class="settings-section"><summary><span class="section-icon"><i data-lucide="scan-line"></i></span><span><strong>Crop vision model</strong><small>Optional single-image analysis through a local or remote vision model</small></span><i data-lucide="chevron-down"></i></summary><div class="settings-section-body"><div class="settings-fields-2"><div class="form-row"><label>Format API</label><select class="control" name="crop_vision_format"><option value="openai" ${data.crop_vision_format==='openai'?'selected':''}>OpenAI-compatible</option><option value="gemini" ${data.crop_vision_format==='gemini'?'selected':''}>Gemini</option></select></div>${field('crop_vision_url','API URL',{placeholder:'http://127.0.0.1:1234/v1/chat/completions'})}${field('crop_vision_model','Model')}${field('crop_vision_key','API key',{type:'password',secret:true})}</div><small class="field-hint">The full original is sent only when you explicitly run Vision analysis for one image.</small></div></details>
-    <details class="settings-section"><summary><span class="section-icon"><i data-lucide="tags"></i></span><span><strong>Tag rules</strong><small>Preferred tags, blocked tags, and aliases</small></span><i data-lucide="chevron-down"></i></summary><div class="settings-section-body"><div class="settings-fields-2"><div class="form-row"><label>Preferred tags</label><small class="field-hint">One tag per line.</small><textarea class="control tag-rule-editor" name="preferred_tags">${esc(tagConfig.preferred.join('\n'))}</textarea></div><div class="form-row"><label>Blocked tags</label><small class="field-hint">Rejected from AI suggestions.</small><textarea class="control tag-rule-editor" name="blocked_tags">${esc(tagConfig.blocked.join('\n'))}</textarea></div></div><div class="form-row"><label>Aliases</label><small class="field-hint">Format: canonical_tag = alias_1, alias_2</small><textarea class="control tag-rule-editor" name="tag_aliases">${esc(Object.entries(tagConfig.aliases).map(([canonical,aliases]) => `${canonical} = ${aliases.join(', ')}`).join('\n'))}</textarea></div></div></details>
+    <details class="settings-section"><summary><span class="section-icon"><i data-lucide="tags"></i></span><span><strong>Tag rules</strong><small>Preferred tags, blocked tags, and aliases</small></span><i data-lucide="chevron-down"></i></summary><div class="settings-section-body"><div class="settings-fields-2"><div class="form-row"><label>Preferred tags</label><small class="field-hint">One tag per line.</small><textarea class="control tag-rule-editor" name="preferred_tags">${esc(tagConfig.preferred.join('\n'))}</textarea></div><div class="form-row"><label>Blocked tags</label><small class="field-hint">Excluded when importing source tags.</small><textarea class="control tag-rule-editor" name="blocked_tags">${esc(tagConfig.blocked.join('\n'))}</textarea></div></div><div class="form-row"><label>Aliases</label><small class="field-hint">Format: canonical_tag = alias_1, alias_2</small><textarea class="control tag-rule-editor" name="tag_aliases">${esc(Object.entries(tagConfig.aliases).map(([canonical,aliases]) => `${canonical} = ${aliases.join(', ')}`).join('\n'))}</textarea></div></div></details>
     <div class="settings-savebar"><span id="settingsState">Interface changes are saved immediately</span><button class="btn primary"><i data-lucide="save"></i>Save settings</button></div>
   </form></div>`;
 
