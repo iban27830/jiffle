@@ -47,6 +47,12 @@ class TbibSourceProvider:
                 if raw_parent_id not in (None, "", 0, "0")
                 else None
             )
+            raw_characters = post.get("character") or post.get("tag_string_character") or ""
+            character_tags = (
+                tuple(str(raw_characters).split())
+                if isinstance(raw_characters, str)
+                else tuple(str(value) for value in raw_characters)
+            )
             tags = add_platform_tags(
                 tuple(str(post.get("tags", "")).split()),
                 self.provider_name, domain, post.get("source"),
@@ -61,6 +67,7 @@ class TbibSourceProvider:
                 domain=domain,
                 tags=tags,
                 file_extension=extension,
+                character_tags=character_tags,
                 parent_id=parent_id,
                 content_md5=_md5(post.get("hash")),
             )
@@ -101,23 +108,36 @@ class TbibSourceProvider:
                 if directory and filename
                 else None
             )
-            matches.append(
-                _match(
-                    provider=self.provider_name,
-                    domain=domain,
-                    remote_id=post_id,
-                    canonical_url=_canonical_url(domain, post_id),
-                    direct_media_url=direct_url,
-                    author=post.get("owner"),
-                    tags=list(add_platform_tags(
-                        str(post.get("tags") or "").split(),
-                        self.provider_name, domain, post.get("source"),
-                    )),
-                    content_md5=_md5(post.get("hash")),
-                    width=post.get("width"),
-                    height=post.get("height"),
-                )
+            raw_parent_id = post.get("parent_id")
+            parent_id = (
+                str(raw_parent_id)
+                if raw_parent_id not in (None, "", 0, "0")
+                else None
             )
+            raw_characters = post.get("character") or post.get("tag_string_character") or ""
+            character_tags = (
+                list(str(raw_characters).split())
+                if isinstance(raw_characters, str)
+                else [str(value) for value in raw_characters]
+            )
+            match = _match(
+                provider=self.provider_name,
+                domain=domain,
+                remote_id=post_id,
+                canonical_url=_canonical_url(domain, post_id),
+                direct_media_url=direct_url,
+                author=post.get("owner"),
+                tags=list(add_platform_tags(
+                    str(post.get("tags") or "").split(),
+                    self.provider_name, domain, post.get("source"),
+                )),
+                content_md5=_md5(post.get("hash")),
+                width=post.get("width"),
+                height=post.get("height"),
+            )
+            match["character_tags"] = character_tags
+            match["parent_id"] = parent_id
+            matches.append(match)
         return matches
 
     def search_similar(self, image_path):

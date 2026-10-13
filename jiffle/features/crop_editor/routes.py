@@ -150,16 +150,17 @@ def _error(code,message,status): return jsonify({"error":{"code":code,"message":
 
 def _crop_error(error):
     if not isinstance(error,CropFailure):return _error("crop.invalid_request",str(error),400)
-    status=404 if error.code.endswith(("not_found","file_missing")) else 409 if error.code in {"crop.stale_analysis","crop.duplicate_result"} else 400
+    status=getattr(error,"status",None) or (404 if error.code.endswith(("not_found","file_missing")) else 409 if error.code in {"crop.stale_analysis","crop.duplicate_result","crop.duplicate_media"} else 400)
     return jsonify({"error":{"code":error.code,"message":error.message,"details":error.details}}),status
 
 def _run_scan(database_path,settings,job_id,parameters):
+    from .review import MAX_AUTO_PIXELS, record_check
     connection=connect_database(database_path)
     try:
         signature=_scan_signature(parameters)
         total=connection.execute("SELECT COUNT(*) FROM media_items WHERE deleted_at IS NULL AND media_type='image'").fetchone()[0]
         rows=connection.execute(
-            "SELECT m.id,m.active_revision_id FROM media_items m "
+            "SELECT m.id,m.active_revision_id,m.width,m.height FROM media_items m "
             "LEFT JOIN crop_scan_results r ON r.revision_id=m.active_revision_id AND r.parameter_signature=? "
             "WHERE m.deleted_at IS NULL AND m.media_type='image' AND r.revision_id IS NULL ORDER BY m.id",
             (signature,),
@@ -174,11 +175,26 @@ def _run_scan(database_path,settings,job_id,parameters):
             if connection.execute("SELECT cancel_requested FROM crop_scan_jobs WHERE job_id=?",(job_id,)).fetchone()[0]:
                 scanned=completed+batch_index-1; result=json.dumps({"scanned":scanned,"candidates":candidates,"cancelled":True}); connection.execute("UPDATE background_jobs SET status='completed',progress=100,result_json=?,finished_at=CURRENT_TIMESTAMP WHERE id=?",(result,job_id)); connection.execute("UPDATE crop_scan_jobs SET scanned_count=?,candidate_count=? WHERE job_id=?",(scanned,candidates,job_id)); connection.commit(); return
             try:
+                if (row["width"] or 0) * (row["height"] or 0) > MAX_AUTO_PIXELS:
+                    raise CropFailure(
+                        "crop.auto_size_limit",
+                        "This image exceeds the automatic local check limit (16 megapixels). "
+                        "Inspect it in Crop and confirm No crop needed, or analyze it manually.",
+                    )
                 found=analyze_image(connection,settings,int(row["id"]),min_area=parameters["min_area"],padding=parameters["padding"],tolerance=parameters["tolerance"]); candidates+=int(found is not None)
                 connection.execute("INSERT OR REPLACE INTO crop_scan_results (revision_id,parameter_signature,candidate_found) VALUES (?,?,?)",(row["active_revision_id"],signature,int(found is not None)))
             except CropFailure as error:
                 if error.code == "crop.animated_unsupported":
                     connection.execute("INSERT OR REPLACE INTO crop_scan_results (revision_id,parameter_signature,candidate_found) VALUES (?,?,0)",(row["active_revision_id"],signature))
+                elif error.code == "crop.auto_size_limit" and row["active_revision_id"] is not None:
+                    existing_check = connection.execute(
+                        "SELECT status FROM crop_review_checks WHERE revision_id=?",
+                        (row["active_revision_id"],),
+                    ).fetchone()
+                    if existing_check is None or existing_check["status"] != "passed":
+                        record_check(connection, row["active_revision_id"], "failed", signature, error.code, error.message)
+                    connection.execute("INSERT OR REPLACE INTO crop_scan_results (revision_id,parameter_signature,candidate_found) VALUES (?,?,0)",(row["active_revision_id"],signature))
+                    connection.commit()
             scanned=completed+batch_index
             if batch_index % 25 == 0:
                 progress=1+int(98*scanned/max(total,1)); connection.execute("UPDATE background_jobs SET progress=? WHERE id=?",(progress,job_id)); connection.execute("UPDATE crop_scan_jobs SET scanned_count=?,candidate_count=? WHERE job_id=?",(scanned,candidates,job_id)); connection.commit()

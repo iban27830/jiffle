@@ -136,28 +136,42 @@ class DanbooruSourceProvider:
             raise SourceProviderFailure(
                 "import.provider_unavailable", "Danbooru search could not be loaded."
             ) from error
-        return [
-            {
+        matches: list[dict[str, object]] = []
+        for post in payload:
+            if not isinstance(post, dict) or not str(post.get("id", "")).isdigit():
+                continue
+            direct_url = post.get("file_url") or post.get("large_file_url")
+            if isinstance(direct_url, str) and direct_url.startswith("//"):
+                direct_url = "https:" + direct_url
+            character_tags = list(
+                filter(None, str(post.get("tag_string_character", "")).split())
+            )
+            raw_parent_id = post.get("parent_id")
+            parent_id = (
+                str(raw_parent_id)
+                if raw_parent_id not in (None, "", 0, "0")
+                else None
+            )
+            artists = str(post.get("tag_string_artist", "")).split()
+            matches.append({
                 "provider": self.provider_name,
                 "domain": "danbooru.donmai.us",
                 "remote_id": str(post["id"]),
                 "canonical_url": f"https://danbooru.donmai.us/posts/{post['id']}",
-                "direct_media_url": post.get("file_url") or post.get("large_file_url"),
-                "author": str(post.get("tag_string_artist", "")).split()[0]
-                if str(post.get("tag_string_artist", "")).split()
-                else None,
+                "direct_media_url": direct_url,
+                "author": artists[0] if artists else None,
                 "tags": list(add_platform_tags(
                     tuple(filter(None, str(post.get("tag_string", "")).split())),
                     self.provider_name, "danbooru.donmai.us", post.get("source"),
                 )),
+                "character_tags": character_tags,
+                "parent_id": parent_id,
                 "content_md5": _valid_md5(post.get("md5")),
                 "width": post.get("image_width"),
                 "height": post.get("image_height"),
                 "deleted": bool(post.get("is_deleted")),
-            }
-            for post in payload
-            if isinstance(post, dict) and str(post.get("id", "")).isdigit()
-        ]
+            })
+        return matches
 
     def search_similar(self, image_path):
         """Reverse-search Danbooru through its IQDB endpoint.

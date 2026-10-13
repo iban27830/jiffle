@@ -44,14 +44,36 @@ def delete_media(media_id: int):
         return _error("library.media_not_found", "Media item was not found.", 404)
     settings: Settings = current_app.config["JIFFLE_SETTINGS"]
     root = settings.media_path.resolve()
-    source = (root / row["file_path"]).resolve()
-    if not source.is_relative_to(root) or not source.is_file():
-        return _error("library.media_file_missing", "Media file is unavailable.", 404)
-    quarantine = settings.database_path.parent / "delete-quarantine"
-    quarantine.mkdir(parents=True, exist_ok=True)
-    target = quarantine / f"{media_id}-{source.name}"
+    source = _safe_media_path(root, row["file_path"])
+    shared_source = connection.execute(
+        "SELECT 1 FROM media_items WHERE file_path = ? AND id <> ? AND deleted_at IS NULL LIMIT 1",
+        (row["file_path"], media_id),
+    ).fetchone()
+    has_source_file = source is not None and source.is_file() and shared_source is None
+    target: Path | None = None
+    if has_source_file:
+        quarantine = settings.database_path.parent / "delete-quarantine"
+        quarantine.mkdir(parents=True, exist_ok=True)
+        target = quarantine / f"{media_id}-{source.name}"
+    revisions = (
+        connection.execute(
+            "SELECT file_path, content_hash FROM media_revisions WHERE media_item_id = ?",
+            (media_id,),
+        ).fetchall()
+        if _has_table(connection, "media_revisions")
+        else []
+    )
+    preview_rows = (
+        connection.execute(
+            "SELECT * FROM background_previews WHERE media_item_id = ?",
+            (media_id,),
+        ).fetchall()
+        if _has_table(connection, "background_previews")
+        else []
+    )
     try:
-        shutil.move(str(source), str(target))
+        if has_source_file and target is not None:
+            shutil.move(str(source), str(target))
         for source_url in (row["source_url"], row["file_source_url"] if "file_source_url" in row.keys() else None):
             if not source_url:
                 continue
@@ -59,21 +81,71 @@ def delete_media(media_id: int):
                 "INSERT OR IGNORE INTO blocked_media_signatures "
                 "(source_url, reason) VALUES (?, 'deleted')", (source_url,)
             )
-        if row["content_hash"]:
+        content_hashes = [row["content_hash"]] if row["content_hash"] else []
+        if settings.block_previously_deleted or revisions:
+            for revision in revisions:
+                if revision["content_hash"]:
+                    content_hashes.append(revision["content_hash"])
+        for content_hash in dict.fromkeys(content_hashes):
             connection.execute(
                 "INSERT OR IGNORE INTO blocked_media_signatures "
-                "(content_hash, reason) VALUES (?, 'deleted')", (row["content_hash"],)
+                "(content_hash, reason) VALUES (?, 'deleted')", (content_hash,)
+            )
+        if _has_table(connection, "duplicate_matches"):
+            connection.execute(
+                "UPDATE duplicate_matches SET status = 'resolved', resolved_at = CURRENT_TIMESTAMP "
+                "WHERE (left_media_id = ? OR right_media_id = ?) AND status = 'pending'",
+                (media_id, media_id),
+            )
+        if _has_table(connection, "collection_items"):
+            connection.execute(
+                "DELETE FROM collection_items WHERE media_item_id = ?",
+                (media_id,),
+            )
+        if _has_table(connection, "background_previews"):
+            connection.execute(
+                "DELETE FROM background_previews WHERE media_item_id = ?",
+                (media_id,),
             )
         connection.execute("UPDATE media_items SET deleted_at=CURRENT_TIMESTAMP, content_hash=NULL WHERE id=?", (media_id,))
         connection.execute("INSERT INTO operation_history (event_type, entity_type, entity_id, details_json) VALUES (?, ?, ?, ?)", ("media.deleted", "media", media_id, "{}"))
         connection.commit()
-        target.unlink(missing_ok=True)
+        if target is not None:
+            target.unlink(missing_ok=True)
     except Exception:
         connection.rollback()
-        if target.exists() and not source.exists():
+        if target is not None and target.exists() and source is not None and not source.exists():
             shutil.move(str(target), str(source))
         current_app.logger.exception("Could not delete media %s", media_id)
         return _error("library.delete_failed", "Media could not be deleted.", 500)
+    for revision in revisions:
+        revision_file = revision["file_path"]
+        if not revision_file:
+            continue
+        shared = connection.execute(
+            "SELECT 1 FROM media_items WHERE file_path = ? AND id <> ? AND deleted_at IS NULL LIMIT 1",
+            (revision_file, media_id),
+        ).fetchone()
+        if shared is not None:
+            continue
+        revision_path = _safe_media_path(root, revision_file)
+        if revision_path is not None and revision_path.is_file():
+            revision_path.unlink(missing_ok=True)
+    preview_dir = settings.database_path.parent / "background-previews"
+    for preview_row in preview_rows:
+        preview_keys = set(preview_row.keys())
+        for column in ("file_path", "mask_path", "preview_path"):
+            if column not in preview_keys or not preview_row[column]:
+                continue
+            raw_preview_path = str(preview_row[column])
+            for candidate_root in (preview_dir, root, settings.database_path.parent):
+                resolved_preview = _safe_media_path(candidate_root, raw_preview_path)
+                if resolved_preview is not None and resolved_preview.is_file():
+                    resolved_preview.unlink(missing_ok=True)
+                    break
+    if settings.thumbnail_path.is_dir():
+        for thumbnail in settings.thumbnail_path.glob(f"media-{media_id}*.jpg"):
+            thumbnail.unlink(missing_ok=True)
     return jsonify({"id": media_id, "deleted": True})
 
 
@@ -161,11 +233,26 @@ def _repository() -> SqliteLibraryRepository:
     return SqliteLibraryRepository(get_database())
 
 
+def _safe_media_path(root: Path, stored_path: str | None) -> Path | None:
+    if not stored_path:
+        return None
+    resolved_root = root.resolve()
+    candidate = (resolved_root / stored_path).resolve()
+    return candidate if candidate.is_relative_to(resolved_root) else None
+
+
+def _has_table(connection, table: str) -> bool:
+    return (
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        is not None
+    )
+
+
 def _resolve_media_path(item: MediaItem) -> Path | None:
     settings: Settings = current_app.config["JIFFLE_SETTINGS"]
-    root = settings.media_path.resolve()
-    candidate = (root / item.file_path).resolve()
-    return candidate if candidate.is_relative_to(root) else None
+    return _safe_media_path(settings.media_path, item.file_path)
 
 
 def _error(code: str, message: str, status: int):

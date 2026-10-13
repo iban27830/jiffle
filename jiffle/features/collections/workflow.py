@@ -620,7 +620,7 @@ def _transcode_video(source, destination, limit, source_size=None):
         )
     try:
         probe = subprocess.run(
-            [ffmpeg, "-i", str(source)], capture_output=True, text=True, timeout=60,
+            [ffmpeg, "-nostdin", "-i", str(source)], capture_output=True, text=True, timeout=60,
         )
         match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", probe.stderr)
         if not match:
@@ -646,7 +646,7 @@ def _transcode_video(source, destination, limit, source_size=None):
     try:
         for _ in range(8):
             command = [
-                ffmpeg, "-y", "-i", str(source), "-map", "0:v:0",
+                ffmpeg, "-nostdin", "-y", "-i", str(source), "-map", "0:v:0",
                 "-c:v", "libx264", "-pix_fmt", "yuv420p",
                 "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
                 "-b:v", str(video_bitrate), "-maxrate", str(video_bitrate),

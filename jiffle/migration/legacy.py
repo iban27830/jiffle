@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 
 from jiffle import create_app
 from jiffle.configuration.settings import Settings, persist_settings
+from jiffle.infrastructure.database.connection import connect_database
 
 
 @dataclass
@@ -141,9 +142,7 @@ def _backup_database(source, target_root, source_name):
 
 
 def _copy_data(source, source_media, settings, report, legacy_export_root):
-    target = sqlite3.connect(settings.database_path)
-    target.row_factory = sqlite3.Row
-    target.execute("PRAGMA foreign_keys = ON")
+    target = connect_database(settings.database_path)
     try:
         for row in source.execute("SELECT * FROM images ORDER BY id"):
             mapped = target.execute(
@@ -161,8 +160,9 @@ def _copy_data(source, source_media, settings, report, legacy_export_root):
                     digest = sha256()
                     for chunk in iter(lambda: file.read(1024 * 1024), b""):
                         digest.update(chunk)
+                content_hash = digest.hexdigest()
                 existing_hash = target.execute(
-                    "SELECT id FROM media_items WHERE content_hash=?", (digest.hexdigest(),)
+                    "SELECT id FROM media_items WHERE content_hash=?", (content_hash,)
                 ).fetchone()
                 if existing_hash:
                     target.execute(
@@ -173,6 +173,9 @@ def _copy_data(source, source_media, settings, report, legacy_export_root):
                     report.skipped_existing_media += 1
                     continue
                 media_type = "video" if source_path.suffix.lower() in {".mp4", ".webm"} else "image"
+                width = _positive_int(_row_value(row, "width"))
+                height = _positive_int(_row_value(row, "height"))
+                file_size = source_path.stat().st_size
                 cursor = target.execute(
                     "INSERT INTO media_items "
                     "(file_path, media_type, source_url, file_source_url, author, domain, width, height, "
@@ -181,12 +184,22 @@ def _copy_data(source, source_media, settings, report, legacy_export_root):
                         relative_path, media_type, _row_value(row, "source_url"),
                         _row_value(row, "source_url"),
                         _row_value(row, "author"), _row_value(row, "domain"),
-                        _positive_int(_row_value(row, "width")),
-                        _positive_int(_row_value(row, "height")),
-                        source_path.stat().st_size, digest.hexdigest(),
+                        width,
+                        height,
+                        file_size, content_hash,
                     ),
                 )
                 media_id = int(cursor.lastrowid)
+                revision_cursor = target.execute(
+                    "INSERT INTO media_revisions "
+                    "(media_item_id, file_path, operation, width, height, file_size, content_hash) "
+                    "VALUES (?, ?, 'original', ?, ?, ?, ?)",
+                    (media_id, relative_path, width, height, file_size, content_hash),
+                )
+                target.execute(
+                    "UPDATE media_items SET active_revision_id=? WHERE id=?",
+                    (int(revision_cursor.lastrowid), media_id),
+                )
                 target.execute(
                     "INSERT INTO legacy_media_map (legacy_id, media_item_id) VALUES (?, ?)",
                     (row["id"], media_id),
@@ -308,7 +321,7 @@ def _copy_archived_exports(source, target, report, legacy_export_root):
 def _copy_deleted_signatures(source, settings, report):
     if not _table_exists(source, "deleted_images"):
         return
-    target = sqlite3.connect(settings.database_path)
+    target = connect_database(settings.database_path)
     try:
         for row in source.execute("SELECT source_url, file_hash FROM deleted_images"):
             source_url = row["source_url"] or None
@@ -331,7 +344,7 @@ def _copy_deleted_signatures(source, settings, report):
 
 
 def _copy_tag_configuration(settings, report, source_config, preferred_file, blocked_file):
-    target = sqlite3.connect(settings.database_path)
+    target = connect_database(settings.database_path)
     try:
         for disposition, path in (("preferred", preferred_file), ("blocked", blocked_file)):
             if not path.is_file():
@@ -445,11 +458,18 @@ def _legacy_runtime_settings(settings, config_path):
     gelbooru = auth.get("gelbooru.com", {})
     rule34 = auth.get("rule34.xxx", {})
     furaffinity = auth.get("furaffinity.net", {})
+    rules = payload.get("export_format_rules", {"gif": "mp4", "webm": "mp4"})
+    if isinstance(rules, dict):
+        export_format_rules = tuple(rules.items())
+    elif isinstance(rules, (list, tuple)):
+        export_format_rules = tuple(tuple(r) for r in rules)
+    else:
+        export_format_rules = settings.export_format_rules
     values = {
         "max_items_per_author": _positive_int(payload.get("max_per_author")) or settings.max_items_per_author,
         "max_image_export_size_bytes": 50 * 1024 * 1024,
         "max_video_export_size_bytes": 50 * 1024 * 1024,
-        "export_format_rules": {"gif": "mp4", "webm": "mp4"},
+        "export_format_rules": export_format_rules,
         "danbooru_login": _auth_value(danbooru, "login"),
         "danbooru_api_key": _auth_value(danbooru, "api_key"),
         "e621_login": _auth_value(e621, "login"),

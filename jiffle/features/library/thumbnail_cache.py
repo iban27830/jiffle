@@ -1,6 +1,7 @@
 from hashlib import sha256
 import os
 from pathlib import Path
+from uuid import uuid4
 
 from PIL import Image, ImageOps
 
@@ -17,13 +18,22 @@ def ensure_thumbnail(item: MediaItem, source: Path, cache_root: Path) -> Path:
     if destination.is_file():
         return destination
     cache_root.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_suffix(".tmp")
+    temporary = destination.with_name(f".{destination.stem}-{uuid4().hex}.tmp")
     try:
         image = _load_preview(item.media_type, source)
         with image:
-            normalized = ImageOps.exif_transpose(image).convert("RGB")
-            normalized.thumbnail((480, 480), Image.Resampling.LANCZOS)
-            normalized.save(temporary, format="JPEG", quality=85)
+            transposed = ImageOps.exif_transpose(image)
+            try:
+                transposed.thumbnail((480, 480), Image.Resampling.LANCZOS)
+                rgb = transposed.convert("RGB")
+                try:
+                    rgb.save(temporary, format="JPEG", quality=85)
+                finally:
+                    if rgb is not transposed and rgb is not image:
+                        rgb.close()
+            finally:
+                if transposed is not image:
+                    transposed.close()
         os.replace(temporary, destination)
     finally:
         temporary.unlink(missing_ok=True)

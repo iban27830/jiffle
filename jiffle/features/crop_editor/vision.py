@@ -27,7 +27,14 @@ def analyze_with_vision(connection, settings, media_id):
             if settings.crop_vision_key: headers["Authorization"]=f"Bearer {settings.crop_vision_key}"
             response=requests.post(settings.crop_vision_url,headers=headers,json={"model":settings.crop_vision_model,"messages":[{"role":"user","content":[{"type":"text","text":PROMPT},{"type":"image_url","image_url":{"url":f"data:{mime};base64,{encoded}"}}]}]},timeout=120); response.raise_for_status(); raw=response.json()["choices"][0]["message"]["content"]
         payload=json.loads(re.sub(r"^```(?:json)?\s*|\s*```$","",raw.strip())); box=tuple(int(payload[k]) for k in ("left","top","right","bottom"))
-        with Image.open(path) as source: width,height=ImageOps.exif_transpose(source).size
+        with Image.open(path) as opened:
+            width, height = opened.size
+            try:
+                orientation = int(opened.getexif().get(0x0112, 1) or 1)
+            except (TypeError, ValueError, AttributeError):
+                orientation = 1
+            if orientation in (5, 6, 7, 8):
+                width, height = height, width
         if not (0<=box[0]<box[2]<=width and 0<=box[1]<box[3]<=height): raise ValueError
     except requests.HTTPError as error:
         status=error.response.status_code if error.response is not None else 0

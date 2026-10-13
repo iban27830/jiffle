@@ -44,7 +44,8 @@ def list_duplicate_matches():
         "FROM duplicate_matches dm "
         "JOIN media_items left_item ON left_item.id=dm.left_media_id "
         "JOIN media_items right_item ON right_item.id=dm.right_media_id "
-        "WHERE dm.status=? ORDER BY dm.confidence DESC, dm.id", (status,)
+        "WHERE dm.status=? AND left_item.deleted_at IS NULL AND right_item.deleted_at IS NULL "
+        "ORDER BY dm.confidence DESC, dm.id", (status,)
     ).fetchall()
     return jsonify({"items": [_serialize(row) for row in rows]})
 

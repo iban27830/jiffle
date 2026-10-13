@@ -325,30 +325,33 @@ def run_universal_import_job(
             )
             details["timing"]["phases_ms"]["exact_download"] = _elapsed_ms(download_started)
             details.setdefault("provider_errors", []).extend(download_errors)
-            for match, downloaded in valid_candidates:
-                try:
-                    file_source = _match_to_source(match)
-                    result = _accept_downloaded(
-                        connection, settings, job_id, downloaded, file_source, submitted_input,
-                        source_url_override=metadata_source.canonical_url if metadata_source else normalized_input,
-                        metadata_source=metadata_source or file_source,
-                        file_source=file_source,
-                    )
+            try:
+                for match, downloaded in valid_candidates:
+                    try:
+                        file_source = _match_to_source(match)
+                        result = _accept_downloaded(
+                            connection, settings, job_id, downloaded, file_source, submitted_input,
+                            source_url_override=metadata_source.canonical_url if metadata_source else normalized_input,
+                            metadata_source=metadata_source or file_source,
+                            file_source=file_source,
+                        )
+                    except Exception as error:
+                        code, message = _download_failure(error, "The exact candidate was unavailable.")
+                        details.setdefault("provider_errors", []).append({"provider": match.provider, "code": code, "message": message, "remote_id": match.remote_id})
+                        _record_provider_diagnostic(details["provider_diagnostics"], "exact_download", match.provider, "unavailable", 0, code, message, remote_id=match.remote_id)
+                        continue
+                    finally:
+                        downloaded.unlink(missing_ok=True)
                     details.update({
                         "resolution_method": result.get("resolution_method", "exact"),
                         "resolved_source_url": match.canonical_url,
                     })
                     _set_search_status(details, "resolved")
                     _finish(connection, job_id, result, details)
-                    for _, other in valid_candidates:
-                        other.unlink(missing_ok=True)
                     return
-                except Exception as error:
-                    code, message = _download_failure(error, "The exact candidate was unavailable.")
-                    details.setdefault("provider_errors", []).append({"provider": match.provider, "code": code, "message": message, "remote_id": match.remote_id})
-                    _record_provider_diagnostic(details["provider_diagnostics"], "exact_download", match.provider, "unavailable", 0, code, message, remote_id=match.remote_id)
-                finally:
-                    downloaded.unlink(missing_ok=True)
+            finally:
+                for _, other in valid_candidates:
+                    other.unlink(missing_ok=True)
             if exact and (download_errors or details.get("search_status") == "matched"):
                 _set_search_status(details, "candidate_download_failed")
             elif details.get("search_status") not in {"network_error", "authorization_error"}:
@@ -449,36 +452,35 @@ def run_universal_import_job(
         )
         details["timing"]["phases_ms"]["exact_download"] = _elapsed_ms(download_started)
         details["provider_errors"] = list(details.get("provider_errors", [])) + download_errors
-        for match, downloaded in valid_candidates:
-            try:
-                temporary.append(downloaded)
-                file_source = _match_to_source(match)
-                result = _accept_downloaded(
-                    connection, settings, job_id, downloaded, file_source, submitted_input,
-                    metadata_source=metadata_source or file_source,
-                    file_source=file_source,
-                )
+        try:
+            for match, downloaded in valid_candidates:
+                try:
+                    temporary.append(downloaded)
+                    file_source = _match_to_source(match)
+                    result = _accept_downloaded(
+                        connection, settings, job_id, downloaded, file_source, submitted_input,
+                        metadata_source=metadata_source or file_source,
+                        file_source=file_source,
+                    )
+                except Exception as error:
+                    downloaded.unlink(missing_ok=True)
+                    code, message = _download_failure(error, "The exact candidate was unavailable.")
+                    details.setdefault("provider_errors", []).append({"provider": match.provider, "code": code, "message": message, "remote_id": match.remote_id})
+                    _record_provider_diagnostic(details["provider_diagnostics"], "exact_download", match.provider, "unavailable", 0, code, message, remote_id=match.remote_id)
+                    continue
+                finally:
+                    if downloaded in temporary:
+                        temporary.remove(downloaded)
                 details.update({
                     "resolution_method": result.get("resolution_method", "exact"),
                     "resolved_source_url": match.canonical_url,
                 })
                 _set_search_status(details, "resolved")
                 _finish(connection, job_id, result, details)
-                temporary.remove(downloaded)
-                downloaded.unlink(missing_ok=True)
-                for _, other in valid_candidates:
-                    other.unlink(missing_ok=True)
                 return
-            except Exception as error:
+        finally:
+            for _, downloaded in valid_candidates:
                 downloaded.unlink(missing_ok=True)
-                code, message = _download_failure(error, "The exact candidate was unavailable.")
-                details.setdefault("provider_errors", []).append({"provider": match.provider, "code": code, "message": message, "remote_id": match.remote_id})
-                _record_provider_diagnostic(details["provider_diagnostics"], "exact_download", match.provider, "unavailable", 0, code, message, remote_id=match.remote_id)
-            finally:
-                if downloaded in temporary:
-                    temporary.remove(downloaded)
-        for _, downloaded in valid_candidates:
-            downloaded.unlink(missing_ok=True)
 
         if exact and (download_errors or details.get("search_status") == "matched"):
             _set_search_status(details, "candidate_download_failed")
@@ -507,45 +509,79 @@ def run_universal_import_job(
         # Keep the original in staging before trying approximate candidates.
         original_staged = atomic_copy(original_path, settings.resolved_import_staging_path, "candidate")
         candidate_paths: list[tuple[SourceMatch, Path, object]] = []
-        similar = _local_similar(connection, settings, original_path, inspection)
-        _record_provider_diagnostic(
-            details["provider_diagnostics"], "perceptual_search", "local",
-            "matched" if similar else "no_result", len(similar)
-        )
-        # Videos are searched through one representative frame, so a re-encoded
-        # or sample-quality copy can still match the post it was taken from even
-        # though its bytes differ from the original.
-        similar.extend(_reverse_similar(original_path, providers, details["provider_diagnostics"]))
-        similar = [_coerce_match(match, "perceptual") for match in similar]
-        similar = [match for match in _unique_similar(similar) if match.confidence >= MIN_SIMILAR_CONFIDENCE]
-        details["similar_candidates_found"] = len(similar)
-        for match in similar:
-            media_url = match.direct_media_url or match.preview_url
-            if not media_url:
-                _record_provider_diagnostic(
-                    details["provider_diagnostics"], "perceptual_search", match.provider,
-                    "unavailable", 0, "import.candidate_unavailable",
-                    "The similar candidate has no media URL.", remote_id=match.remote_id,
+        staged_committed = False
+        try:
+            similar = _local_similar(connection, settings, original_path, inspection)
+            _record_provider_diagnostic(
+                details["provider_diagnostics"], "perceptual_search", "local",
+                "matched" if similar else "no_result", len(similar)
+            )
+            # Videos are searched through one representative frame, so a re-encoded
+            # or sample-quality copy can still match the post it was taken from even
+            # though its bytes differ from the original.
+            similar.extend(_reverse_similar(original_path, providers, details["provider_diagnostics"]))
+            similar = [_coerce_match(match, "perceptual") for match in similar]
+            similar = [match for match in _unique_similar(similar) if match.confidence >= MIN_SIMILAR_CONFIDENCE]
+            details["similar_candidates_found"] = len(similar)
+            for match in similar:
+                media_url = match.direct_media_url or match.preview_url
+                if not media_url:
+                    _record_provider_diagnostic(
+                        details["provider_diagnostics"], "perceptual_search", match.provider,
+                        "unavailable", 0, "import.candidate_unavailable",
+                        "The similar candidate has no media URL.", remote_id=match.remote_id,
+                    )
+                    continue
+                path = settings.resolved_import_staging_path / f"candidate-{uuid4().hex}{_extension(media_url)}"
+                try:
+                    local_candidate = _safe_media_path(settings.media_path, str(media_url))
+                    if local_candidate is not None and local_candidate.is_file():
+                        shutil.copy2(local_candidate, path)
+                    else:
+                        downloader.download(media_url, path, match.canonical_url)
+                    candidate_inspection = inspect_media(path)
+                    candidate_paths.append((match, path, candidate_inspection))
+                except Exception as error:
+                    path.unlink(missing_ok=True)
+                    _record_provider_diagnostic(
+                        details["provider_diagnostics"], "perceptual_search", match.provider, "unavailable", 0,
+                        "import.candidate_unavailable", _safe_error_message(error, "The similar candidate was unavailable."),
+                        remote_id=match.remote_id,
+                    )
+            if candidate_paths:
+                connection.execute(
+                    "UPDATE import_candidates SET status='review', stored_path=?, media_type=?, "
+                    "content_hash=?, width=?, height=?, file_size=?, source_metadata_json=? WHERE id=?",
+                    (original_staged, inspection.media_type, inspection.content_hash,
+                     inspection.width, inspection.height, inspection.file_size,
+                     _serialize_source(metadata_source) if metadata_source else None, candidate_id),
                 )
-                continue
-            path = settings.resolved_import_staging_path / f"candidate-{uuid4().hex}{_extension(media_url)}"
-            try:
-                local_candidate = _safe_media_path(settings.media_path, str(media_url))
-                if local_candidate is not None and local_candidate.is_file():
-                    shutil.copy2(local_candidate, path)
-                else:
-                    downloader.download(media_url, path, match.canonical_url)
-                candidate_inspection = inspect_media(path)
-                candidate_paths.append((match, path, candidate_inspection))
-            except Exception as error:
-                path.unlink(missing_ok=True)
-                _record_provider_diagnostic(
-                    details["provider_diagnostics"], "perceptual_search", match.provider, "unavailable", 0,
-                    "import.candidate_unavailable", _safe_error_message(error, "The similar candidate was unavailable."),
-                    remote_id=match.remote_id,
+                review_cursor = connection.execute(
+                    "INSERT INTO review_items (import_candidate_id, reason) VALUES (?, 'source_candidates')",
+                    (candidate_id,),
                 )
-        if candidate_paths:
-            cursor = connection.execute(
+                review_id = int(review_cursor.lastrowid)
+                for rank, (match, path, candidate_inspection) in enumerate(candidate_paths):
+                    connection.execute(
+                        "INSERT INTO import_source_candidates "
+                        "(review_item_id, rank, match_method, confidence, provider, source_metadata_json, "
+                        "stored_path, media_type, content_hash, width, height, file_size) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (review_id, rank, match.match_method, match.confidence, match.provider,
+                         json.dumps(match.as_dict()), path.name, candidate_inspection.media_type,
+                         candidate_inspection.content_hash, candidate_inspection.width,
+                         candidate_inspection.height, candidate_inspection.file_size),
+                    )
+                connection.commit()
+                staged_committed = True
+                details["resolution_method"] = "perceptual"
+                _finish(connection, job_id, {"outcome": "review", "candidate_id": candidate_id,
+                                             "review_item_id": review_id,
+                                             "source_candidates": len(candidate_paths)}, details)
+                return
+
+            # No usable source: retain the uploaded file for the existing manual Source action.
+            connection.execute(
                 "UPDATE import_candidates SET status='review', stored_path=?, media_type=?, "
                 "content_hash=?, width=?, height=?, file_size=?, source_metadata_json=? WHERE id=?",
                 (original_staged, inspection.media_type, inspection.content_hash,
@@ -553,44 +589,21 @@ def run_universal_import_job(
                  _serialize_source(metadata_source) if metadata_source else None, candidate_id),
             )
             review_cursor = connection.execute(
-                "INSERT INTO review_items (import_candidate_id, reason) VALUES (?, 'source_candidates')",
+                "INSERT INTO review_items (import_candidate_id, reason) VALUES (?, 'source_required')",
                 (candidate_id,),
             )
-            review_id = int(review_cursor.lastrowid)
-            for rank, (match, path, candidate_inspection) in enumerate(candidate_paths):
-                connection.execute(
-                    "INSERT INTO import_source_candidates "
-                    "(review_item_id, rank, match_method, confidence, provider, source_metadata_json, "
-                    "stored_path, media_type, content_hash, width, height, file_size) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (review_id, rank, match.match_method, match.confidence, match.provider,
-                     json.dumps(match.as_dict()), path.name, candidate_inspection.media_type,
-                     candidate_inspection.content_hash, candidate_inspection.width,
-                     candidate_inspection.height, candidate_inspection.file_size),
-                )
             connection.commit()
-            details["resolution_method"] = "perceptual"
+            staged_committed = True
+            details["resolution_method"] = "source_required"
             _finish(connection, job_id, {"outcome": "review", "candidate_id": candidate_id,
-                                         "review_item_id": review_id,
-                                         "source_candidates": len(candidate_paths)}, details)
-            return
-
-        # No usable source: retain the uploaded file for the existing manual Source action.
-        connection.execute(
-            "UPDATE import_candidates SET status='review', stored_path=?, media_type=?, "
-            "content_hash=?, width=?, height=?, file_size=?, source_metadata_json=? WHERE id=?",
-            (original_staged, inspection.media_type, inspection.content_hash,
-             inspection.width, inspection.height, inspection.file_size,
-             _serialize_source(metadata_source) if metadata_source else None, candidate_id),
-        )
-        review_cursor = connection.execute(
-            "INSERT INTO review_items (import_candidate_id, reason) VALUES (?, 'source_required')",
-            (candidate_id,),
-        )
-        connection.commit()
-        details["resolution_method"] = "source_required"
-        _finish(connection, job_id, {"outcome": "review", "candidate_id": candidate_id,
-                                     "review_item_id": int(review_cursor.lastrowid)}, details)
+                                         "review_item_id": int(review_cursor.lastrowid)}, details)
+        except Exception:
+            if not staged_committed:
+                (settings.resolved_import_staging_path / original_staged).unlink(missing_ok=True)
+                for _match, path, _inspection in candidate_paths:
+                    path.unlink(missing_ok=True)
+                connection.rollback()
+            raise
     except (ImportFailure, SourceProviderFailure) as error:
         if _retain_failed_upload(connection, settings, job_id, submitted_input, input_kind, error.code, details):
             details["resolution_error"] = {
@@ -626,18 +639,29 @@ def run_universal_import_job(
             path.unlink(missing_ok=True)
         if input_kind == "file":
             row = connection.execute(
-                "SELECT status, stored_path FROM import_candidates WHERE job_id=?", (job_id,)
+                "SELECT candidate.status, candidate.stored_path, job.error_code "
+                "FROM import_candidates candidate JOIN background_jobs job ON job.id=candidate.job_id "
+                "WHERE candidate.job_id=?",
+                (job_id,),
             ).fetchone()
             upload_path = Path(submitted_input)
             is_staged_upload = upload_path.parent.resolve() == settings.resolved_import_staging_path.resolve() and upload_path.name.startswith("upload-")
             stored_path = row["stored_path"] if row is not None else None
             has_durable_replacement = bool(stored_path) and stored_path != upload_path.name
+            is_rejected_upload = (
+                row is not None
+                and row["status"] == "failed"
+                and not has_durable_replacement
+                and row["error_code"] in (_RETAIN_EXCLUDED_CODES - {"import.unsupported_media_type"})
+            )
             # Keep the uploaded bytes until they are safely stored in the library
             # (accepted/duplicate) or a durable staged copy exists for review.
             # Failed imports keep the upload on disk so nothing the user dropped
             # into Jiffle is ever lost when the source is unavailable.
             if row and is_staged_upload and (
-                row["status"] in {"accepted", "duplicate"} or has_durable_replacement
+                row["status"] in {"accepted", "duplicate"}
+                or has_durable_replacement
+                or is_rejected_upload
             ):
                 upload_path.unlink(missing_ok=True)
         connection.close()
@@ -969,6 +993,11 @@ def _safe_error_message(error, fallback: str) -> str:
     # Provider failures already expose a curated message.  For arbitrary
     # exceptions retain only a short first line so request details cannot leak.
     message = re.sub(r"https?://[^\s)]+", "<redacted-url>", message.splitlines()[0])
+    message = re.sub(
+        r"(?i)(api_key|key|token|password|cookie_[ab])=[^&\s'\")]+",
+        r"\1=<redacted>",
+        message,
+    )
     return message[:240]
 
 
@@ -1305,6 +1334,9 @@ def _reverse_candidate_from_url(url: str, providers):
                 continue
         except Exception:
             continue
+        provider_name = getattr(provider, "provider_name", "unknown")
+        if _provider_on_cooldown(provider_name) or _provider_needs_configuration(provider):
+            return None
         digest = _reverse_md5(url)
         if digest:
             search = getattr(provider, "search_by_md5", None)

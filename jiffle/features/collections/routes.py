@@ -21,17 +21,20 @@ collections_blueprint = Blueprint("collections_v1", __name__)
 @collections_blueprint.get("/api/v1/collections")
 def list_collections():
     rows = get_database().execute(
-        "SELECT collection.*, COUNT(member.media_item_id) AS item_count, "
+        "SELECT collection.*, COUNT(member_item.id) AS item_count, "
         "SUM(CASE WHEN limits.max_author > 0 AND authors.author_count > limits.max_author AND authors.limited_author=1 "
         "THEN 1 ELSE 0 END) AS author_warning_count "
         "FROM collections collection LEFT JOIN collection_items member "
         "ON member.collection_id=collection.id "
+        "LEFT JOIN media_items member_item "
+        "ON member_item.id=member.media_item_id AND member_item.deleted_at IS NULL "
         "LEFT JOIN (SELECT collection_id, COALESCE(NULLIF(LOWER(TRIM(item.author)),''),'unknown') author, "
         "COUNT(*) author_count, CASE WHEN LOWER(TRIM(COALESCE(item.author,''))) IN "
         "('', 'unknown', 'автор_неизвестен', 'ии_теггер', 'local_ai') THEN 0 ELSE 1 END limited_author "
-        "FROM collection_items ci JOIN media_items item ON item.id=ci.media_item_id "
+        "FROM collection_items ci JOIN media_items item ON item.id=ci.media_item_id AND item.deleted_at IS NULL "
         "GROUP BY collection_id, COALESCE(NULLIF(LOWER(TRIM(item.author)),''),'unknown')) authors "
-        "ON authors.collection_id=collection.id AND authors.author=COALESCE(NULLIF(LOWER(TRIM((SELECT author FROM media_items WHERE id=member.media_item_id))),''),'unknown') "
+        "ON authors.collection_id=collection.id AND member_item.id IS NOT NULL "
+        "AND authors.author=COALESCE(NULLIF(LOWER(TRIM(member_item.author)),''),'unknown') "
         "CROSS JOIN (SELECT ? max_author) limits "
         "GROUP BY collection.id ORDER BY datetime(collection.created_at) DESC, collection.id DESC",
         (current_app.config["JIFFLE_SETTINGS"].max_items_per_author,),
@@ -44,10 +47,17 @@ def list_collections():
         item["included_tags"] = [tag["tag"] for tag in tags if tag["disposition"] == "include"]
         item["excluded_tags"] = [tag["tag"] for tag in tags if tag["disposition"] == "exclude"]
         covers = connection.execute(
-            "SELECT media_item_id FROM collection_items WHERE collection_id=? ORDER BY position LIMIT 2",
+            "SELECT item.id AS media_item_id, item.active_revision_id "
+            "FROM collection_items member "
+            "JOIN media_items item ON item.id=member.media_item_id "
+            "WHERE member.collection_id=? AND item.deleted_at IS NULL "
+            "ORDER BY member.position LIMIT 2",
             (row["id"],),
         ).fetchall()
-        item["cover_urls"] = [f"/api/v1/media/{cover[0]}/thumbnail" for cover in covers]
+        item["cover_urls"] = [
+            f"/api/v1/media/{cover['media_item_id']}/thumbnail?revision={cover['active_revision_id'] or 0}"
+            for cover in covers
+        ]
         items.append(item)
     return jsonify({"items": items})
 
@@ -218,9 +228,9 @@ def get_collection(collection_id: int):
         return _error("collections.not_found", "Collection was not found.", 404)
     rows = connection.execute(
         "SELECT member.position, item.id, item.media_type, item.source_url, item.file_source_url, item.author, item.domain, "
-        "item.width, item.height, item.file_size FROM collection_items member "
+        "item.width, item.height, item.file_size, item.active_revision_id FROM collection_items member "
         "JOIN media_items item ON item.id=member.media_item_id "
-        "WHERE member.collection_id=? ORDER BY member.position", (collection_id,)
+        "WHERE member.collection_id=? AND item.deleted_at IS NULL ORDER BY member.position", (collection_id,)
     ).fetchall()
     return jsonify({
         "id": collection["id"], "name": collection["name"],
@@ -230,8 +240,8 @@ def get_collection(collection_id: int):
         "included_tags": [r[0] for r in connection.execute("SELECT tag FROM collection_tags WHERE collection_id=? AND disposition='include' ORDER BY tag", (collection_id,))],
         "excluded_tags": [r[0] for r in connection.execute("SELECT tag FROM collection_tags WHERE collection_id=? AND disposition='exclude' ORDER BY tag", (collection_id,))],
         "items": [{**dict(row),
-            "content_url": f"/api/v1/media/{row['id']}/content",
-            "thumbnail_url": f"/api/v1/media/{row['id']}/thumbnail",
+            "content_url": f"/api/v1/media/{row['id']}/content?revision={row['active_revision_id'] or 0}",
+            "thumbnail_url": f"/api/v1/media/{row['id']}/thumbnail?revision={row['active_revision_id'] or 0}",
             "library_url": f"/library?id={row['id']}",
         } for row in rows],
     })
@@ -422,10 +432,11 @@ def _collection_error(error):
     return jsonify({"error": {"code": error.code, "message": error.message, "details": error.details}}), status
 
 
-def _validate_composition(connection, media_ids, included_tags, excluded_tags):
+def _validate_composition(connection, media_ids, included_tags, excluded_tags, aliases=None):
     if len(media_ids) != len(set(media_ids)):
         raise CollectionFailure("collections.duplicate_item", "A collection cannot contain an item twice.")
-    aliases = build_tag_alias_map(connection)
+    if aliases is None:
+        aliases = build_tag_alias_map(connection)
     included_values = tuple(expand_tag_aliases(tag, aliases) for tag in included_tags)
     excluded_values = tuple(expand_tag_aliases(tag, aliases) for tag in excluded_tags)
     for media_id in media_ids:
@@ -532,6 +543,7 @@ def validate_collection_preview():
         return _collection_error(error)
     connection = get_database()
     settings = current_app.config["JIFFLE_SETTINGS"]
+    aliases = build_tag_alias_map(connection) if ids else {}
     items, issues = [], []
     for media_id in ids:
         row = connection.execute(
@@ -544,7 +556,7 @@ def validate_collection_preview():
             reason = "This file is no longer in the library."
         else:
             try:
-                _validate_composition(connection, [media_id], included, excluded)
+                _validate_composition(connection, [media_id], included, excluded, aliases=aliases)
                 ensure_crop_eligible(connection, settings, [media_id])
             except CollectionFailure as error:
                 reason = error.message
@@ -557,7 +569,7 @@ def validate_collection_preview():
             "media_type": row["media_type"] if row else "image",
             "usage_count": row["usage_count"] if row else 0,
             "last_used_at": row["last_used_at"] if row else None,
-            "thumbnail_url": f"/api/v1/media/{media_id}/thumbnail?revision={row['active_revision_id'] if row else 0}",
+            "thumbnail_url": f"/api/v1/media/{media_id}/thumbnail?revision={(row['active_revision_id'] or 0) if row else 0}",
             "content_url": f"/api/v1/media/{media_id}/content",
             "issue": reason,
         })

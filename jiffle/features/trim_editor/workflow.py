@@ -61,7 +61,7 @@ def probe_duration_ms(source: Path) -> int | None:
         return None
     try:
         probe = subprocess.run(
-            [ffmpeg, "-i", str(source)], capture_output=True, text=True, timeout=60,
+            [ffmpeg, "-nostdin", "-i", str(source)], capture_output=True, text=True, timeout=60,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -210,35 +210,33 @@ def list_review_items(
     if status == "pending":
         mark_known_queue(connection, settings)
     clauses = [
-        "deleted_at IS NULL",
-        "derived_from_media_id IS NULL",
-        "trim_review_status IS NOT NULL",
+        "m.deleted_at IS NULL",
+        "m.derived_from_media_id IS NULL",
+        "m.trim_review_status IS NOT NULL",
     ]
     parameters: list[object] = []
     if status in REVIEW_STATUSES:
-        clauses.append("trim_review_status=?")
+        clauses.append("m.trim_review_status=?")
         parameters.append(status)
     page = ""
     if limit is not None:
         page = " LIMIT ? OFFSET ?"
         parameters = [*parameters, max(0, int(limit)), max(0, int(offset))]
     rows = connection.execute(
-        "SELECT id, media_type, width, height, file_size, created_at, is_animated, "
-        "trim_review_status, trim_deferred_at FROM media_items "
+        "SELECT m.id, m.media_type, m.width, m.height, m.file_size, m.created_at, m.is_animated, "
+        "m.trim_review_status, m.trim_deferred_at, "
+        "(SELECT COUNT(*) FROM media_items f WHERE f.derived_from_media_id = m.id AND f.deleted_at IS NULL) AS fragment_count "
+        "FROM media_items m "
         f"WHERE {' AND '.join(clauses)} "
         # New eligible clips have no deferral stamp and stay at the front.  A
         # deferred clip sinks below all of them; the oldest deferral comes first
         # so "Move to end" behaves like a queue rotation.
-        "ORDER BY (trim_deferred_at IS NOT NULL) ASC, trim_deferred_at ASC, id DESC"
+        "ORDER BY (m.trim_deferred_at IS NOT NULL) ASC, m.trim_deferred_at ASC, m.id DESC"
         + page,
         parameters,
     ).fetchall()
     items = []
     for row in rows:
-        fragment_count = connection.execute(
-            "SELECT COUNT(*) FROM media_items WHERE derived_from_media_id=? AND deleted_at IS NULL",
-            (row["id"],),
-        ).fetchone()[0]
         items.append({
             "media_id": int(row["id"]),
             "type": row["media_type"],
@@ -249,7 +247,7 @@ def list_review_items(
             "is_animated": bool(row["is_animated"]),
             "status": row["trim_review_status"],
             "deferred": row["trim_deferred_at"] is not None,
-            "fragment_count": int(fragment_count),
+            "fragment_count": int(row["fragment_count"]),
             "content_url": f"/api/v1/media/{row['id']}/content",
             "thumbnail_url": f"/api/v1/media/{row['id']}/thumbnail",
         })
@@ -419,7 +417,7 @@ def _render_fragment(connection, settings, source_path, source_row, index, start
     start = start_ms / 1000
     duration = (end_ms - start_ms) / 1000
     command = [
-        ffmpeg, "-y", "-ss", f"{start:.3f}", "-i", str(source_path), "-t", f"{duration:.3f}",
+        ffmpeg, "-nostdin", "-y", "-ss", f"{start:.3f}", "-i", str(source_path), "-t", f"{duration:.3f}",
         "-map", "0:v:0", "-map", "0:a?",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
         "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
@@ -582,6 +580,12 @@ def apply_trim(connection, settings, media_id: int, segments, progress=None) -> 
                 # The file is now referenced by a committed revision; it must
                 # survive a failure while a later segment is encoded.
                 rendered_paths.clear()
+                if (
+                    fragment_path is not None
+                    and fragment_path != rendered["path"]
+                    and fragment_path != source_path
+                ):
+                    fragment_path.unlink(missing_ok=True)
                 notify(index, "saved", fragment_id)
             else:
                 notify(index, "encoding")
@@ -613,8 +617,18 @@ def apply_trim(connection, settings, media_id: int, segments, progress=None) -> 
                 connection.commit()
                 rendered_paths.clear()
                 notify(index, "saved", fragment_id)
+        obsolete_paths: list[Path] = []
         for fragment in existing[len(normalized):]:
             fragment_id = int(fragment["id"])
+            old_path = media_path(settings.media_path, fragment["file_path"])
+            if old_path is not None and old_path != source_path:
+                obsolete_paths.append(old_path)
+            for rev_row in connection.execute(
+                "SELECT file_path FROM media_revisions WHERE media_item_id=?", (fragment_id,)
+            ):
+                rev_path = media_path(settings.media_path, rev_row["file_path"])
+                if rev_path is not None and rev_path != source_path:
+                    obsolete_paths.append(rev_path)
             connection.execute(
                 "UPDATE media_items SET deleted_at=CURRENT_TIMESTAMP WHERE id=?", (fragment_id,)
             )
@@ -640,6 +654,8 @@ def apply_trim(connection, settings, media_id: int, segments, progress=None) -> 
             (media_id, json.dumps(result)),
         )
         connection.commit()
+        for old_path in obsolete_paths:
+            old_path.unlink(missing_ok=True)
         return result
     except TrimFailure:
         connection.rollback()

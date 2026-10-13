@@ -19,6 +19,7 @@ from jiffle.features.imports.source_adapters.platform_tags import (
     FURRY_TAG,
     is_furry_only_source,
 )
+from jiffle.features.imports.universal_import import _safe_error_message
 from jiffle.infrastructure.database.connection import connect_database
 
 # Providers whose post metadata can be re-read for a furry-only ``source`` link.
@@ -60,7 +61,9 @@ def run_implicit_tag_job(database_path: Path, job_id: int, providers) -> None:
                 errors.append({
                     "media_item_id": int(row["media_item_id"]),
                     "provider": row["provider"] or None,
-                    "message": str(error)[:200],
+                    "message": _safe_error_message(
+                        error, "The source page could not be checked."
+                    ),
                 })
                 added = False
             if added:

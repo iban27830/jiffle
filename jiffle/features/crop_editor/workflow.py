@@ -7,9 +7,15 @@ from PIL import Image, ImageChops, ImageOps
 
 
 class CropFailure(Exception):
-    def __init__(self, code, message, details=None):
+    def __init__(self, code, message, details=None, status=None):
         super().__init__(message)
-        self.code, self.message, self.details = code, message, details or {}
+        if isinstance(details, int):
+            self.status = details
+            self.details = {}
+        else:
+            self.status = status
+            self.details = details or {}
+        self.code, self.message = code, message
 
 
 def media_path(root, stored):
@@ -198,7 +204,10 @@ def apply_crop(connection, settings, analysis_id, box):
             if (right-left)*(bottom-top) >= image.width*image.height: raise CropFailure("crop.empty_box","Choose a crop area smaller than the whole image.")
             cropped=image.crop((left,top,right,bottom)); suffix=source.suffix.lower(); directory=settings.media_path/"revisions"; directory.mkdir(parents=True,exist_ok=True)
             target=directory/f"media-{row['media_item_id']}-{analysis_id}-{uuid4().hex}{suffix}"; temporary=target.with_suffix(target.suffix+".tmp"); kwargs={}
-            if suffix in {".jpg",".jpeg"}: kwargs={"quality":95,"subsampling":0,"icc_profile":opened.info.get("icc_profile"),"exif":opened.getexif().tobytes()}
+            if suffix in {".jpg",".jpeg"}:
+                exif = image.getexif()
+                exif.pop(0x0112, None)
+                kwargs={"quality":95,"subsampling":0,"icc_profile":opened.info.get("icc_profile"),"exif":exif.tobytes()}
             elif opened.info.get("icc_profile"): kwargs["icc_profile"]=opened.info["icc_profile"]
             cropped.save(temporary,format=original_format,**{k:v for k,v in kwargs.items() if v}); os.replace(temporary,target)
         digest=_hash_file(target); duplicate=connection.execute("SELECT id FROM media_items WHERE content_hash=? AND id<>? AND deleted_at IS NULL",(digest,row["media_item_id"])).fetchone()
@@ -207,7 +216,12 @@ def apply_crop(connection, settings, analysis_id, box):
         details=json.dumps({"analysis_id":analysis_id,"box":[left,top,right,bottom],"method":row["method"],"source_revision_id":row["active_revision_id"]})
         cursor=connection.execute("INSERT INTO media_revisions (media_item_id,parent_revision_id,file_path,operation,width,height,file_size,content_hash,details_json) VALUES (?,?,?,?,?,?,?,?,?)",(row["media_item_id"],row["active_revision_id"],rel,"crop",cropped.width,cropped.height,size,digest,details)); revision_id=int(cursor.lastrowid)
         from .review import record_check
-        record_check(connection, row["active_revision_id"], "needs_crop")
+        existing_check = connection.execute(
+            "SELECT status FROM crop_review_checks WHERE revision_id=?",
+            (row["active_revision_id"],),
+        ).fetchone()
+        if existing_check is None or existing_check["status"] != "passed":
+            record_check(connection, row["active_revision_id"], "needs_crop")
         record_check(connection, revision_id, "passed")
         connection.execute("UPDATE media_items SET active_revision_id=?,file_path=?,width=?,height=?,file_size=?,content_hash=? WHERE id=?",(revision_id,rel,cropped.width,cropped.height,size,digest,row["media_item_id"])); connection.execute("UPDATE crop_analyses SET status='cropped',resolved_at=CURRENT_TIMESTAMP WHERE id=?",(analysis_id,)); connection.execute("DELETE FROM media_fingerprints WHERE media_item_id=?",(row["media_item_id"],)); connection.execute("INSERT INTO operation_history (event_type,entity_type,entity_id,details_json) VALUES ('crop.applied','media',?,?)",(row["media_item_id"],json.dumps({"analysis_id":analysis_id,"revision_id":revision_id,"box":[left,top,right,bottom]}))); connection.commit(); return revision_id
     except Exception:
@@ -225,6 +239,9 @@ def activate_revision(connection, settings, media_id, revision_id):
     if row is None: raise CropFailure("crop.revision_not_found","Revision was not found.")
     path=media_path(settings.media_path,row["file_path"])
     if path is None or not path.is_file(): raise CropFailure("crop.file_missing","Revision file is unavailable.")
+    if row["content_hash"]:
+        duplicate=connection.execute("SELECT id FROM media_items WHERE content_hash=? AND id<>? AND deleted_at IS NULL",(row["content_hash"],media_id)).fetchone()
+        if duplicate: raise CropFailure("crop.duplicate_media","The revision matches another media item.",{"media_id":int(duplicate[0])},status=409)
     connection.execute("UPDATE crop_analyses SET status='pending',resolved_at=NULL WHERE revision_id=? AND status='cropped'", (revision_id,))
     connection.execute("UPDATE media_items SET active_revision_id=?,file_path=?,width=?,height=?,file_size=?,content_hash=? WHERE id=?",(revision_id,row["file_path"],row["width"],row["height"],row["file_size"],row["content_hash"],media_id)); connection.execute("DELETE FROM media_fingerprints WHERE media_item_id=?",(media_id,)); connection.execute("INSERT INTO operation_history (event_type,entity_type,entity_id,details_json) VALUES ('revision.activated','media',?,?)",(media_id,json.dumps({"revision_id":revision_id}))); connection.commit()
 

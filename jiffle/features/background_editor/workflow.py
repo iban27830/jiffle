@@ -629,6 +629,16 @@ def _store_composed_revision(
         result.save(temporary, format="PNG")
         os.replace(temporary, target)
         digest = _hash_file(target)
+        duplicate = connection.execute(
+            "SELECT id FROM media_items WHERE content_hash=? AND id<>? AND deleted_at IS NULL",
+            (digest, media_id),
+        ).fetchone()
+        if duplicate:
+            raise BackgroundFailure(
+                "background.duplicate_media",
+                "The composed image matches another media item in the library.",
+                {"duplicate_media_id": duplicate[0]},
+            )
         relative = target.relative_to(settings.media_path).as_posix()
         details = json.dumps(
             {
@@ -669,11 +679,14 @@ def _store_composed_revision(
             "VALUES ('background.created','media',?,?)",
             (media_id, json.dumps({"revision_id": revision_id, "preview_id": preview["id"]})),
         )
-        from jiffle.features.crop_editor.review import check_new_media
-        check_new_media(connection, settings, media_id)
+        from jiffle.features.crop_editor.review import record_check
+        record_check(connection, revision_id, "passed")
         connection.commit()
         return revision_id
     except BackgroundFailure:
+        connection.rollback()
+        if target:
+            target.unlink(missing_ok=True)
         raise
     except (OSError, ValueError) as error:
         connection.rollback()

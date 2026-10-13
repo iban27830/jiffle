@@ -282,7 +282,8 @@ def find_exact_perceptual_duplicate(
     connection: sqlite3.Connection,
     settings: Settings,
     source: Path,
-    inspection: MediaInspection | None = None,
+    inspection: MediaInspection | str | None = None,
+    perceptual_hash: str | None = None,
 ) -> int | None:
     """Return the sole live image with a zero-distance pHash match.
 
@@ -295,13 +296,25 @@ def find_exact_perceptual_duplicate(
     every import wait for the whole library.  The file is only opened for the
     items that actually match, and for rows that still need a fingerprint.
     """
-    if inspection is not None and inspection.media_type != "image":
+    media_type = (
+        inspection.media_type
+        if isinstance(inspection, MediaInspection)
+        else inspection
+    )
+    if media_type is not None and media_type != "image":
         return None
-    try:
-        with Image.open(source) as image:
-            wanted = imagehash.phash(image)
-    except (OSError, ValueError):
-        return None
+    if perceptual_hash:
+        try:
+            wanted = imagehash.hex_to_hash(str(perceptual_hash))
+        except (TypeError, ValueError):
+            return None
+    else:
+        try:
+            with Image.open(source) as image:
+                wanted = imagehash.phash(image)
+        except (OSError, ValueError):
+            return None
+    wanted_hex = str(wanted)
 
     # Candidate metadata may have been updated immediately before this scan.
     # Commit it before reading the whole library so the pHash pass never keeps
@@ -309,15 +322,26 @@ def find_exact_perceptual_duplicate(
     if connection.in_transaction:
         connection.commit()
     root = settings.media_path.resolve()
-    rows = connection.execute(
+    matched_rows = connection.execute(
+        "SELECT media.id, media.file_path, fp.perceptual_hash "
+        "FROM media_items media JOIN media_fingerprints fp "
+        "ON fp.media_item_id = media.id "
+        "WHERE media.deleted_at IS NULL AND media.media_type = 'image' "
+        "AND fp.perceptual_hash = ? "
+        "ORDER BY media.id ASC",
+        (wanted_hex,),
+    ).fetchall()
+    missing_rows = connection.execute(
         "SELECT media.id, media.file_path, fp.perceptual_hash "
         "FROM media_items media LEFT JOIN media_fingerprints fp "
-        "ON fp.media_item_id=media.id "
-        "WHERE media.media_type='image' AND media.deleted_at IS NULL"
+        "ON fp.media_item_id = media.id "
+        "WHERE media.deleted_at IS NULL AND media.media_type = 'image' "
+        "AND fp.media_item_id IS NULL "
+        "ORDER BY media.id ASC"
     ).fetchall()
     matches: list[int] = []
     pending_fingerprints: list[tuple[int, str]] = []
-    for row in rows:
+    for row in [*matched_rows, *missing_rows]:
         candidate_hash = row[2]
         candidate_path: Path | None = None
         if not candidate_hash:

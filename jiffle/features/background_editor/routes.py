@@ -578,14 +578,23 @@ def _serialize_asset(row):
 
 
 def _serialize_candidate(row):
+    keys = row.keys() if hasattr(row, "keys") else row
+    revision_id = (
+        row["active_revision_id"]
+        if "active_revision_id" in keys
+        else row["revision_id"]
+        if "revision_id" in keys
+        else None
+    )
+    suffix = f"?revision={revision_id}" if revision_id is not None else ""
     return {
         "media_id": row["media_item_id"], "revision_id": row["revision_id"],
         "confidence": row["confidence"],
         "background_area_percent": row["background_area_percent"],
         "background_color": row["background_color"],
         "edge_consistency": row["edge_consistency"],
-        "thumbnail_url": f"/api/v1/media/{row['media_item_id']}/thumbnail",
-        "content_url": f"/api/v1/media/{row['media_item_id']}/content",
+        "thumbnail_url": f"/api/v1/media/{row['media_item_id']}/thumbnail{suffix}",
+        "content_url": f"/api/v1/media/{row['media_item_id']}/content{suffix}",
     }
 
 
@@ -612,7 +621,9 @@ def _background_error(error):
         "background.preview_missing",
     }:
         status = 404
-    elif error.code in {"background.preview_required", "background.preview_stale"}:
+    elif error.code in {
+        "background.preview_required", "background.preview_stale", "background.duplicate_media",
+    }:
         status = 409
     elif error.code in {
         "background.runtime_install_failed", "background.model_download_failed",

@@ -67,8 +67,9 @@ class PawchiveSourceProvider:
                 "import.invalid_source_url", "The URL is not a Pawchive post URL."
             )
         service, creator_id, post_id = target
+        kind = "server" if service == "discord" else "user"
         payload = self._get_json(
-            f"{API_BASE}/{service}/user/{creator_id}/post/{post_id}"
+            f"{API_BASE}/{service}/{kind}/{creator_id}/post/{post_id}"
         )
         if not isinstance(payload, dict) or not _text(payload.get("id")):
             raise SourceProviderFailure(
@@ -131,9 +132,11 @@ class PawchiveSourceProvider:
 
     def _creator_name(self, service: str, creator_id: str) -> str | None:
         """Best-effort creator name; a failed profile lookup is not fatal."""
+        kind = "server" if service == "discord" else "user"
+        profile_id = creator_id.split("/", 1)[0] if service == "discord" else creator_id
         try:
             payload = self._get_json(
-                f"{API_BASE}/{service}/user/{creator_id}/profile"
+                f"{API_BASE}/{service}/{kind}/{profile_id}/profile"
             )
         except SourceProviderFailure:
             return None
@@ -194,7 +197,30 @@ class PawchiveSourceProvider:
 
 def _post_target(parsed) -> tuple[str, str, str] | None:
     """Return ``(service, creator_id, post_id)`` for a post URL, or ``None``."""
+    if isinstance(parsed, str):
+        parsed = urlparse(parsed)
     segments = [segment for segment in parsed.path.split("/") if segment]
+    if (
+        len(segments) == 7
+        and segments[0] == "discord"
+        and segments[1] == "server"
+        and segments[3] == "channel"
+        and segments[5] == "post"
+    ):
+        _, _, server_id, _, channel_id, _, post_id = segments
+        if not all(_text(value) for value in (server_id, channel_id, post_id)):
+            return None
+        return "discord", f"{_text(server_id)}/channel/{_text(channel_id)}", _text(post_id)
+    if (
+        len(segments) == 6
+        and segments[0] == "discord"
+        and segments[2] == "channel"
+        and segments[4] == "post"
+    ):
+        _, server_id, _, channel_id, _, post_id = segments
+        if not all(_text(value) for value in (server_id, channel_id, post_id)):
+            return None
+        return "discord", f"{_text(server_id)}/channel/{_text(channel_id)}", _text(post_id)
     if len(segments) != 5 or segments[3] != "post":
         return None
     service, kind, creator_id, _marker, post_id = segments
@@ -209,7 +235,13 @@ def _text(value: object) -> str:
     return str(value if value is not None else "").strip()
 
 
-def _canonical_url(service: str, creator_id: str, post_id: str) -> str:
+def _canonical_url(
+    service: str, creator_id: str, post_id: str, channel_id: str | None = None
+) -> str:
+    if service == "discord":
+        if channel_id:
+            return f"https://{SITE_HOST}/discord/server/{creator_id}/channel/{channel_id}/post/{post_id}"
+        return f"https://{SITE_HOST}/discord/server/{creator_id}/post/{post_id}"
     return f"https://{SITE_HOST}/{service}/user/{creator_id}/post/{post_id}"
 
 
@@ -312,9 +344,7 @@ def _match_from_discord_post(post: object, digest: str) -> dict[str, object] | N
         "provider": PawchiveSourceProvider.provider_name,
         "domain": SITE_HOST,
         "remote_id": post_id,
-        "canonical_url": (
-            f"https://{SITE_HOST}/discord/server/{server}/channel/{channel}/post/{post_id}"
-        ),
+        "canonical_url": _canonical_url("discord", server, post_id, channel),
         "direct_media_url": _media_url(entry) if entry else None,
     }
 

@@ -62,25 +62,31 @@ def run_duplicate_scan_job(
         last_progress = 5
         for index, item in enumerate(items):
             fingerprint = _hash_to_int(item["perceptual_hash"])
+            computed = False
             if fingerprint is None:
                 fingerprint = _fingerprint_for(settings, item["file_path"])
-                if fingerprint is not None:
-                    connection.execute(
-                        "INSERT INTO media_fingerprints (media_item_id, perceptual_hash) "
-                        "VALUES (?, ?) ON CONFLICT(media_item_id) DO UPDATE SET "
-                        "perceptual_hash=excluded.perceptual_hash, updated_at=CURRENT_TIMESTAMP",
-                        (item["id"], "%016x" % fingerprint),
-                    )
+                computed = fingerprint is not None
             if fingerprint is not None:
                 fingerprints.append((int(item["id"]), fingerprint))
             progress = 5 + int(45 * (index + 1) / max(len(items), 1))
+            dirty = False
+            if computed:
+                connection.execute(
+                    "INSERT INTO media_fingerprints (media_item_id, perceptual_hash) "
+                    "VALUES (?, ?) ON CONFLICT(media_item_id) DO UPDATE SET "
+                    "perceptual_hash=excluded.perceptual_hash, updated_at=CURRENT_TIMESTAMP",
+                    (item["id"], "%016x" % fingerprint),
+                )
+                dirty = True
             if progress > last_progress:
                 connection.execute(
                     "UPDATE background_jobs SET progress=? WHERE id=?",
                     (progress, job_id),
                 )
-                connection.commit()
                 last_progress = progress
+                dirty = True
+            if dirty:
+                connection.commit()
         found = _compare_fingerprints(connection, job_id, fingerprints, threshold)
         connection.commit()
         result = json.dumps({

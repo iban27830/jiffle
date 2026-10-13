@@ -45,18 +45,38 @@ def resolve_match(
     ).fetchone()
     if keep is None or remove is None:
         raise DuplicateFailure("duplicates.media_missing", "A matched media item is missing.")
-    source = _media_path(settings.media_path, remove["file_path"])
-    if source is None or not source.is_file():
-        raise DuplicateFailure("duplicates.file_missing", "The removable media file is missing.")
-    quarantine_root = settings.database_path.parent / "delete-quarantine"
-    quarantine_root.mkdir(parents=True, exist_ok=True)
-    quarantine = quarantine_root / f"duplicate-{match_id}-{source.name}"
-    _move_file(source, quarantine)
+    source: Path | None = None
+    quarantine: Path | None = None
+    if remove["file_path"] != keep["file_path"]:
+        source = _media_path(settings.media_path, remove["file_path"])
+        if source is None or not source.is_file():
+            raise DuplicateFailure("duplicates.file_missing", "The removable media file is missing.")
+        quarantine_root = settings.database_path.parent / "delete-quarantine"
+        quarantine_root.mkdir(parents=True, exist_ok=True)
+        quarantine = quarantine_root / f"duplicate-{match_id}-{source.name}"
+        _move_file(source, quarantine)
     try:
         if merge_metadata:
             _merge_metadata(connection, keep, remove)
+        refreshed_keep = connection.execute(
+            "SELECT * FROM media_items WHERE id=?", (keep_id,)
+        ).fetchone() or keep
+        kept_urls = {
+            url
+            for row in (keep, refreshed_keep)
+            for key in ("source_url", "file_source_url")
+            if key in row.keys() and (url := row[key])
+        }
+        kept_urls.update(
+            row[0]
+            for row in connection.execute(
+                "SELECT canonical_url FROM media_sources WHERE media_item_id=?",
+                (keep_id,),
+            ).fetchall()
+            if row[0]
+        )
         for source_url in (remove["source_url"], remove["file_source_url"] if "file_source_url" in remove.keys() else None):
-            if source_url:
+            if source_url and source_url not in kept_urls:
                 connection.execute(
                     "INSERT OR IGNORE INTO blocked_media_signatures (source_url, reason) VALUES (?, 'deleted')",
                     (source_url,),
@@ -70,6 +90,12 @@ def resolve_match(
             "resolved_at=CURRENT_TIMESTAMP WHERE id=?",
             (f"kept_{keep_side}" + ("_merged" if merge_metadata else ""), match_id),
         )
+        connection.execute(
+            "UPDATE duplicate_matches SET status='resolved', "
+            "resolved_at=CURRENT_TIMESTAMP "
+            "WHERE status='pending' AND (left_media_id=? OR right_media_id=?)",
+            (remove_id, remove_id),
+        )
         _history(connection, "duplicate.resolved", match_id, {
             "kept_media_id": keep_id, "removed_media_id": remove_id,
             "metadata_merged": merge_metadata,
@@ -77,14 +103,16 @@ def resolve_match(
         connection.commit()
     except Exception:
         connection.rollback()
-        try:
-            _move_file(quarantine, source)
-        except DuplicateFailure:
-            # Keep the original failure; a quarantined file can be recovered
-            # manually from the delete-quarantine directory.
-            pass
+        if quarantine is not None and source is not None:
+            try:
+                _move_file(quarantine, source)
+            except DuplicateFailure:
+                # Keep the original failure; a quarantined file can be recovered
+                # manually from the delete-quarantine directory.
+                pass
         raise
-    quarantine.unlink(missing_ok=True)
+    if quarantine is not None:
+        quarantine.unlink(missing_ok=True)
     return keep_id
 
 

@@ -101,6 +101,14 @@ class GelbooruSourceProvider:
             post_id = str(post["id"])
             direct_url = post.get("file_url")
             domain = "gelbooru.com"
+            raw_parent_id = post.get("parent_id")
+            parent_id = str(raw_parent_id) if raw_parent_id not in (None, "", 0, "0") else None
+            raw_characters = post.get("character") or post.get("tag_string_character") or ""
+            character_tags = (
+                list(str(raw_characters).split())
+                if isinstance(raw_characters, str)
+                else [str(value) for value in raw_characters]
+            )
             matches.append({
                 "provider": self.provider_name,
                 "domain": domain,
@@ -115,6 +123,8 @@ class GelbooruSourceProvider:
                     str(post.get("tags", "")).split(),
                     self.provider_name, domain, post.get("source"),
                 )),
+                "character_tags": character_tags,
+                "parent_id": parent_id,
                 "content_md5": _valid_md5(post.get("hash") or post.get("md5")),
                 "width": post.get("width"),
                 "height": post.get("height"),

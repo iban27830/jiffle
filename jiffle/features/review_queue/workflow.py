@@ -590,11 +590,16 @@ def _stage_reverse_candidates(
             metadata = json.loads(row["source_metadata_json"] or "{}")
         except (TypeError, ValueError):
             metadata = {}
-        existing.add((row["provider"], str(metadata.get("remote_id") or "")))
+        existing.add(
+            (
+                row["provider"],
+                str(metadata.get("remote_id") or metadata.get("canonical_url") or ""),
+            )
+        )
 
     stored: list[tuple[object, str, object]] = []
     for match in matches:
-        key = (match.provider, str(match.remote_id or ""))
+        key = (match.provider, str(match.remote_id or match.canonical_url or ""))
         if key in existing:
             continue
         # Only a real download from the matched post becomes a confirmable
@@ -633,10 +638,15 @@ def _stage_reverse_candidates(
         existing.add(key)
     if not stored:
         return 0
+    max_rank_row = connection.execute(
+        "SELECT MAX(rank) FROM import_source_candidates WHERE review_item_id=?",
+        (review_id,),
+    ).fetchone()
+    next_rank = int(max_rank_row[0]) + 1 if max_rank_row and max_rank_row[0] is not None else 0
     connection.execute(
         "UPDATE review_items SET reason='source_candidates' WHERE id=?", (review_id,)
     )
-    for rank, (match, name, inspection) in enumerate(stored):
+    for rank, (match, name, inspection) in enumerate(stored, start=next_rank):
         connection.execute(
             "INSERT INTO import_source_candidates "
             "(review_item_id, rank, match_method, confidence, provider, source_metadata_json, "

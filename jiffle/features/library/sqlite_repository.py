@@ -14,9 +14,24 @@ from jiffle.infrastructure.media_revisions import active_edit_operations
 class SqliteLibraryRepository:
     def __init__(self, connection: sqlite3.Connection):
         self.connection = connection
+        self._column_cache: dict[tuple[str, str], bool] = {}
+        self._table_cache: dict[str, bool] = {}
+
+    def _table_has_column(self, table: str, column: str) -> bool:
+        key = (table, column)
+        if key not in self._column_cache:
+            self._column_cache[key] = _table_has_column(self.connection, table, column)
+        return self._column_cache[key]
+
+    def _table_exists(self, table: str) -> bool:
+        if table not in self._table_cache:
+            self._table_cache[table] = _table_exists(self.connection, table)
+        return self._table_cache[table]
 
     def list_media(self, query: LibraryQuery) -> LibraryPage:
-        where_sql, parameters = _build_filter(query, self.connection)
+        where_sql, parameters = _build_filter(
+            query, self.connection, has_column=self._table_has_column
+        )
         total = self.connection.execute(
             f"SELECT COUNT(*) FROM media_items item {where_sql}", parameters
         ).fetchone()[0]
@@ -40,23 +55,25 @@ class SqliteLibraryRepository:
         author = row["author"]
         keys = set(row.keys())
         source_row = None
-        if _table_has_column(self.connection, "media_sources", "media_item_id"):
-            source_row = self.connection.execute(
-                "SELECT * FROM media_sources WHERE media_item_id = ? LIMIT 1",
-                (row["id"],),
-            ).fetchone()
-        if not author:
-            if source_row is not None and source_row["author"]:
-                author = source_row["author"]
-            else:
-                author_row = self.connection.execute(
-                    "SELECT author FROM media_sources "
-                    "WHERE media_item_id = ? AND author IS NOT NULL AND TRIM(author) <> '' "
+        if self._table_has_column("media_sources", "media_item_id"):
+            if self._table_has_column("media_sources", "author"):
+                source_row = self.connection.execute(
+                    "SELECT * FROM media_sources WHERE media_item_id = ? "
+                    "ORDER BY CASE WHEN author IS NOT NULL AND TRIM(author) <> '' THEN 0 ELSE 1 END "
                     "LIMIT 1",
                     (row["id"],),
-                ).fetchone() if _table_has_column(self.connection, "media_sources", "author") else None
-                author = author_row["author"] if author_row else None
-        has_tag_origin = _table_has_column(self.connection, "media_tags", "origin")
+                ).fetchone()
+            else:
+                source_row = self.connection.execute(
+                    "SELECT * FROM media_sources WHERE media_item_id = ? LIMIT 1",
+                    (row["id"],),
+                ).fetchone()
+        source_keys = set(source_row.keys()) if source_row is not None else set()
+        if not author and source_row is not None and "author" in source_keys:
+            source_author = source_row["author"]
+            if source_author and str(source_author).strip():
+                author = source_author
+        has_tag_origin = self._table_has_column("media_tags", "origin")
         tag_rows = self.connection.execute(
             "SELECT tag, origin FROM media_tags WHERE media_item_id = ? ORDER BY tag"
             if has_tag_origin
@@ -91,12 +108,12 @@ class SqliteLibraryRepository:
             )
         relatives: tuple[int, ...] = ()
         if source_row is not None:
-            remote_id = source_row["remote_id"] if "remote_id" in source_row.keys() else None
-            if parent_id is None and "parent_id" in source_row.keys():
+            remote_id = source_row["remote_id"] if "remote_id" in source_keys else None
+            if parent_id is None and "parent_id" in source_keys:
                 parent_id = source_row["parent_id"]
-            if not character_tags and "character_tags_json" in source_row.keys():
+            if not character_tags and "character_tags_json" in source_keys:
                 character_tags = _decode_tags(source_row["character_tags_json"])
-            if remote_id and "provider" in source_row.keys() and parent_id:
+            if remote_id and "provider" in source_keys and parent_id:
                 parent = self.connection.execute(
                     "SELECT item.id FROM media_items item "
                     "JOIN media_sources source ON source.media_item_id=item.id "
@@ -106,9 +123,9 @@ class SqliteLibraryRepository:
                 ).fetchone()
                 parent_media_id = int(parent[0]) if parent else None
             if parent_id:
-                canonical = source_row["canonical_url"] if "canonical_url" in source_row.keys() else None
+                canonical = source_row["canonical_url"] if "canonical_url" in source_keys else None
                 parent_url = _parent_url(canonical or row["source_url"] or "", parent_id) or None
-        if family_id is not None and _table_exists(self.connection, "media_families"):
+        if family_id is not None and self._table_exists("media_families"):
             relatives = tuple(
                 int(relative[0])
                 for relative in self.connection.execute(
@@ -117,21 +134,22 @@ class SqliteLibraryRepository:
                     (family_id, row["id"]),
                 ).fetchall()
             )
+        active_revision_id = row["active_revision_id"] if "active_revision_id" in keys else None
         return MediaItem(
             id=row["id"],
             file_path=row["file_path"],
             media_type=MediaType(row["media_type"]),
             source_url=row["source_url"],
-            file_source_url=row["file_source_url"] if "file_source_url" in row.keys() else None,
+            file_source_url=row["file_source_url"] if "file_source_url" in keys else None,
             author=author,
             domain=row["domain"],
             width=row["width"],
             height=row["height"],
             file_size=row["file_size"],
             content_hash=row["content_hash"],
-            active_revision_id=row["active_revision_id"] if "active_revision_id" in row.keys() else None,
+            active_revision_id=active_revision_id,
             edit_operations=active_edit_operations(self.connection, row["id"])
-            if "active_revision_id" in row.keys() else (),
+            if active_revision_id is not None else (),
             created_at=row["created_at"],
             tags=tags,
             manual_tags=manual_tags,
@@ -154,7 +172,9 @@ class SqliteLibraryRepository:
         )
 
 
-def _build_filter(query: LibraryQuery, connection) -> tuple[str, tuple[object, ...]]:
+def _build_filter(
+    query: LibraryQuery, connection, has_column=None
+) -> tuple[str, tuple[object, ...]]:
     clauses: list[str] = ["item.deleted_at IS NULL"]
     parameters: list[object] = []
     if query.media_id is not None:
@@ -162,23 +182,36 @@ def _build_filter(query: LibraryQuery, connection) -> tuple[str, tuple[object, .
         parameters.append(query.media_id)
     include_tags = query.tags or ((query.tag,) if query.tag else ())
     exclude_tags = query.excluded_tags or ((query.exclude_tag,) if query.exclude_tag else ())
-    aliases = {}
-    for row in connection.execute("SELECT canonical_tag, alias FROM tag_aliases").fetchall():
-        aliases.setdefault(row["canonical_tag"].lower(), set()).add(row["alias"].lower())
-    for canonical, values in list(aliases.items()):
-        values.add(canonical)
+    aliases: dict[str, set[str]] = {}
+    if include_tags or exclude_tags:
+        for row in connection.execute("SELECT canonical_tag, alias FROM tag_aliases").fetchall():
+            aliases.setdefault(row["canonical_tag"].lower(), set()).add(row["alias"].lower())
+        for canonical, values in list(aliases.items()):
+            values.add(canonical)
+
     def expanded(value):
         value = value.lower()
         for canonical, values in aliases.items():
-            if value in values: return tuple(values)
+            if value in values:
+                return tuple(values)
         return (value,)
+
     for tag_value in include_tags:
         values = expanded(tag_value)
-        clauses.append("EXISTS (SELECT 1 FROM media_tags tag WHERE tag.media_item_id = item.id AND tag.tag IN (" + ",".join("?" for _ in values) + "))")
+        clauses.append(
+            "EXISTS (SELECT 1 FROM media_tags tag WHERE tag.media_item_id = item.id AND tag.tag IN ("
+            + ",".join("?" for _ in values)
+            + "))"
+        )
         parameters.extend(values)
     for tag_value in exclude_tags:
-        clauses.append("NOT EXISTS (SELECT 1 FROM media_tags excluded_tag WHERE excluded_tag.media_item_id = item.id AND excluded_tag.tag = ?)")
-        parameters.append(tag_value)
+        values = expanded(tag_value)
+        clauses.append(
+            "NOT EXISTS (SELECT 1 FROM media_tags excluded_tag WHERE excluded_tag.media_item_id = item.id AND excluded_tag.tag IN ("
+            + ",".join("?" for _ in values)
+            + "))"
+        )
+        parameters.extend(values)
     if query.author:
         clauses.append(
             "(',' || LOWER(REPLACE(COALESCE(NULLIF(TRIM(item.author), ''), "
@@ -194,7 +227,12 @@ def _build_filter(query: LibraryQuery, connection) -> tuple[str, tuple[object, .
         clauses.append("item.media_type = ?")
         parameters.append(query.media_type.value)
     if query.parent_id:
-        if _table_has_column(connection, "media_items", "parent_id"):
+        check_column = (
+            has_column("media_items", "parent_id")
+            if has_column is not None
+            else _table_has_column(connection, "media_items", "parent_id")
+        )
+        if check_column:
             clauses.append("item.parent_id = ?")
             parameters.append(query.parent_id)
         else:

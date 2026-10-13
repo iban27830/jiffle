@@ -16,7 +16,7 @@ from jiffle.features.crop_editor.routes import crop_blueprint, resume_crop_scans
 from jiffle.features.background_editor.routes import background_blueprint, resume_background_scans
 from jiffle.features.trim_editor.routes import trim_blueprint
 from jiffle.features.trim_editor.workflow import resume_review_scans
-from jiffle.infrastructure.database.connection import close_database
+from jiffle.infrastructure.database.connection import close_database, get_database
 from jiffle.infrastructure.database.migrations import migrate_database
 
 
@@ -57,6 +57,24 @@ def create_app(
         resolved_settings.database_path.parent.mkdir(parents=True, exist_ok=True)
         with app.app_context():
             migrate_database()
+            connection = get_database()
+            connection.execute(
+                "UPDATE source_set_imports SET cancel_requested=1, updated_at=CURRENT_TIMESTAMP "
+                "WHERE job_id IN ("
+                "SELECT id FROM background_jobs "
+                "WHERE job_type='source_set_import' AND status IN ('pending', 'running')"
+                ")"
+            )
+            connection.execute(
+                "UPDATE background_jobs SET status='failed', error_code='jobs.interrupted', "
+                "error_message='The background job was interrupted by an application restart.', "
+                "finished_at=CURRENT_TIMESTAMP "
+                "WHERE job_type IN ("
+                "'import_resolve', 'local_import', 'url_import', 'source_set_import', "
+                "'review_reimport', 'duplicate_scan', 'implicit_tag_backfill'"
+                ") AND status IN ('pending', 'running')"
+            )
+            connection.commit()
         if not resolved_settings.run_jobs_inline:
             from jiffle.features.crop_editor.review import resume_pending_checks
             resume_pending_checks(resolved_settings.database_path, resolved_settings)
