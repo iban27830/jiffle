@@ -14,15 +14,15 @@ Open **Library** and enter a query. Examples:
 | `id:123` | One exact library item |
 | `parent:123` | Find a parent post in the library by its source post ID |
 
-Tag aliases apply to searches and collection rules. Select a displayed tag or author to adjust the query. Clicking an author keeps your existing search terms. Use the media-type filter to separate images and videos.
+Tag aliases apply to searches and collection rules. Tag suggestions appear as you type in the search bar (including `-tag` exclusions), and the clear button resets the query. Select a displayed tag or author to adjust the query. Clicking an author keeps your existing search terms. Use the media-type filter to separate images and videos; library cards also show **Video** and **GIF** badges.
 
 ## Inspect an item
 
-Select a thumbnail to open its details. On a wide screen, the results and details panel scroll independently.
+Select a thumbnail to open its details, and use the `←` and `→` arrow keys to move between items on the page. On a wide screen, the results and details panel scroll independently.
 
+- Click the preview image in the inspector to view it full size in the lightbox, or use the full-size button to open the file itself in a new tab.
 - **Source** identifies the post supplying metadata. **File source** appears separately when another provider supplied the actual file.
 - **Media ID** opens an exact-ID search.
-- The full-size button opens the file itself in a new tab.
 - **Open in Editor** chooses Crop/Background for a static image or Trim for a clip.
 - **Replace background** opens that tool directly for a static image.
 - **Refresh metadata** sends proposed changes to Review rather than applying them silently.
@@ -37,7 +37,7 @@ Type under **Add tag**. Suggestions appear after two characters. Select a sugges
 
 A parent marker can open the imported parent or search for its source ID. Character tags and parent details depend on the source metadata; use **Refresh metadata** for older items when needed.
 
-Open **Duplicates**, choose a similarity threshold, and select **Scan**. A lower threshold includes more approximate matches. When two images are variations worth keeping, use **Family** instead of deleting one. Related items then link to one another in Library.
+Open **Duplicates** (the sidebar badge shows the current unresolved pair count), choose a similarity threshold, and select **Scan**. Each side displays its resolution, file size, author, and **Higher resolution** / **Larger file** badges; click either thumbnail to inspect it full size. A lower threshold includes more approximate matches. When two images are variations worth keeping, use **Family** instead of deleting one. Related items then link to one another in Library.
 
 Video fragments are also related to their original. Their details identify **Part N of Media #X** and provide a route back to the source.
 

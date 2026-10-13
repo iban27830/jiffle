@@ -6,8 +6,8 @@
 
 Open **Import**, then do one of the following:
 
-- Drop an image or video, or use **Choose file**.
-- Paste an image from the clipboard.
+- Drop one or more images or videos, or use **Choose file** to select multiple files at once.
+- Paste (`Ctrl+V`) an image, video, or link anywhere on the Import screen.
 - Paste a post link or direct media URL and select **Resolve and import** or press **Enter**.
 - Paste a supported e621/e926 post-set URL to import its posts.
 
@@ -35,17 +35,17 @@ Reverse-image searches send a small preview to the configured search services; a
 
 1. Open **Review**. Use **All**, **Source found**, or **Needs source** to narrow the queue.
 2. Select **Open full size** on a card. Cards do not accept files with an accidental click.
-3. If candidates exist, compare the staged file with each candidate. Use arrows to switch and **Open source** to inspect the source page.
-4. Choose one action:
+3. If candidates exist, compare the staged file with each candidate. Use arrows to switch candidates, **Previous item** / **Next item** in the header to step through the Review queue, and **Open source** to inspect the source page.
+4. Choose one action (resolving an item automatically advances to the next card on the page):
 
    - **Use this source:** keep the displayed candidate and its metadata.
-   - **Add source URL:** provide a source yourself.
+   - **Add source URL:** open the inline source URL field in the lightbox to provide a link yourself.
    - **Accept without choosing a source:** keep your staged file.
-   - **Reject:** discard the pending group.
+   - **Reject:** discard the pending group directly from the lightbox or the card.
 
-A source selection can merge into an existing library item rather than creating a second copy. A likely duplicate may need a separate choice; read the comparison before accepting.
+A source selection can merge into an existing library item rather than creating a second copy. A likely duplicate may need a separate choice; read the comparison before accepting. In **Duplicates** (with the unresolved count shown in the sidebar), each pair shows resolution and file-size badges (**Higher resolution**, **Larger file**), and clicking a thumbnail opens it full size.
 
-**Run the source search again** (or **Search again** when candidates were already found) rechecks one card. Tick several cards and use **Recheck selected** to queue them. This is useful after adding credentials or when a source was temporarily unavailable. The log button shows the original import search and later rechecks, grouped by stage. **Select all on screen** only selects the current page.
+**Run the source search again** (or **Search again** when candidates were already found) rechecks one card. Tick several cards and use **Recheck selected** to queue them, or **Reject selected** to discard them in bulk. This is useful after adding credentials or when a source was temporarily unavailable. The log button shows the original import search and later rechecks, grouped by stage. **Select all on screen** only selects the current page.
 
 Metadata refreshes appear separately as **Metadata update** suggestions. Select **Apply metadata** to accept the new information; **Ignore** dismisses the suggestion without replacing the file.
 

@@ -17,7 +17,7 @@ Drafts preserve tool parameters in the current browser tab. Switching a tool or 
 ## Crop an image
 
 1. Open the image in **Library → Open in Editor**. The crop editor starts from the whole image, so you can crop any static image even when the detector finds no margins; a queued image with a suggestion opens with that proposal instead.
-2. Compare the source and preview. Adjust **Left**, **Top**, **Right**, and **Bottom**, and use **Zoom** for a closer look.
+2. Compare the source and preview. Drag the crop rectangle or its resize handles directly on the source image, or adjust **Left**, **Top**, **Right**, and **Bottom** numerically, and use **Zoom** for a closer look.
 3. Choose:
 
    | Action | Result |
@@ -26,6 +26,7 @@ Drafts preserve tool parameters in the current browser tab. Switching a tool or 
    | **No crop needed** | Explicitly approve this version without changing its pixels |
    | **Analyze** | Run the local detector and use its proposal when it finds one |
    | **Reset suggested crop** / **Reset to full image** | Reset the coordinate fields to the suggestion, or to the whole image in a manual session |
+   | **Reset to original** | Restore the original image version while keeping saved versions in history |
    | **Skip** | Leave a queued decision unresolved; it remains in Needs attention |
 
 The local detector looks for near-uniform or transparent margins, but cropping does not depend on it: a manual session starts from the whole image so you can always pick the area yourself. **Find crop candidates** scans the existing library on request. Repeating a scan can reuse previous results. **Reopen review** lets you reconsider an earlier decision.

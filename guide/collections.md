@@ -5,8 +5,8 @@
 ## Generate a selection
 
 1. Open **Collections → Create**.
-2. Enter a **Collection name**, **Count**, and **Search** query, such as `portrait blue_eyes -comic`.
-3. Select **Generate**. Inspect the resulting files and use **Replace** on individual items you do not want.
+2. Enter a **Collection name**, **Count**, and **Search** query, such as `portrait blue_eyes -comic` (tag autocomplete suggests matching tags and `-tag` exclusions as you type).
+3. Select **Generate**. Click any preview image to inspect it full size in the lightbox, and use **Replace** on individual items you do not want.
 4. When the complete selection is ready, select **Save collection**.
 
 The query uses the same tags, exclusions, author filters, and aliases as Library. Author-limit warnings highlight the files involved. If the rules or count change, generate a new selection before saving.
@@ -36,10 +36,12 @@ Saved collections keep their creation rules and preset name as useful context. C
 
 Open a collection from the list or card view. The detail view keeps its place when you visit another section and return.
 
+- Click a static image to view it full size in the lightbox (or Ctrl/middle-click to open it in a new tab).
+- Use **Export** or **ZIP** right from the collection header, or **Use rules** to open its query, preset, and count as a new draft in Collection Builder.
 - The library icon opens the exact member in Library.
 - The copy button copies one source link per item in gallery order, preferring **File source** when it differs.
 - **URL Jiggie** stores a destination link with the collection.
-- Deleting a collection does not delete its library files.
+- **Delete** removes the collection without deleting its library files.
 
 ## Export
 
