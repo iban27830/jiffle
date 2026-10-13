@@ -878,6 +878,42 @@ def migration_36(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE INDEX crop_review_status_idx ON crop_review_checks(status)")
 
 
+def migration_37(connection: sqlite3.Connection) -> None:
+    """Add indexes for frequent lookup and join columns."""
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS media_fingerprints_hash_idx "
+        "ON media_fingerprints(perceptual_hash)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS media_revisions_media_idx "
+        "ON media_revisions(media_item_id, id DESC)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS collection_items_media_idx "
+        "ON collection_items(media_item_id)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS media_items_active_revision_idx "
+        "ON media_items(active_revision_id)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS media_items_source_url_idx "
+        "ON media_items(source_url)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS media_items_file_source_url_idx "
+        "ON media_items(file_source_url)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS review_items_status_created_idx "
+        "ON review_items(status, created_at, id)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS duplicate_matches_right_idx "
+        "ON duplicate_matches(right_media_id)"
+    )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -915,6 +951,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (34, migration_34),
     (35, migration_35),
     (36, migration_36),
+    (37, migration_37),
 )
 
 

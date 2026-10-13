@@ -410,7 +410,7 @@ def run_export_job(
         raise
     finally:
         if staging and staging.exists():
-            shutil.rmtree(staging)
+            shutil.rmtree(staging, ignore_errors=True)
         connection.close()
 
 

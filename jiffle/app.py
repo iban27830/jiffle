@@ -71,8 +71,36 @@ def create_app(
                 "finished_at=CURRENT_TIMESTAMP "
                 "WHERE job_type IN ("
                 "'import_resolve', 'local_import', 'url_import', 'source_set_import', "
-                "'review_reimport', 'duplicate_scan', 'implicit_tag_backfill'"
+                "'review_reimport', 'duplicate_scan', 'implicit_tag_backfill', "
+                "'collection_export', 'media_trim', 'review_source_resolution', 'metadata_refresh'"
                 ") AND status IN ('pending', 'running')"
+            )
+            candidate_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(import_candidates)")
+            }
+            if {"error_code", "error_message"} <= candidate_columns:
+                connection.execute(
+                    "UPDATE import_candidates SET status='failed', error_code='jobs.interrupted', "
+                    "error_message='The import was interrupted by an application restart.' "
+                    "WHERE status='pending' AND job_id IN ("
+                    "SELECT id FROM background_jobs WHERE status='failed'"
+                    ")"
+                )
+            else:
+                connection.execute(
+                    "UPDATE import_candidates SET status='failed' "
+                    "WHERE status='pending' AND job_id IN ("
+                    "SELECT id FROM background_jobs WHERE status='failed'"
+                    ")"
+                )
+            connection.execute(
+                "UPDATE operation_history SET event_type='import.failed' "
+                "WHERE entity_type='background_job' AND event_type='import.pending' "
+                "AND entity_id IN (SELECT id FROM background_jobs WHERE status='failed')"
+            )
+            connection.execute(
+                "UPDATE export_runs SET status='failed', finished_at=CURRENT_TIMESTAMP "
+                "WHERE status IN ('pending', 'running')"
             )
             connection.commit()
         if not resolved_settings.run_jobs_inline:

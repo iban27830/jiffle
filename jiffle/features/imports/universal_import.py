@@ -21,6 +21,11 @@ import imagehash
 from PIL import Image
 
 from jiffle.configuration.settings import Settings
+from jiffle.features.duplicates.scan import (
+    DEFAULT_MATCH_THRESHOLD,
+    find_similar_media,
+    register_pending_match,
+)
 from jiffle.features.imports.history import create_import_history, update_import_history
 from jiffle.features.imports.local_import import (
     ImportFailure,
@@ -1623,6 +1628,10 @@ def _accept_downloaded(
                     "INSERT INTO media_fingerprints (media_item_id, perceptual_hash) VALUES (?, ?)",
                     (media_id, fingerprint),
                 )
+                for other_media_id, confidence in find_similar_media(
+                    connection, fingerprint, DEFAULT_MATCH_THRESHOLD, exclude_media_id=media_id
+                ):
+                    register_pending_match(connection, media_id, other_media_id, confidence)
             except (OSError, ValueError):
                 pass
         if metadata_source:

@@ -55,6 +55,22 @@ def resolve_match(
         quarantine_root.mkdir(parents=True, exist_ok=True)
         quarantine = quarantine_root / f"duplicate-{match_id}-{source.name}"
         _move_file(source, quarantine)
+    revisions = (
+        connection.execute(
+            "SELECT file_path FROM media_revisions WHERE media_item_id=?",
+            (remove_id,),
+        ).fetchall()
+        if _has_table(connection, "media_revisions")
+        else []
+    )
+    preview_rows = (
+        connection.execute(
+            "SELECT * FROM background_previews WHERE media_item_id=?",
+            (remove_id,),
+        ).fetchall()
+        if _has_table(connection, "background_previews")
+        else []
+    )
     try:
         if merge_metadata:
             _merge_metadata(connection, keep, remove)
@@ -81,6 +97,16 @@ def resolve_match(
                     "INSERT OR IGNORE INTO blocked_media_signatures (source_url, reason) VALUES (?, 'deleted')",
                     (source_url,),
                 )
+        if _has_table(connection, "collection_items"):
+            connection.execute(
+                "DELETE FROM collection_items WHERE media_item_id=?",
+                (remove_id,),
+            )
+        if _has_table(connection, "background_previews"):
+            connection.execute(
+                "DELETE FROM background_previews WHERE media_item_id=?",
+                (remove_id,),
+            )
         connection.execute(
             "UPDATE media_items SET deleted_at=CURRENT_TIMESTAMP, content_hash=NULL WHERE id=?",
             (remove_id,),
@@ -113,6 +139,43 @@ def resolve_match(
         raise
     if quarantine is not None:
         quarantine.unlink(missing_ok=True)
+    for revision in revisions:
+        revision_file = revision["file_path"]
+        if not revision_file or revision_file == keep["file_path"]:
+            continue
+        shared_item = connection.execute(
+            "SELECT 1 FROM media_items WHERE file_path=? AND id<>? AND deleted_at IS NULL LIMIT 1",
+            (revision_file, remove_id),
+        ).fetchone()
+        if shared_item is not None:
+            continue
+        if _has_table(connection, "media_revisions"):
+            shared_revision = connection.execute(
+                "SELECT 1 FROM media_revisions r JOIN media_items m ON m.id=r.media_item_id "
+                "WHERE r.file_path=? AND r.media_item_id<>? AND m.deleted_at IS NULL LIMIT 1",
+                (revision_file, remove_id),
+            ).fetchone()
+            if shared_revision is not None:
+                continue
+        revision_path = _media_path(settings.media_path, revision_file)
+        if revision_path is not None and revision_path.is_file():
+            revision_path.unlink(missing_ok=True)
+    preview_dir = settings.database_path.parent / "background-previews"
+    for preview_row in preview_rows:
+        preview_keys = set(preview_row.keys())
+        for column in ("file_path", "mask_path", "preview_path"):
+            if column not in preview_keys or not preview_row[column]:
+                continue
+            raw_preview_path = str(preview_row[column])
+            for candidate_root in (preview_dir, settings.media_path, settings.database_path.parent):
+                resolved_preview = _media_path(candidate_root, raw_preview_path)
+                if resolved_preview is not None and resolved_preview.is_file():
+                    resolved_preview.unlink(missing_ok=True)
+                    break
+    if settings.thumbnail_path.is_dir():
+        for pattern in (f"media-{remove_id}-*.jpg", f"media-{remove_id}.jpg"):
+            for thumbnail in settings.thumbnail_path.glob(pattern):
+                thumbnail.unlink(missing_ok=True)
     return keep_id
 
 
@@ -241,6 +304,15 @@ def _move_file(source: Path, destination: Path) -> None:
             "duplicates.file_move_failed",
             "The removable media file could not be moved.",
         ) from error
+
+
+def _has_table(connection: sqlite3.Connection, table: str) -> bool:
+    return (
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        is not None
+    )
 
 
 def _history(connection, event_type, match_id, details):

@@ -12,12 +12,16 @@ def connect_database(
 ) -> sqlite3.Connection:
     """Open a SQLite connection with the settings used by all app workers."""
     connection = sqlite3.connect(database_path, timeout=60)
-    if row_factory is not None:
-        connection.row_factory = row_factory
-    connection.execute("PRAGMA busy_timeout = 60000")
-    connection.execute("PRAGMA journal_mode = WAL")
-    connection.execute("PRAGMA synchronous = NORMAL")
-    connection.execute("PRAGMA foreign_keys = ON")
+    try:
+        if row_factory is not None:
+            connection.row_factory = row_factory
+        connection.execute("PRAGMA busy_timeout = 60000")
+        connection.execute("PRAGMA journal_mode = WAL")
+        connection.execute("PRAGMA synchronous = NORMAL")
+        connection.execute("PRAGMA foreign_keys = ON")
+    except Exception:
+        connection.close()
+        raise
     return connection
 
 

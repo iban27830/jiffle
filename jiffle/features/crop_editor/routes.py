@@ -160,7 +160,8 @@ def _run_scan(database_path,settings,job_id,parameters):
         signature=_scan_signature(parameters)
         total=connection.execute("SELECT COUNT(*) FROM media_items WHERE deleted_at IS NULL AND media_type='image'").fetchone()[0]
         rows=connection.execute(
-            "SELECT m.id,m.active_revision_id,m.width,m.height FROM media_items m "
+            "SELECT m.id,m.active_revision_id,m.width,m.height,COALESCE(rev.file_path,m.file_path) AS file_path FROM media_items m "
+            "LEFT JOIN media_revisions rev ON rev.id=m.active_revision_id "
             "LEFT JOIN crop_scan_results r ON r.revision_id=m.active_revision_id AND r.parameter_signature=? "
             "WHERE m.deleted_at IS NULL AND m.media_type='image' AND r.revision_id IS NULL ORDER BY m.id",
             (signature,),
@@ -175,7 +176,16 @@ def _run_scan(database_path,settings,job_id,parameters):
             if connection.execute("SELECT cancel_requested FROM crop_scan_jobs WHERE job_id=?",(job_id,)).fetchone()[0]:
                 scanned=completed+batch_index-1; result=json.dumps({"scanned":scanned,"candidates":candidates,"cancelled":True}); connection.execute("UPDATE background_jobs SET status='completed',progress=100,result_json=?,finished_at=CURRENT_TIMESTAMP WHERE id=?",(result,job_id)); connection.execute("UPDATE crop_scan_jobs SET scanned_count=?,candidate_count=? WHERE job_id=?",(scanned,candidates,job_id)); connection.commit(); return
             try:
-                if (row["width"] or 0) * (row["height"] or 0) > MAX_AUTO_PIXELS:
+                is_animated = False
+                path = media_path(settings.media_path, row["file_path"]) if row["file_path"] else None
+                if path is not None and path.is_file():
+                    try:
+                        from PIL import Image
+                        with Image.open(path) as opened:
+                            is_animated = bool(getattr(opened, "is_animated", False))
+                    except (OSError, ValueError):
+                        is_animated = False
+                if not is_animated and (row["width"] or 0) * (row["height"] or 0) > MAX_AUTO_PIXELS:
                     raise CropFailure(
                         "crop.auto_size_limit",
                         "This image exceeds the automatic local check limit (16 megapixels). "

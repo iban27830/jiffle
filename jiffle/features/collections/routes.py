@@ -40,24 +40,44 @@ def list_collections():
         (current_app.config["JIFFLE_SETTINGS"].max_items_per_author,),
     ).fetchall()
     connection = get_database()
-    items = []
-    for row in rows:
-        item = dict(row)
-        tags = connection.execute("SELECT tag, disposition FROM collection_tags WHERE collection_id=? ORDER BY disposition, tag", (row["id"],)).fetchall()
-        item["included_tags"] = [tag["tag"] for tag in tags if tag["disposition"] == "include"]
-        item["excluded_tags"] = [tag["tag"] for tag in tags if tag["disposition"] == "exclude"]
-        covers = connection.execute(
-            "SELECT item.id AS media_item_id, item.active_revision_id "
+    collection_ids = [int(row["id"]) for row in rows]
+    included_by_collection: dict[int, list[str]] = {}
+    excluded_by_collection: dict[int, list[str]] = {}
+    covers_by_collection: dict[int, list[str]] = {}
+    if collection_ids:
+        placeholders = ",".join("?" for _ in collection_ids)
+        for tag_row in connection.execute(
+            f"SELECT collection_id, tag, disposition FROM collection_tags "
+            f"WHERE collection_id IN ({placeholders}) "
+            f"ORDER BY collection_id, disposition, tag",
+            collection_ids,
+        ).fetchall():
+            cid = int(tag_row["collection_id"])
+            if tag_row["disposition"] == "include":
+                included_by_collection.setdefault(cid, []).append(tag_row["tag"])
+            elif tag_row["disposition"] == "exclude":
+                excluded_by_collection.setdefault(cid, []).append(tag_row["tag"])
+        for cover_row in connection.execute(
+            "SELECT collection_id, media_item_id, active_revision_id FROM ("
+            "SELECT member.collection_id, item.id AS media_item_id, item.active_revision_id, "
+            "ROW_NUMBER() OVER (PARTITION BY member.collection_id ORDER BY member.position) AS rn "
             "FROM collection_items member "
             "JOIN media_items item ON item.id=member.media_item_id "
-            "WHERE member.collection_id=? AND item.deleted_at IS NULL "
-            "ORDER BY member.position LIMIT 2",
-            (row["id"],),
-        ).fetchall()
-        item["cover_urls"] = [
-            f"/api/v1/media/{cover['media_item_id']}/thumbnail?revision={cover['active_revision_id'] or 0}"
-            for cover in covers
-        ]
+            f"WHERE member.collection_id IN ({placeholders}) AND item.deleted_at IS NULL"
+            ") WHERE rn <= 2 ORDER BY collection_id, rn",
+            collection_ids,
+        ).fetchall():
+            cid = int(cover_row["collection_id"])
+            covers_by_collection.setdefault(cid, []).append(
+                f"/api/v1/media/{cover_row['media_item_id']}/thumbnail?revision={cover_row['active_revision_id'] or 0}"
+            )
+    items = []
+    for row in rows:
+        cid = int(row["id"])
+        item = dict(row)
+        item["included_tags"] = included_by_collection.get(cid, [])
+        item["excluded_tags"] = excluded_by_collection.get(cid, [])
+        item["cover_urls"] = covers_by_collection.get(cid, [])
         items.append(item)
     return jsonify({"items": items})
 
@@ -198,7 +218,22 @@ def replace_collection_preview_item():
 def list_collection_presets():
     connection = get_database()
     rows = connection.execute("SELECT * FROM collection_presets ORDER BY name COLLATE NOCASE").fetchall()
-    return jsonify({"items": [_preset_json(connection, row) for row in rows]})
+    tags_by_preset: dict[int, list] = {}
+    if rows:
+        preset_ids = [int(row["id"]) for row in rows]
+        placeholders = ",".join("?" for _ in preset_ids)
+        for tag_row in connection.execute(
+            f"SELECT preset_id, tag, disposition FROM collection_preset_tags "
+            f"WHERE preset_id IN ({placeholders}) ORDER BY preset_id, disposition, tag",
+            preset_ids,
+        ).fetchall():
+            tags_by_preset.setdefault(int(tag_row["preset_id"]), []).append(tag_row)
+    return jsonify({
+        "items": [
+            _preset_json(connection, row, tags_by_preset.get(int(row["id"]), ()))
+            for row in rows
+        ]
+    })
 
 
 @collections_blueprint.post("/api/v1/collection-presets")
@@ -373,6 +408,7 @@ def download_export_archive(collection_id: int):
         iter_export_archive(staging, export_archive_prefix(collection["name"])),
         mimetype="application/zip",
     )
+    response.call_on_close(lambda: shutil.rmtree(staging, ignore_errors=True))
     response.headers["Content-Disposition"] = _archive_disposition(filename)
     response.headers["Cache-Control"] = "no-store"
     return response
@@ -435,22 +471,30 @@ def _collection_error(error):
 def _validate_composition(connection, media_ids, included_tags, excluded_tags, aliases=None):
     if len(media_ids) != len(set(media_ids)):
         raise CollectionFailure("collections.duplicate_item", "A collection cannot contain an item twice.")
+    if not media_ids:
+        return
     if aliases is None:
         aliases = build_tag_alias_map(connection)
     included_values = tuple(expand_tag_aliases(tag, aliases) for tag in included_tags)
     excluded_values = tuple(expand_tag_aliases(tag, aliases) for tag in excluded_tags)
+    placeholders = ",".join("?" for _ in media_ids)
+    found_ids = {
+        int(row[0])
+        for row in connection.execute(
+            f"SELECT id FROM media_items WHERE id IN ({placeholders}) AND deleted_at IS NULL",
+            media_ids,
+        ).fetchall()
+    }
+    tags_by_media_id: dict[int, set[str]] = {}
+    for row in connection.execute(
+        f"SELECT media_item_id, tag FROM media_tags WHERE media_item_id IN ({placeholders})",
+        media_ids,
+    ).fetchall():
+        tags_by_media_id.setdefault(int(row[0]), set()).add(str(row[1]).lower())
     for media_id in media_ids:
-        row = connection.execute(
-            "SELECT id FROM media_items WHERE id=? AND deleted_at IS NULL", (media_id,)
-        ).fetchone()
-        if row is None:
+        if int(media_id) not in found_ids:
             raise CollectionFailure("collections.media_not_found", "One or more media items were not found.")
-        tags = {
-            str(value[0]).lower()
-            for value in connection.execute(
-                "SELECT tag FROM media_tags WHERE media_item_id=?", (media_id,)
-            )
-        }
+        tags = tags_by_media_id.get(int(media_id), set())
         if any(not values.intersection(tags) for values in included_values) or any(
             values.intersection(tags) for values in excluded_values
         ):
@@ -459,11 +503,12 @@ def _validate_composition(connection, media_ids, included_tags, excluded_tags, a
             )
 
 
-def _preset_json(connection, row):
-    tags = connection.execute(
-        "SELECT tag, disposition FROM collection_preset_tags WHERE preset_id=? "
-        "ORDER BY disposition, tag", (row["id"],)
-    ).fetchall()
+def _preset_json(connection, row, tags=None):
+    if tags is None:
+        tags = connection.execute(
+            "SELECT tag, disposition FROM collection_preset_tags WHERE preset_id=? "
+            "ORDER BY disposition, tag", (row["id"],)
+        ).fetchall()
     return {
         "id": row["id"], "name": row["name"],
         "requested_count": row["requested_count"],
@@ -544,22 +589,47 @@ def validate_collection_preview():
     connection = get_database()
     settings = current_app.config["JIFFLE_SETTINGS"]
     aliases = build_tag_alias_map(connection) if ids else {}
-    items, issues = [], []
-    for media_id in ids:
-        row = connection.execute(
+    included_values = tuple(expand_tag_aliases(tag, aliases) for tag in included)
+    excluded_values = tuple(expand_tag_aliases(tag, aliases) for tag in excluded)
+    rows_by_id = {}
+    tags_by_media_id: dict[int, set[str]] = {}
+    crop_blocked_ids: set[int] = set()
+    if ids:
+        unique_ids = list(dict.fromkeys(ids))
+        placeholders = ",".join("?" for _ in unique_ids)
+        for row in connection.execute(
             "SELECT m.*, (SELECT COUNT(*) FROM collection_items c WHERE c.media_item_id=m.id) usage_count, "
             "(SELECT MAX(added_at) FROM collection_items c WHERE c.media_item_id=m.id) last_used_at "
-            "FROM media_items m WHERE m.id=? AND m.deleted_at IS NULL", (media_id,)
-        ).fetchone()
+            f"FROM media_items m WHERE m.id IN ({placeholders}) AND m.deleted_at IS NULL",
+            unique_ids,
+        ).fetchall():
+            rows_by_id[int(row["id"])] = row
+        for tag_row in connection.execute(
+            f"SELECT media_item_id, tag FROM media_tags WHERE media_item_id IN ({placeholders})",
+            unique_ids,
+        ).fetchall():
+            tags_by_media_id.setdefault(int(tag_row[0]), set()).add(str(tag_row[1]).lower())
+        try:
+            ensure_crop_eligible(connection, settings, unique_ids)
+        except CollectionFailure as error:
+            crop_blocked_ids = {int(value) for value in error.details.get("media_ids", ())}
+    items, issues = [], []
+    for media_id in ids:
+        row = rows_by_id.get(media_id)
         reason = None
         if row is None:
             reason = "This file is no longer in the library."
         else:
-            try:
-                _validate_composition(connection, [media_id], included, excluded, aliases=aliases)
-                ensure_crop_eligible(connection, settings, [media_id])
-            except CollectionFailure as error:
-                reason = error.message
+            tags = tags_by_media_id.get(media_id, set())
+            if any(not values.intersection(tags) for values in included_values) or any(
+                values.intersection(tags) for values in excluded_values
+            ):
+                reason = "One or more items no longer match the collection tags."
+            elif media_id in crop_blocked_ids:
+                reason = (
+                    f"Crop review required for media #{media_id}. "
+                    "Apply a crop or confirm No crop needed in Editor."
+                )
             if settings.trim_block_unreviewed_export and row["trim_review_status"] == "pending" and row["derived_from_media_id"] is None:
                 reason = "This clip still needs trim review."
         if reason:

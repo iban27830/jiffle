@@ -71,6 +71,7 @@ def list_review_items():
     counts = {row["reason"]: row["count"] for row in connection.execute(
         "SELECT reason, COUNT(*) AS count FROM review_items WHERE status='pending' GROUP BY reason"
     ).fetchall()}
+    pending_reviews = sum(int(count) for count in counts.values())
     # Paginate the combined queue so Review items and metadata suggestions share
     # one scrollable list instead of paging each table independently.
     page = connection.execute(
@@ -82,15 +83,27 @@ def list_review_items():
     candidate_ids = [
         int(entry["item_id"]) for entry in page if entry["kind"] == "candidate"
     ]
+    metadata_ids = [
+        int(entry["item_id"]) for entry in page if entry["kind"] != "candidate"
+    ]
+    review_rows = _review_rows_by_id(candidate_ids)
+    candidates_map = _source_candidates_by_review_ids(candidate_ids)
+    metadata_rows = _metadata_rows_by_id(metadata_ids)
     search_summaries = _review_search_summaries(candidate_ids)
     for entry in page:
         if entry["kind"] == "candidate":
             review_id = int(entry["item_id"])
-            row = _review_row(review_id)
+            row = review_rows.get(review_id)
             if row is not None:
-                items.append(_serialize(row, search_summaries.get(review_id)))
+                items.append(
+                    _serialize(
+                        row,
+                        search_summaries.get(review_id),
+                        candidates_map.get(review_id, []),
+                    )
+                )
         else:
-            row = _metadata_row(entry["item_id"])
+            row = metadata_rows.get(int(entry["item_id"]))
             if row is not None:
                 items.append(_serialize_metadata(row))
     metadata_count = connection.execute(
@@ -98,9 +111,6 @@ def list_review_items():
     ).fetchone()[0]
     if metadata_count:
         counts["metadata_update"] = int(metadata_count)
-    pending_reviews = connection.execute(
-        "SELECT COUNT(*) FROM review_items WHERE status='pending'"
-    ).fetchone()[0]
     with_candidates = connection.execute(
         "SELECT COUNT(*) FROM review_items review WHERE review.status='pending' AND EXISTS ("
         "SELECT 1 FROM import_source_candidates candidate "
@@ -378,38 +388,67 @@ def reject_metadata(suggestion_id: int):
 
 
 def _review_row(review_id):
-    return get_database().execute(
+    return _review_rows_by_id([review_id]).get(int(review_id))
+
+
+def _review_rows_by_id(review_ids):
+    unique_ids = [int(value) for value in dict.fromkeys(review_ids)]
+    if not unique_ids:
+        return {}
+    placeholders = ",".join("?" for _ in unique_ids)
+    rows = get_database().execute(
         "SELECT review.id, review.reason, review.status, review.created_at, "
         "candidate.original_name, candidate.stored_path, candidate.media_type, "
         "candidate.content_hash, candidate.width, candidate.height, candidate.file_size "
         "FROM review_items review JOIN import_candidates candidate "
-        "ON candidate.id=review.import_candidate_id WHERE review.id=?", (review_id,)
-    ).fetchone()
+        f"ON candidate.id=review.import_candidate_id WHERE review.id IN ({placeholders})",
+        unique_ids,
+    ).fetchall()
+    return {int(row["id"]): row for row in rows}
 
 
 def _metadata_row(suggestion_id):
-    return get_database().execute(
+    return _metadata_rows_by_id([suggestion_id]).get(int(suggestion_id))
+
+
+def _metadata_rows_by_id(suggestion_ids):
+    unique_ids = [int(value) for value in dict.fromkeys(suggestion_ids)]
+    if not unique_ids:
+        return {}
+    placeholders = ",".join("?" for _ in unique_ids)
+    rows = get_database().execute(
         "SELECT suggestion.id, suggestion.media_item_id, suggestion.provider, suggestion.created_at, "
         "suggestion.source_metadata_json, media.file_path, media.media_type, media.width, media.height, media.file_size "
         "FROM metadata_suggestions suggestion JOIN media_items media ON media.id=suggestion.media_item_id "
-        "WHERE suggestion.status='pending' AND suggestion.id=?", (suggestion_id,)
-    ).fetchone()
+        f"WHERE suggestion.status='pending' AND suggestion.id IN ({placeholders})",
+        unique_ids,
+    ).fetchall()
+    return {int(row["id"]): row for row in rows}
 
 
 def _source_candidates(review_id):
+    return _source_candidates_by_review_ids([review_id]).get(int(review_id), [])
+
+
+def _source_candidates_by_review_ids(review_ids):
+    unique_ids = [int(value) for value in dict.fromkeys(review_ids)]
+    if not unique_ids:
+        return {}
+    placeholders = ",".join("?" for _ in unique_ids)
     rows = get_database().execute(
-        "SELECT id, rank, match_method, confidence, provider, source_metadata_json, stored_path, "
+        "SELECT id, review_item_id, rank, match_method, confidence, provider, source_metadata_json, stored_path, "
         "media_type, content_hash, width, height, file_size, status FROM import_source_candidates "
-        "WHERE review_item_id=? ORDER BY rank, id", (review_id,)
+        f"WHERE review_item_id IN ({placeholders}) ORDER BY review_item_id, rank, id",
+        unique_ids,
     ).fetchall()
-    import json
-    items = []
+    items_by_review = {review_id: [] for review_id in unique_ids}
     for row in rows:
+        review_id = int(row["review_item_id"])
         try:
             metadata = json.loads(row["source_metadata_json"] or "{}")
         except (TypeError, ValueError):
             metadata = {}
-        items.append({
+        items_by_review.setdefault(review_id, []).append({
             "id": row["id"], "rank": row["rank"], "match_method": row["match_method"],
             "confidence": row["confidence"], "provider": row["provider"],
             "status": row["status"], "source_metadata": metadata,
@@ -418,7 +457,7 @@ def _source_candidates(review_id):
             "thumbnail_url": f"/api/v1/review-items/{review_id}/source-candidates/{row['id']}/thumbnail",
             "content_url": f"/api/v1/review-items/{review_id}/source-candidates/{row['id']}/content",
         })
-    return items
+    return items_by_review
 
 
 def _review_search_summaries(review_ids):
@@ -505,7 +544,7 @@ def _import_search_attempts(review_ids):
 
 
 def _import_search_attempt(review_id):
-    """Describe the source search the import itself ran for a pending card.
+    """Describe the source search the import itself ran for a review card.
 
     A review card is created at the end of an import resolution, so its first
     provider search is stored with the import job instead of in
@@ -517,7 +556,7 @@ def _import_search_attempt(review_id):
         "FROM review_items review "
         "JOIN import_candidates candidate ON candidate.id=review.import_candidate_id "
         "JOIN background_jobs job ON job.id=candidate.job_id "
-        "WHERE review.id=? AND review.status='pending'",
+        "WHERE review.id=?",
         (review_id,),
     ).fetchone()
     if row is None:
@@ -629,7 +668,7 @@ def _review_path(row) -> Path | None:
     return candidate if candidate.is_relative_to(root) else None
 
 
-def _serialize(row, search=None):
+def _serialize(row, search=None, source_candidates=None):
     review_id = row["id"]
     return {
         "id": review_id, "kind": "candidate",
@@ -639,7 +678,11 @@ def _serialize(row, search=None):
         "file_size": row["file_size"], "created_at": row["created_at"],
         "content_url": f"/api/v1/review-items/{review_id}/content",
         "thumbnail_url": f"/api/v1/review-items/{review_id}/thumbnail",
-        "source_candidates": _source_candidates(review_id),
+        "source_candidates": (
+            _source_candidates(review_id)
+            if source_candidates is None
+            else source_candidates
+        ),
         "search": search or {"count": 0},
     }
 

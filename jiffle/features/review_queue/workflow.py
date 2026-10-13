@@ -1,5 +1,6 @@
 import json
 import os
+from collections.abc import Sequence
 from pathlib import Path
 import shutil
 import sqlite3
@@ -296,11 +297,14 @@ def reject_review_item(
             os.replace(rejecting, staged)
         raise
     rejecting.unlink(missing_ok=True)
+    candidate_ids = []
     for candidate in connection.execute(
-        "SELECT stored_path FROM import_source_candidates WHERE review_item_id=?", (review_id,)
+        "SELECT id, stored_path FROM import_source_candidates WHERE review_item_id=?", (review_id,)
     ).fetchall():
-        if candidate[0]:
-            _staged_path(settings, candidate[0]).unlink(missing_ok=True)
+        candidate_ids.append(int(candidate["id"]))
+        if candidate["stored_path"]:
+            _staged_path(settings, candidate["stored_path"]).unlink(missing_ok=True)
+    _remove_review_thumbnails(settings, (review_id,), candidate_ids)
 
 
 def create_manual_source_job(
@@ -704,22 +708,45 @@ def _candidate_source(raw_metadata: str | None) -> SourceMedia | None:
 
 def _remove_review_staging(connection, settings: Settings, review_id: int, keep: int | None = None, primary_path: str | None = None) -> None:
     rows = connection.execute(
-        "SELECT stored_path FROM import_source_candidates WHERE review_item_id=? AND (? IS NULL OR id<>?)",
+        "SELECT id, stored_path FROM import_source_candidates WHERE review_item_id=? AND (? IS NULL OR id<>?)",
         (review_id, keep, keep),
     ).fetchall()
     for row in rows:
-        if row[0]:
-            _staged_path(settings, row[0]).unlink(missing_ok=True)
+        if row["stored_path"]:
+            _staged_path(settings, row["stored_path"]).unlink(missing_ok=True)
     if primary_path:
         _staged_path(settings, primary_path).unlink(missing_ok=True)
+    all_candidate_ids = [
+        int(row[0])
+        for row in connection.execute(
+            "SELECT id FROM import_source_candidates WHERE review_item_id=?", (review_id,)
+        ).fetchall()
+    ]
+    _remove_review_thumbnails(settings, (review_id,), all_candidate_ids)
 
 
 def _cleanup_source_candidates(connection, settings: Settings, review_id: int) -> None:
+    candidate_ids = []
     for row in connection.execute(
-        "SELECT stored_path FROM import_source_candidates WHERE review_item_id=?", (review_id,)
+        "SELECT id, stored_path FROM import_source_candidates WHERE review_item_id=?", (review_id,)
     ).fetchall():
-        if row[0]:
-            _staged_path(settings, row[0]).unlink(missing_ok=True)
+        candidate_ids.append(int(row["id"]))
+        if row["stored_path"]:
+            _staged_path(settings, row["stored_path"]).unlink(missing_ok=True)
+    _remove_review_thumbnails(settings, (review_id,), candidate_ids)
+
+
+def _remove_review_thumbnails(
+    settings: Settings,
+    review_ids: Sequence[int],
+    candidate_ids: Sequence[int] = (),
+) -> None:
+    thumbnail_dir = settings.thumbnail_path
+    if not thumbnail_dir.is_dir():
+        return
+    for item_id in (*review_ids, *candidate_ids):
+        for thumb in thumbnail_dir.glob(f"media--{int(item_id)}-*.jpg"):
+            thumb.unlink(missing_ok=True)
 
 
 def _staged_path(settings: Settings, stored_path: str) -> Path:

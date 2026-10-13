@@ -291,10 +291,6 @@ def _create_child_job(connection, parent_id: int, submitted_url: str) -> int:
     )
     child_id = int(cursor.lastrowid)
     connection.execute(
-        "INSERT INTO url_import_candidates (job_id, submitted_url, status) VALUES (?, ?, 'pending')",
-        (child_id, submitted_url),
-    )
-    connection.execute(
         "INSERT INTO import_candidates (job_id, source_path, original_name, status) VALUES (?, ?, ?, 'pending')",
         (child_id, submitted_url, Path(submitted_url).name or "import"),
     )

@@ -26,8 +26,13 @@ def media_path(root, stored):
 
 def analyze_image(connection, settings, media_id, method="local", min_area=10, padding=.02, tolerance=18, *, commit=True):
     from .review import record_check, signature
-    row = connection.execute("SELECT active_revision_id FROM media_items WHERE id=? AND deleted_at IS NULL", (media_id,)).fetchone()
-    revision_id = row[0] if row else None
+    revision = connection.execute(
+        "SELECT m.active_revision_id AS id, r.operation FROM media_items m "
+        "LEFT JOIN media_revisions r ON r.id=m.active_revision_id "
+        "WHERE m.id=? AND m.deleted_at IS NULL",
+        (media_id,),
+    ).fetchone()
+    revision_id = revision["id"] if revision else None
     parameters = {"algorithm_version": 1, "min_area": float(min_area), "padding": float(padding), "tolerance": int(tolerance)}
     try:
         result = _analyze_image(connection, settings, media_id, method, min_area, padding, tolerance)
@@ -39,7 +44,15 @@ def analyze_image(connection, settings, media_id, method="local", min_area=10, p
                 connection.commit()
         raise
     if revision_id:
-        record_check(connection, revision_id, "needs_crop" if result is not None else "passed", signature(parameters))
+        check_status = "needs_crop" if result is not None else "passed"
+        if check_status == "needs_crop" and revision["operation"] is not None and revision["operation"] != "original":
+            existing_check = connection.execute(
+                "SELECT status FROM crop_review_checks WHERE revision_id=?",
+                (revision_id,),
+            ).fetchone()
+            if existing_check is not None and existing_check["status"] == "passed":
+                check_status = "passed"
+        record_check(connection, revision_id, check_status, signature(parameters))
         connection.execute("INSERT OR REPLACE INTO crop_scan_results (revision_id,parameter_signature,candidate_found) VALUES (?,?,?)",
                            (revision_id, signature(parameters), int(result is not None)))
         if result is None:
@@ -115,15 +128,65 @@ def _detect_box(image, tolerance):
 
 
 def _verify_full_resolution(image, box, tolerance):
-    w,h=image.size; refs=(image.getpixel((0,0)),image.getpixel((w-1,0)),image.getpixel((0,h-1)),image.getpixel((w-1,h-1)))
-    rgb=image.convert("RGB"); masks=[]
-    for ref in refs:
-        difference=ImageChops.difference(rgb,Image.new("RGB",image.size,ref[:3])); channels=difference.split(); maximum=ImageChops.lighter(channels[0],ImageChops.lighter(channels[1],channels[2])); masks.append(maximum.point(lambda value:255 if value>tolerance else 0))
-    detail=masks[0]
-    for mask in masks[1:]: detail=ImageChops.darker(detail,mask)
-    visible=image.getchannel("A").point(lambda value:255 if value>=12 else 0); detail=ImageChops.darker(detail,visible); bounds=detail.getbbox()
-    if not bounds:return box
-    left,top,right,bottom=box; return min(left,bounds[0]),min(top,bounds[1]),max(right,bounds[2]),max(bottom,bounds[3])
+    w, h = image.size
+    refs = (
+        image.getpixel((0, 0)),
+        image.getpixel((w - 1, 0)),
+        image.getpixel((0, h - 1)),
+        image.getpixel((w - 1, h - 1)),
+    )
+    rgb = image.convert("RGB")
+    try:
+        r_ch, g_ch, b_ch = rgb.split()
+    finally:
+        rgb.close()
+    detail = None
+    try:
+        for ref in refs:
+            r_mask = r_ch.point(lambda value, ref_r=ref[0]: 255 if abs(value - ref_r) > tolerance else 0)
+            g_mask = g_ch.point(lambda value, ref_g=ref[1]: 255 if abs(value - ref_g) > tolerance else 0)
+            b_mask = b_ch.point(lambda value, ref_b=ref[2]: 255 if abs(value - ref_b) > tolerance else 0)
+            try:
+                rg_mask = ImageChops.lighter(r_mask, g_mask)
+                try:
+                    corner_mask = ImageChops.lighter(rg_mask, b_mask)
+                finally:
+                    rg_mask.close()
+            finally:
+                r_mask.close()
+                g_mask.close()
+                b_mask.close()
+            if detail is None:
+                detail = corner_mask
+            else:
+                try:
+                    next_detail = ImageChops.darker(detail, corner_mask)
+                finally:
+                    detail.close()
+                    corner_mask.close()
+                detail = next_detail
+        alpha = image.getchannel("A")
+        try:
+            visible = alpha.point(lambda value: 255 if value >= 12 else 0)
+        finally:
+            alpha.close()
+        try:
+            masked_detail = ImageChops.darker(detail, visible)
+        finally:
+            visible.close()
+            detail.close()
+        detail = masked_detail
+        bounds = detail.getbbox()
+    finally:
+        r_ch.close()
+        g_ch.close()
+        b_ch.close()
+        if detail is not None:
+            detail.close()
+    if not bounds:
+        return box
+    left, top, right, bottom = box
+    return min(left, bounds[0]), min(top, bounds[1]), max(right, bounds[2]), max(bottom, bounds[3])
 
 
 def create_manual_analysis(connection, settings, media_id):
