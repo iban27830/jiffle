@@ -269,4 +269,10 @@ def editor_counts():
         "WHERE m.deleted_at IS NULL AND c.candidate_found=1 AND c.parameter_signature=?", (detector_signature(parameters),)
     ).fetchone()[0]
     trim = connection.execute("SELECT COUNT(*) FROM media_items WHERE deleted_at IS NULL AND derived_from_media_id IS NULL AND trim_review_status='pending'").fetchone()[0]
-    return jsonify({"crop": attention_count(connection), "background": int(background), "trim": int(trim)})
+    duplicates = connection.execute(
+        "SELECT COUNT(*) FROM duplicate_matches dm "
+        "JOIN media_items left_item ON left_item.id=dm.left_media_id "
+        "JOIN media_items right_item ON right_item.id=dm.right_media_id "
+        "WHERE dm.status='pending' AND left_item.deleted_at IS NULL AND right_item.deleted_at IS NULL"
+    ).fetchone()[0]
+    return jsonify({"crop": attention_count(connection), "background": int(background), "trim": int(trim), "duplicates": int(duplicates)})

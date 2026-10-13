@@ -39,8 +39,12 @@ def list_duplicate_matches():
     rows = get_database().execute(
         "SELECT dm.*, left_item.file_path AS left_path, left_item.width AS left_width, "
         "left_item.height AS left_height, left_item.file_size AS left_size, "
+        "left_item.media_type AS left_type, left_item.author AS left_author, "
+        "left_item.source_url AS left_source_url, "
         "right_item.file_path AS right_path, right_item.width AS right_width, "
-        "right_item.height AS right_height, right_item.file_size AS right_size "
+        "right_item.height AS right_height, right_item.file_size AS right_size, "
+        "right_item.media_type AS right_type, right_item.author AS right_author, "
+        "right_item.source_url AS right_source_url "
         "FROM duplicate_matches dm "
         "JOIN media_items left_item ON left_item.id=dm.left_media_id "
         "JOIN media_items right_item ON right_item.id=dm.right_media_id "
@@ -102,8 +106,10 @@ def _serialize(row):
 def _media_summary(row, side):
     media_id = row[f"{side}_media_id"]
     return {
-        "id": media_id, "width": row[f"{side}_width"],
+        "id": media_id, "type": row[f"{side}_type"],
+        "width": row[f"{side}_width"],
         "height": row[f"{side}_height"], "file_size": row[f"{side}_size"],
+        "author": row[f"{side}_author"], "source_url": row[f"{side}_source_url"],
         "content_url": f"/api/v1/media/{media_id}/content",
         "thumbnail_url": f"/api/v1/media/{media_id}/thumbnail",
     }

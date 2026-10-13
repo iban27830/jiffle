@@ -7,6 +7,8 @@ import {drawCompositionPreview, drawForegroundPreview} from './background_previe
 import {formatDateTime, formatDuration} from './time.js';
 import {segmentsPayload, validateSegment, describeSegment, segmentDurationMs, parseTimecode, formatTimecode} from './trim.js';
 import {normalizeTagInput, suggestionQuery} from './tag_input.js';
+import {searchTokenSuggestionQuery, applySearchTokenSuggestion} from './tag_input.js';
+import {clampCropBox, dragCropBox} from './crop_box.js';
 
 const workspace = document.querySelector('#workspace');
 const title = document.querySelector('#viewTitle');
@@ -38,6 +40,7 @@ let monitoredSetJob = null;
 let reloadBackgroundCandidates = null;
 let closeActiveLightbox = null;
 let cleanupEditorModalKey = () => {};
+let cleanupImportPaste = () => {};
 
 const UI_STATE_KEY = 'jiffle-session-state-v1';
 let uiState = (() => { try { const parsed = JSON.parse(sessionStorage.getItem(UI_STATE_KEY) || '{}'); return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}; } catch { return {}; } })();
@@ -543,6 +546,60 @@ function attachTagInput(input, suggest, mediaId) {
   input.onblur = () => setTimeout(close, 120);
 }
 
+function attachSearchAutocomplete(input, suggest, onPick) {
+  if (!input || !suggest) return;
+  let items = [];
+  let active = -1;
+  let timer = null;
+  const close = () => { clearTimeout(timer); suggest.hidden = true; suggest.innerHTML = ''; items = []; active = -1; };
+  const pick = tag => {
+    close();
+    input.value = applySearchTokenSuggestion(input.value, tag);
+    input.focus();
+    onPick?.(tag);
+  };
+  const render = () => {
+    if (!items.length) { close(); return; }
+    const {negated} = searchTokenSuggestionQuery(input.value);
+    suggest.innerHTML = items.map((item, index) => `<button type="button" class="tag-suggest-item${index === active ? ' active' : ''}" data-tag="${esc(item.tag)}"><span>${negated ? '-' : ''}${esc(item.tag)}</span><small>${item.count}</small></button>`).join('');
+    suggest.hidden = false;
+    suggest.querySelectorAll('.tag-suggest-item').forEach((node, index) => {
+      node.onmousedown = event => { event.preventDefault(); pick(items[index].tag); };
+    });
+  };
+  const request = async prefix => {
+    const token = ++tagSuggestToken;
+    try {
+      const data = await api(`/api/v1/tags?q=${encodeURIComponent(prefix)}&limit=20`);
+      if (token !== tagSuggestToken) return;
+      items = data.items || [];
+      active = -1;
+      render();
+    } catch { close(); }
+  };
+  input.addEventListener('input', () => {
+    const {prefix} = searchTokenSuggestionQuery(input.value);
+    clearTimeout(timer);
+    if (!prefix) { close(); return; }
+    timer = setTimeout(() => request(prefix), 150);
+  });
+  input.addEventListener('keydown', event => {
+    if (event.key === 'ArrowDown' && items.length) { event.preventDefault(); active = (active + 1) % items.length; render(); }
+    else if (event.key === 'ArrowUp' && items.length) { event.preventDefault(); active = (active - 1 + items.length) % items.length; render(); }
+    else if (event.key === 'Escape' && !suggest.hidden) { event.preventDefault(); close(); }
+    else if (event.key === 'Enter') {
+      if (active >= 0 && items[active]) {
+        event.preventDefault();
+        event.stopPropagation();
+        pick(items[active].tag);
+      } else {
+        close();
+      }
+    }
+  });
+  input.addEventListener('blur', () => setTimeout(close, 120));
+}
+
 async function runJob(start, onCreated) {
   const created = await start();
   onCreated?.(created);
@@ -654,7 +711,7 @@ async function showLibrary() {
   setHeader('Library', '', button('Import', 'upload', 'primary'));
   actions.querySelector('button').onclick = () => navigate('import');
   workspace.innerHTML = `<div class="library-layout"><div class="library-main">
-    <div class="toolbar"><input id="search" class="control search" placeholder="Tag, author, domain, source, or id:123"><select id="mediaType" class="control toolbar-select"><option value="">All types</option><option value="image">Images</option><option value="video">Videos</option></select><label class="toolbar-count" title="Items per page"><span>Per page</span><select id="pageSize" class="control">${[20,40,60,100].map(size => `<option value="${size}" ${size === prefs.pageSize ? 'selected' : ''}>${size}</option>`).join('')}</select></label><button id="searchBtn" class="icon-btn" title="Search"><i data-lucide="search"></i></button><div id="activeFilters" class="active-filters"></div></div>
+    <div class="toolbar"><div class="search-wrap"><input id="search" class="control search" placeholder="Tag, author, domain, source, or id:123" autocomplete="off" spellcheck="false"><button id="clearSearch" type="button" class="icon-btn" title="Clear search" ${librarySearch ? '' : 'hidden'}><i data-lucide="x"></i></button><div id="librarySearchSuggest" class="tag-suggest" hidden></div></div><select id="mediaType" class="control toolbar-select"><option value="">All types</option><option value="image">Images</option><option value="video">Videos</option></select><label class="toolbar-count" title="Items per page"><span>Per page</span><select id="pageSize" class="control">${[20,40,60,100].map(size => `<option value="${size}" ${size === prefs.pageSize ? 'selected' : ''}>${size}</option>`).join('')}</select></label><button id="searchBtn" class="icon-btn" title="Search"><i data-lucide="search"></i></button><div id="activeFilters" class="active-filters"></div></div>
     <div id="gallery" class="gallery"></div><div id="pager" class="pager"></div></div><div id="inspectorResize" class="inspector-resize" title="Resize panel"></div><aside id="inspector" class="inspector"><div class="empty">Select a file</div></aside></div>`;
   document.querySelector('#search').value = librarySearch;
   document.querySelector('#mediaType').value = state.mediaType || '';
@@ -662,6 +719,8 @@ async function showLibrary() {
     const seq = ++loadSeq;
     const pageSize = libraryPrefs().pageSize;
     librarySearch = document.querySelector('#search').value.trim();
+    const clearBtn = document.querySelector('#clearSearch');
+    if (clearBtn) clearBtn.hidden = !document.querySelector('#search').value;
     const parsedSearch = parseLibrarySearch(librarySearch);
     const query = '';
     const authorFilter = parsedSearch.authors.length ? `&author=${encodeURIComponent(parsedSearch.authors.at(-1))}` : '';
@@ -676,7 +735,7 @@ async function showLibrary() {
     meta.textContent = `${data.page.total} files`;
     statusText.textContent = `Showing ${data.items.length}`;
     document.querySelector('#activeFilters').innerHTML = activeFiltersHtml();
-    document.querySelector('#gallery').innerHTML = data.items.length ? data.items.map(item => `<button class="media-card" data-id="${item.id}"><span class="media-card-preview"><img loading="lazy" src="${esc(item.thumbnail_url)}" alt="">${item.is_edited?`<span class="edited-marker" title="Edited: ${esc(editSummary(item.edit_operations))}"><i data-lucide="wand-sparkles"></i></span>`:''}${item.has_parent?`<span class="parent-marker" data-parent-media-id="${item.parent_media_id || ''}" data-parent-remote-id="${esc(item.parent_id || '')}" title="Has parent"><i data-lucide="corner-left-up"></i></span>`:''}${item.has_family?`<span class="family-marker" title="Relatives: ${item.relatives?.length || item.family_members?.length || 0}"><i data-lucide="users-round"></i></span>`:''}${item.derived_from_media_id?`<span class="fragment-marker" title="Fragment of Media #${item.derived_from_media_id}"><i data-lucide="scissors"></i></span>`:''}${item.fragment_count?`<span class="fragment-count-marker" title="${item.fragment_count} fragment(s) - excluded from automatic collections"><i data-lucide="git-branch"></i>${item.fragment_count}</span>`:''}</span><span class="media-card-body"><strong>${esc(item.author || 'Unknown author')}</strong><small>${esc(item.domain || item.type)} · ${item.width || '?'}×${item.height || '?'}</small></span></button>`).join('') : '<div class="empty">The library is empty</div>';
+    document.querySelector('#gallery').innerHTML = data.items.length ? data.items.map(item => `<button class="media-card" data-id="${item.id}"><span class="media-card-preview"><img loading="lazy" src="${esc(item.thumbnail_url)}" alt="">${item.is_edited?`<span class="edited-marker" title="Edited: ${esc(editSummary(item.edit_operations))}"><i data-lucide="wand-sparkles"></i></span>`:''}${item.has_parent?`<span class="parent-marker" data-parent-media-id="${item.parent_media_id || ''}" data-parent-remote-id="${esc(item.parent_id || '')}" title="Has parent"><i data-lucide="corner-left-up"></i></span>`:''}${item.has_family?`<span class="family-marker" title="Relatives: ${item.relatives?.length || item.family_members?.length || 0}"><i data-lucide="users-round"></i></span>`:''}${item.derived_from_media_id?`<span class="fragment-marker" title="Fragment of Media #${item.derived_from_media_id}"><i data-lucide="scissors"></i></span>`:''}${item.type==='video'?'<span class="media-kind-marker" title="Video"><i data-lucide="film"></i>Video</span>':item.is_animated?'<span class="media-kind-marker" title="Animation"><i data-lucide="sparkles"></i>GIF</span>':''}${item.fragment_count?`<span class="fragment-count-marker" title="${item.fragment_count} fragment(s) - excluded from automatic collections"><i data-lucide="git-branch"></i>${item.fragment_count}</span>`:''}</span><span class="media-card-body"><strong>${esc(item.author || 'Unknown author')}</strong><small>${esc(item.domain || item.type)} · ${item.width || '?'}×${item.height || '?'}</small></span></button>`).join('') : '<div class="empty">The library is empty</div>';
     document.querySelectorAll('.media-card').forEach(card => card.onclick = () => inspectMedia(Number(card.dataset.id)));
     document.querySelectorAll('.parent-marker').forEach(marker => marker.onclick = event => { event.stopPropagation(); const localId=Number(marker.dataset.parentMediaId||0); appendSearchTerm(localId ? `id:${localId}` : `parent:${marker.dataset.parentRemoteId}`); });
     if (selectedMedia) document.querySelector(`.media-card[data-id="${selectedMedia.id}"]`)?.classList.add('selected');
@@ -702,8 +761,13 @@ async function showLibrary() {
     icons();
   };
   reloadLibrary = load;
+  const searchInput = document.querySelector('#search');
+  const clearSearchBtn = document.querySelector('#clearSearch');
+  searchInput.addEventListener('input', () => { clearSearchBtn.hidden = !searchInput.value; });
+  clearSearchBtn.onclick = () => { searchInput.value = ''; clearSearchBtn.hidden = true; libraryOffset = 0; load(); };
+  attachSearchAutocomplete(searchInput, document.querySelector('#librarySearchSuggest'), () => { clearSearchBtn.hidden = !searchInput.value; libraryOffset = 0; load(); });
   document.querySelector('#searchBtn').onclick = () => { libraryOffset = 0; load(); };
-  document.querySelector('#search').onkeydown = event => { if (event.key === 'Enter') { libraryOffset = 0; load(); } };
+  searchInput.onkeydown = event => { if (event.key === 'Enter' && !event.defaultPrevented) { libraryOffset = 0; load(); } };
   document.querySelector('#mediaType').onchange = () => { libraryOffset = 0; load(); };
   document.querySelector('#pageSize').onchange = event => { saveLibraryPrefs({pageSize:Number(event.target.value)}); libraryOffset = 0; load(); };
   bindInspectorResize();
@@ -749,7 +813,7 @@ async function inspectMedia(id) {
   saveViewState('library', {selectedMediaId:id});
   document.querySelectorAll('.media-card').forEach(card => card.classList.toggle('selected', Number(card.dataset.id) === id));
   const pane = document.querySelector('#inspector');
-  const preview = selectedMedia.type === 'video' ? `<video class="inspector-preview" src="${esc(selectedMedia.content_url)}" controls></video>` : `<img class="inspector-preview" src="${esc(selectedMedia.content_url)}" alt="">`;
+  const preview = selectedMedia.type === 'video' ? `<video class="inspector-preview" src="${esc(selectedMedia.content_url)}" controls></video>` : `<img class="inspector-preview" src="${esc(selectedMedia.content_url)}" alt="" title="Open full size" style="cursor:zoom-in">`;
   pane.classList.add('has-media');
   const edits=selectedMedia.is_edited?`<div class="field"><label>Edits</label><span class="edit-description"><i data-lucide="wand-sparkles"></i>${esc(editSummary(selectedMedia.edit_operations))}</span></div>`:'';
   const parentField = selectedMedia.has_parent ? `<div class="field parent-field"><label>Parent</label>${selectedMedia.parent_media_id ? `<button type="button" id="searchParentMedia" class="text-link">Media #${selectedMedia.parent_media_id}</button>` : `<button type="button" id="searchParentRemote" class="text-link">Post #${esc(selectedMedia.parent_id)}</button>`}${selectedMedia.parent_url ? ` <a href="${safeHref(selectedMedia.parent_url)}" target="_blank" rel="noopener" title="Open parent source"><i data-lucide="external-link"></i></a>` : ''}</div>` : '';
@@ -760,11 +824,15 @@ async function inspectMedia(id) {
   const fileSourceField = selectedMedia.file_source_url && selectedMedia.file_source_url !== selectedMedia.source_url
     ? `<div class="field"><label>File source</label><a href="${safeHref(selectedMedia.file_source_url)}" target="_blank" rel="noopener" class="ellipsis">${esc(selectedMedia.file_source_url)}</a></div>` : '';
   pane.innerHTML = `<button id="closeInspector" class="icon-btn inspector-close" title="Close"><i data-lucide="x"></i></button>${preview}<h2>${esc(selectedMedia.author || 'Unknown author')}</h2><div class="field"><label>Media ID</label><button type="button" id="searchMediaId" class="text-link">${selectedMedia.id}</button></div><div class="field"><label>Source</label><a href="${safeHref(selectedMedia.source_url)}" target="_blank" rel="noopener" class="ellipsis">${esc(selectedMedia.source_url || 'Not specified')}</a></div>${fileSourceField}${parentField}${relatives}${fragmentField}${fragmentNotice}${characters}<div class="field"><label>Size</label>${selectedMedia.width || '?'} × ${selectedMedia.height || '?'} · ${formatBytes(selectedMedia.file_size)}</div>${edits}${selectedMedia.crop_review?.blocked?`<div class="field crop-admission-notice"><strong>Crop review required</strong><small>${esc(selectedMedia.crop_review.error_message || "Not eligible for collections until reviewed in Crop.")}</small></div>`:""}${tagsSectionHtml(selectedMedia)}<div class="form-actions inspector-actions"><a class="icon-btn" href="${esc(selectedMedia.content_url)}" target="_blank" rel="noopener" title="Open full size"><i data-lucide="maximize-2"></i></a>${selectedMedia.source_url?'<button id="refreshMetadata" class="btn"><i data-lucide="refresh-cw"></i>Refresh metadata</button>':''}<button id="openEditor" class="btn"><i data-lucide="panel-top-open"></i>Open in Editor</button>${selectedMedia.type==='image'&&!selectedMedia.is_animated?'<button id="replaceMediaBackground" class="btn"><i data-lucide="image-plus"></i>Replace background</button>':''}<button id="addCollection" class="btn"><i data-lucide="folder-plus"></i>Build collection</button><button id="deleteMedia" class="icon-btn danger" title="Delete"><i data-lucide="trash-2"></i></button></div>`;
+  if (selectedMedia.type !== 'video') {
+    const previewNode = pane.querySelector('.inspector-preview');
+    if (previewNode) previewNode.onclick = () => openMediaLightbox({contentUrl: selectedMedia.content_url, type: selectedMedia.type, title: `${selectedMedia.author || 'Unknown author'} · Media #${selectedMedia.id}`});
+  }
   const authorHeading = pane.querySelector('h2');
   authorHeading.insertAdjacentHTML('beforebegin', '<div class="field author-field"><label>Author</label></div>');
   authorHeading.outerHTML = `<div class="tags author-tags">${authorHtml(selectedMedia.author)}</div>`;
   bindAuthorFilters(pane);
-  document.querySelector('#closeInspector').onclick = () => { pane.classList.remove('has-media'); selectedMedia=null; saveViewState('library',{selectedMediaId:null}); };
+  document.querySelector('#closeInspector').onclick = () => { pane.querySelector('video')?.pause(); pane.classList.remove('has-media'); document.querySelectorAll('.media-card.selected').forEach(card => card.classList.remove('selected')); selectedMedia=null; saveViewState('library',{selectedMediaId:null}); };
   document.querySelector('#searchMediaId').onclick = () => { librarySearch=`id:${id}`; libraryOffset=0; document.querySelector('#search').value=librarySearch; reloadLibrary(); };
   const parentSearch = (selectedMedia.parent_media_id ? `id:${selectedMedia.parent_media_id}` : `parent:${selectedMedia.parent_id}`);
   document.querySelector('#searchParentMedia')?.addEventListener('click', () => { librarySearch=parentSearch; libraryOffset=0; document.querySelector('#search').value=librarySearch; reloadLibrary(); });
@@ -773,7 +841,20 @@ async function inspectMedia(id) {
   pane.querySelectorAll('.trim-source-link').forEach(node => node.onclick = () => { const sourceId = Number(node.dataset.mediaId); saveViewState('editor',{targetMediaId:sourceId,analysisId:null,backgroundOpen:false,trimTarget:true}); navigate('editor'); });
   bindTagSection(pane, selectedMedia);
   document.querySelector('#deleteMedia').onclick = async () => { if (!confirm('Delete this file?')) return; try { await api(`/api/v1/media/${id}`, {method:'DELETE'}); toast('File deleted'); selectedMedia=null; showLibrary(); } catch(error) { toast(error.message,true); } };
-  document.querySelector('#addCollection').onclick = () => navigate('collections?screen=builder');
+  document.querySelector('#addCollection').onclick = () => {
+    const currentDraft = viewState('collections').draft;
+    if (!currentDraft?.query && !currentDraft?.preview) {
+      const prefill = librarySearch.trim() || (selectedMedia.author ? withAuthorFilter('', selectedMedia.author) : (selectedMedia.tags || []).slice(0, 3).join(' '));
+      if (prefill) {
+        saveViewState('collections', {
+          draft: currentDraft
+            ? {...currentDraft, query: prefill}
+            : {id: `${Date.now()}-${Math.random()}`, name: '', query: prefill, requested_count: 10, preset_id: null, preset_name: '', preview: null, rejectedIds: []},
+        });
+      }
+    }
+    navigate('collections?screen=builder');
+  };
   document.querySelector('#openEditor').onclick = () => openEditorForMedia(selectedMedia);
   const replaceBackground=document.querySelector('#replaceMediaBackground');
   if(replaceBackground)replaceBackground.onclick=()=>openEditorForMedia(selectedMedia,'background');
@@ -805,18 +886,22 @@ async function showImport() {
     const slowestLabel = slowest ? ` · slowest #${esc(slowest.post_id)} (${formatDuration(slowest.duration_ms)})` : '';
     return `<article class="history-row"><i data-lucide="${item.event_type === 'import.pending' ? 'loader-circle' : 'activity'}" class="${item.event_type === 'import.pending' ? 'spin' : ''}"></i><div><strong>${esc(label)}</strong><small>${set.name ? `${esc(set.name)} · ` : ''}Import #${item.entity_id}${counters ? ` · ${esc(counters)}` : ''}${duration}${slowestLabel}${duplicateNote}${resolved}</small>${diagnostics}${issues}</div><div class="history-meta"><time>${esc(formatDateTime(item.created_at))}</time>${openAction}</div></article>`;
   }).join('');
-  workspace.innerHTML = `<div class="page"><section id="dropImport" class="drop-import" tabindex="0"><i data-lucide="upload-cloud"></i><strong>Drop a file, image link, or post link here</strong><span>Paste an image, video, or URL into this window</span><input id="fileImport" type="file" accept="image/*,video/*" hidden><button id="chooseImport" type="button" class="btn primary"><i data-lucide="file-up"></i>Choose file</button><input id="pasteImport" class="control" type="url" placeholder="https://..." aria-label="Image or post URL"><button id="submitUrlImport" type="button" class="btn"><i data-lucide="link"></i>Resolve and import</button><div id="importResolveStatus" class="muted" aria-live="polite"></div></section><section class="import-history"><div class="page-head"><h2>Import history</h2><span class="badge">${history.page.total}</span></div><div class="item-list">${historyRows || '<div class="empty">History is empty</div>'}</div></section></div>`;
+  workspace.innerHTML = `<div class="page"><section id="dropImport" class="drop-import" tabindex="0"><i data-lucide="upload-cloud"></i><strong>Drop a file, image link, or post link here</strong><span>Paste an image, video, or URL into this window</span><input id="fileImport" type="file" accept="image/*,video/*" multiple hidden><button id="chooseImport" type="button" class="btn primary"><i data-lucide="file-up"></i>Choose file</button><input id="pasteImport" class="control" type="url" placeholder="https://..." aria-label="Image or post URL"><button id="submitUrlImport" type="button" class="btn"><i data-lucide="link"></i>Resolve and import</button><div id="importResolveStatus" class="muted" aria-live="polite"></div></section><section class="import-history"><div class="page-head"><h2>Import history</h2><span class="badge">${history.page.total}</span></div><div class="item-list">${historyRows || '<div class="empty">History is empty</div>'}</div></section></div>`;
   const drop = document.querySelector('#dropImport'); const fileInput = document.querySelector('#fileImport');
   const showQueued = created => { const list=document.querySelector('.import-history .item-list'); const empty=list.querySelector('.empty'); if(empty) empty.remove(); list.insertAdjacentHTML('afterbegin',`<article class="history-row"><i data-lucide="loader-circle" class="spin"></i><div><strong>Importing</strong><small>Import #${created.job_id}</small><details class="history-diagnostics"><summary>Provider diagnostics</summary><p>Resolving providers...</p></details></div><time>now</time></article>`); document.querySelector('.import-history .badge').textContent=String(Number(document.querySelector('.import-history .badge').textContent)+1); const status=document.querySelector('#importResolveStatus'); if(status) status.textContent=`Resolving import #${created.job_id}...`; icons(); };
   const submitFile = async file => { if (!file) return; try { const body = new FormData(); body.append('file', file); const job = await runJob(() => api('/api/v1/import-resolve-jobs',{method:'POST',body}),showQueued); toast(`Import: ${job.result?.outcome || 'failed'}`); refreshCounts(); if(currentView==='import')showImport(); } catch (error) { toast(error.message,true); if(currentView==='import')showImport(); } };
-  document.querySelector('#chooseImport').onclick = () => fileInput.click(); fileInput.onchange = () => submitFile(fileInput.files[0]);
+  const submitFiles = async files => { for (const file of files) await submitFile(file); };
+  document.querySelector('#chooseImport').onclick = () => fileInput.click();
+  fileInput.onchange = async () => { const files = [...(fileInput.files || [])]; fileInput.value = ''; await submitFiles(files); };
   const submitUrl = async url => { if (!url) return; try { const job=await runJob(()=>api('/api/v1/import-resolve-jobs',{method:'POST',body:JSON.stringify({url})}),showQueued); toast(`Import: ${job.result?.outcome || 'failed'}`); refreshCounts(); if(currentView==='import')showImport(); } catch(error){toast(error.message,true);if(currentView==='import')showImport();} };
   drop.ondragover = event => { event.preventDefault(); drop.classList.add('dragging'); };
   drop.ondragleave = () => drop.classList.remove('dragging');
-  drop.ondrop = event => { event.preventDefault(); drop.classList.remove('dragging'); const file=event.dataTransfer.files[0]; if (file) submitFile(file); else submitUrl(droppedUrl(event.dataTransfer)); };
-  drop.onpaste = event => {
-    const file = [...(event.clipboardData?.files || [])].find(item => item.type?.startsWith('image/'));
-    if (file) { event.preventDefault(); submitFile(file); return; }
+  drop.ondrop = async event => { event.preventDefault(); drop.classList.remove('dragging'); const files=[...(event.dataTransfer?.files || [])]; if (files.length) await submitFiles(files); else submitUrl(droppedUrl(event.dataTransfer)); };
+  const handlePaste = event => {
+    if (event.defaultPrevented || currentView !== 'import') return;
+    const files = [...(event.clipboardData?.files || [])].filter(item => item.type?.startsWith('image/') || item.type?.startsWith('video/'));
+    if (files.length) { event.preventDefault(); submitFiles(files); return; }
+    if (event.target === document.querySelector('#pasteImport')) return;
     const url = droppedUrl(event.clipboardData);
     if (url) {
       event.preventDefault();
@@ -824,6 +909,10 @@ async function showImport() {
       if (input) { input.value = url; input.focus(); }
     }
   };
+  drop.onpaste = handlePaste;
+  cleanupImportPaste();
+  cleanupImportPaste = () => window.removeEventListener('paste', handlePaste);
+  window.addEventListener('paste', handlePaste);
   document.querySelector('#pasteImport').onkeydown = event => {
     if (event.key === 'Enter') {
       event.preventDefault();
@@ -968,12 +1057,18 @@ function acceptOutcomeMessage(result, fallback) {
   return fallback;
 }
 
-function openMediaLightbox({contentUrl, type = 'image', title = '', candidates = [], reviewId = null}) {
+function openMediaLightbox({contentUrl, type = 'image', title = '', candidates = [], reviewId = null, onPrevReview = null, onNextReview = null, onAdvanceReview = null}) {
   closeActiveLightbox?.();
   const media = type === 'video'
     ? `<video src="${esc(contentUrl)}" controls autoplay playsinline></video>`
     : `<img src="${esc(contentUrl)}" alt="">`;
+  const reviewNav = (onPrevReview || onNextReview)
+    ? '<button type="button" class="icon-btn prev-review-item" title="Previous review card"><i data-lucide="chevron-left"></i></button><button type="button" class="icon-btn next-review-item" title="Next review card"><i data-lucide="chevron-right"></i></button>'
+    : '';
   const manual = reviewId ? `<button type="button" class="btn manual-lightbox-source"><i data-lucide="link"></i>Add source URL</button>` : '';
+  const sourceForm = reviewId
+    ? '<form class="lightbox-source-form" hidden><input class="control lightbox-source-input" type="url" placeholder="https://..." required><button type="submit" class="btn primary"><i data-lucide="check"></i>Apply source</button><button type="button" class="btn cancel-lightbox-source">Cancel</button></form>'
+    : '';
   // A card with candidates opens as a side-by-side comparison: the staged file on the
   // left, the selected candidate in the middle, and its details on the right, switched
   // with the arrows or keyboard. Both image panes stay equal so neither is favoured.
@@ -984,15 +1079,44 @@ function openMediaLightbox({contentUrl, type = 'image', title = '', candidates =
   // Accepting is only offered inside the opened preview so a card click can never
   // confirm a file without the source the user meant to keep.
   const actions = reviewId
-    ? `<div class="media-lightbox-actions"><span class="media-lightbox-progress" hidden><i data-lucide="refresh-cw" class="spin"></i>Applying source…</span><button type="button" class="btn accept-lightbox-item" title="Keep the staged file and do not use any of the listed source candidates"><i data-lucide="check"></i>Accept without choosing a source</button>${compare ? '<button type="button" class="btn primary use-lightbox-candidate"><i data-lucide="check"></i>Use this source</button>' : ''}</div>`
+    ? `<div class="media-lightbox-actions"><button type="button" class="btn danger reject-lightbox-item" title="Reject and delete this staged file"><i data-lucide="trash-2"></i>Reject</button><span class="media-lightbox-progress" hidden><i data-lucide="refresh-cw" class="spin"></i>Applying source…</span><button type="button" class="btn accept-lightbox-item" title="Keep the staged file and do not use any of the listed source candidates"><i data-lucide="check"></i>Accept without choosing a source</button>${compare ? '<button type="button" class="btn primary use-lightbox-candidate"><i data-lucide="check"></i>Use this source</button>' : ''}</div>`
     : '';
   const node = document.createElement('div');
   node.className = `media-lightbox${compare ? ' media-lightbox-compare' : ''}`;
-  node.innerHTML = `<div class="media-lightbox-backdrop" data-close></div><figure class="media-lightbox-window"><div class="media-lightbox-head"><strong>${esc(title)}</strong>${manual}<a class="icon-btn" href="${esc(contentUrl)}" target="_blank" rel="noopener" title="Open in a new tab"><i data-lucide="external-link"></i></a><button type="button" class="icon-btn" data-close title="Close"><i data-lucide="x"></i></button></div>${body}${actions}</figure>`;
+  node.innerHTML = `<div class="media-lightbox-backdrop" data-close></div><figure class="media-lightbox-window"><div class="media-lightbox-head"><strong>${esc(title)}</strong>${reviewNav}${manual}<a class="icon-btn" href="${esc(contentUrl)}" target="_blank" rel="noopener" title="Open in a new tab"><i data-lucide="external-link"></i></a><button type="button" class="icon-btn" data-close title="Close"><i data-lucide="x"></i></button></div>${sourceForm}${body}${actions}</figure>`;
   document.body.appendChild(node);
   let index = 0;
   const close = () => { if (closeActiveLightbox === close) closeActiveLightbox = null; node.remove(); document.removeEventListener('keydown', onKey); };
   closeActiveLightbox = close;
+  const prevReviewBtn = node.querySelector('.prev-review-item');
+  if (prevReviewBtn) {
+    prevReviewBtn.disabled = !onPrevReview;
+    prevReviewBtn.onclick = () => onPrevReview?.();
+  }
+  const nextReviewBtn = node.querySelector('.next-review-item');
+  if (nextReviewBtn) {
+    nextReviewBtn.disabled = !onNextReview;
+    nextReviewBtn.onclick = () => onNextReview?.();
+  }
+  const openNextReviewItem = nextItem => {
+    if (!nextItem) return;
+    if (typeof nextItem === 'function') { nextItem(); return; }
+    const nextTrigger = nextItem.id != null ? document.querySelector(`.review-card-preview[data-open-review="${nextItem.id}"], [data-open-review="${nextItem.id}"]`) : null;
+    if (nextTrigger) {
+      nextTrigger.click();
+    } else {
+      openMediaLightbox({
+        contentUrl: nextItem.content_url || nextItem.contentUrl,
+        type: nextItem.type || 'image',
+        title: nextItem.original_name || nextItem.title || '',
+        candidates: nextItem.source_candidates || nextItem.candidates || [],
+        reviewId: nextItem.id ?? nextItem.reviewId ?? null,
+        onPrevReview: nextItem.onPrevReview || null,
+        onNextReview: nextItem.onNextReview || null,
+        onAdvanceReview: nextItem.onAdvanceReview || null,
+      });
+    }
+  };
   const useButton = node.querySelector('.use-lightbox-candidate');
   const showCandidate = () => {
     if (!compare) return;
@@ -1008,19 +1132,58 @@ function openMediaLightbox({contentUrl, type = 'image', title = '', candidates =
   const step = delta => { if (!compare) return; index = (index + delta + candidates.length) % candidates.length; showCandidate(); };
   const onKey = event => {
     if (event.key === 'Escape') close();
+    else if (event.target?.closest?.('input, textarea, select')) return;
     else if (compare && event.key === 'ArrowLeft') step(-1);
     else if (compare && event.key === 'ArrowRight') step(1);
+    else if (!compare && event.key === 'ArrowLeft' && onPrevReview) onPrevReview();
+    else if (!compare && event.key === 'ArrowRight' && onNextReview) onNextReview();
   };
   document.addEventListener('keydown', onKey);
   node.querySelectorAll('[data-close]').forEach(element => element.onclick = close);
-  node.querySelectorAll('.manual-lightbox-source').forEach(element => element.onclick = async () => {
-    const url = prompt('Source URL'); if (!url) return;
-    try {
-      const job = await runJob(() => api(`/api/v1/review-items/${reviewId}/source`,{method:'POST',body:JSON.stringify({url})}));
-      reviewSelection.delete(Number(reviewId));
-      close(); toast(acceptOutcomeMessage(job && job.result, 'Source applied')); showReview();
-    } catch(error) { toast(error.message,true); }
+  const sourceFormNode = node.querySelector('.lightbox-source-form');
+  const sourceInputNode = node.querySelector('.lightbox-source-input');
+  node.querySelectorAll('.manual-lightbox-source').forEach(element => element.onclick = () => {
+    if (!sourceFormNode) return;
+    sourceFormNode.hidden = !sourceFormNode.hidden;
+    if (!sourceFormNode.hidden) sourceInputNode?.focus();
   });
+  const cancelSourceBtn = node.querySelector('.cancel-lightbox-source');
+  if (cancelSourceBtn && sourceFormNode) {
+    cancelSourceBtn.onclick = () => {
+      sourceFormNode.hidden = true;
+      if (sourceInputNode) sourceInputNode.value = '';
+    };
+  }
+  if (sourceFormNode) {
+    sourceFormNode.onsubmit = async event => {
+      event.preventDefault();
+      const url = sourceInputNode ? sourceInputNode.value.trim() : '';
+      if (!url) return;
+      const id = Number(reviewId);
+      if (reviewAccepting.has(id)) return;
+      const nextItem = onAdvanceReview ? onAdvanceReview() : null;
+      reviewAccepting.add(id);
+      applyAcceptStates();
+      let resolved = false;
+      try {
+        const job = await runJob(() => api(`/api/v1/review-items/${reviewId}/source`,{method:'POST',body:JSON.stringify({url})}));
+        reviewSelection.delete(id);
+        resolved = true;
+        toast(acceptOutcomeMessage(job && job.result, 'Source applied'));
+      } catch(error) {
+        toast(error.message,true);
+      } finally {
+        reviewAccepting.delete(id);
+        applyAcceptStates();
+        if (resolved) {
+          close();
+          await refreshCounts().catch(() => {});
+          if (currentView === 'review') await showReview();
+          openNextReviewItem(nextItem);
+        }
+      }
+    };
+  }
   if (compare) {
     node.querySelector('.compare-prev').onclick = () => step(-1);
     node.querySelector('.compare-next').onclick = () => step(1);
@@ -1032,11 +1195,14 @@ function openMediaLightbox({contentUrl, type = 'image', title = '', candidates =
   const accept = async (url, successMessage) => {
     const id = Number(reviewId);
     if (reviewAccepting.has(id)) return;
+    const nextItem = onAdvanceReview ? onAdvanceReview() : null;
     reviewAccepting.add(id);
     applyAcceptStates();
+    let resolved = false;
     try {
       const result = await api(url, {method:'POST'});
       reviewSelection.delete(id);
+      resolved = true;
       toast(acceptOutcomeMessage(result, successMessage));
     } catch(error) {
       toast(error.message, true);
@@ -1046,6 +1212,7 @@ function openMediaLightbox({contentUrl, type = 'image', title = '', candidates =
       close();
       await refreshCounts().catch(() => {});
       if (currentView === 'review') await showReview();
+      if (resolved) openNextReviewItem(nextItem);
     }
   };
   node.querySelectorAll('.use-lightbox-candidate').forEach(element => element.onclick = () => {
@@ -1055,6 +1222,9 @@ function openMediaLightbox({contentUrl, type = 'image', title = '', candidates =
   node.querySelectorAll('.accept-lightbox-item').forEach(element => element.onclick = () => {
     if (candidates.length && !confirm(`This file has ${candidates.length} source candidate${candidates.length === 1 ? '' : 's'}. Accept it anyway without choosing one?`)) return;
     accept(`/api/v1/review-items/${reviewId}/accept`, 'File accepted');
+  });
+  node.querySelectorAll('.reject-lightbox-item').forEach(element => element.onclick = () => {
+    accept(`/api/v1/review-items/${reviewId}/reject`, 'File rejected');
   });
   icons();
 }
@@ -1122,6 +1292,7 @@ async function showReview() {
   saveViewState('review', {offset: reviewOffset, filter});
   setHeader('Review', '',
     '<button id="reviewSelectAll" class="btn" type="button"><i data-lucide="check-square"></i>Select all on screen</button>' +
+    '<button id="reviewRejectSelected" class="btn danger" type="button" disabled><i data-lucide="trash-2"></i>Reject selected</button>' +
     '<button id="reviewRecheck" class="btn primary" type="button" disabled><i data-lucide="refresh-cw"></i>Recheck selected</button>');
   const items = data.items;
   warnIfReviewSearchApiIsOutdated(items);
@@ -1142,6 +1313,11 @@ async function showReview() {
   const updateSelectionUi = () => {
     document.querySelectorAll('[data-review-select]').forEach(node => node.checked = reviewSelection.has(Number(node.dataset.reviewSelect)));
     const selectedCount = candidateIds.filter(id => reviewSelection.has(id)).length;
+    const rejectSelected = document.querySelector('#reviewRejectSelected');
+    if (rejectSelected) {
+      rejectSelected.disabled = selectedCount === 0;
+      rejectSelected.innerHTML = `<i data-lucide="trash-2"></i>Reject selected${selectedCount ? ` (${selectedCount})` : ''}`;
+    }
     const recheck = document.querySelector('#reviewRecheck');
     if (recheck) {
       const busy = reviewSearching || reviewSearchQueue.length > 0;
@@ -1160,16 +1336,64 @@ async function showReview() {
   };
   document.querySelectorAll('[data-review-select]').forEach(node => node.onchange = event => { const id = Number(node.dataset.reviewSelect); if (event.target.checked) reviewSelection.add(id); else reviewSelection.delete(id); updateSelectionUi(); });
   document.querySelector('#reviewSelectAll').onclick = () => { const allSelected = candidateIds.length > 0 && candidateIds.every(id => reviewSelection.has(id)); candidateIds.forEach(id => { if (allSelected) reviewSelection.delete(id); else reviewSelection.add(id); }); updateSelectionUi(); };
+  document.querySelector('#reviewRejectSelected').onclick = async () => {
+    const selectedIds = candidateIds.filter(id => reviewSelection.has(id));
+    const selectedCount = selectedIds.length;
+    if (!selectedCount || !confirm(`Reject ${selectedCount} selected item(s)?`)) return;
+    const rejectBtn = document.querySelector('#reviewRejectSelected');
+    if (rejectBtn) rejectBtn.disabled = true;
+    let rejected = 0;
+    try {
+      for (const id of selectedIds) {
+        if (reviewAccepting.has(id)) continue;
+        reviewAccepting.add(id);
+        applyAcceptStates();
+        try {
+          await api(`/api/v1/review-items/${id}/reject`, {method:'POST'});
+          reviewSelection.delete(id);
+          rejected += 1;
+        } finally {
+          reviewAccepting.delete(id);
+        }
+      }
+      applyAcceptStates();
+      toast(`Rejected ${rejected} item${rejected === 1 ? '' : 's'}`);
+      await refreshCounts();
+      showReview();
+    } catch (error) {
+      applyAcceptStates();
+      toast(error.message, true);
+      await refreshCounts().catch(() => {});
+      showReview();
+    }
+  };
   document.querySelector('#reviewRecheck').onclick = () => recheckReviewItems([...reviewSelection]);
   document.querySelectorAll('[data-review-reject]').forEach(node => node.onclick = () => reviewAction(Number(node.dataset.reviewReject), 'reject'));
   document.querySelectorAll('[data-review-reimport]').forEach(node => node.onclick = () => recheckReviewItems([Number(node.dataset.reviewReimport)]));
   document.querySelectorAll('[data-review-log]').forEach(node => node.onclick = () => openReviewSearchLog(Number(node.dataset.reviewLog), `Search results · review #${node.dataset.reviewLog}`));
   document.querySelectorAll('[data-accept-metadata]').forEach(node => node.onclick = async () => { try { await api(`/api/v1/metadata-suggestions/${node.dataset.acceptMetadata}/accept`,{method:'POST'}); toast('Metadata applied'); showReview(); } catch(error) { toast(error.message,true); } });
   document.querySelectorAll('[data-reject-metadata]').forEach(node => node.onclick = async () => { try { await api(`/api/v1/metadata-suggestions/${node.dataset.rejectMetadata}/reject`,{method:'POST'}); toast('Metadata ignored'); showReview(); } catch(error) { toast(error.message,true); } });
+  const openReviewCard = id => {
+    const item = byId.get(Number(id));
+    if (!item) return null;
+    const index = candidateIds.indexOf(item.id);
+    const prevId = index > 0 ? candidateIds[index - 1] : null;
+    const nextId = index >= 0 && index < candidateIds.length - 1 ? candidateIds[index + 1] : null;
+    openMediaLightbox({
+      contentUrl: item.content_url,
+      type: item.type,
+      title: item.original_name,
+      candidates: item.source_candidates || [],
+      reviewId: item.id,
+      onPrevReview: prevId != null ? () => openReviewCard(prevId) : null,
+      onNextReview: nextId != null ? () => openReviewCard(nextId) : null,
+      onAdvanceReview: () => (nextId != null ? byId.get(nextId) || null : null),
+    });
+    return item;
+  };
   document.querySelectorAll('[data-open-review]').forEach(node => node.onclick = event => {
     if (event.target.closest('.review-card-select')) return;
-    const item = byId.get(Number(node.dataset.openReview));
-    if (item) openMediaLightbox({contentUrl:item.content_url, type:item.type, title:item.original_name, candidates:item.source_candidates || [], reviewId:item.id});
+    openReviewCard(Number(node.dataset.openReview));
   });
   document.querySelectorAll('[data-open-review-content]').forEach(node => node.onclick = event => {
     if (event.target.closest('.review-card-select')) return;
@@ -1203,6 +1427,12 @@ function applySearchStates() {
       ? `<i data-lucide="refresh-cw" class="spin"></i>${reviewSearchQueue.length ? `Queued (${reviewSearchQueue.length})` : 'Rechecking...'}`
       : `<i data-lucide="refresh-cw"></i>Recheck selected${selectedCount ? ` (${selectedCount})` : ''}`;
   }
+  const rejectBulk = document.querySelector('#reviewRejectSelected');
+  if (rejectBulk) {
+    const selectedCount = document.querySelectorAll('[data-review-select]:checked').length;
+    rejectBulk.disabled = selectedCount === 0;
+    rejectBulk.innerHTML = `<i data-lucide="trash-2"></i>Reject selected${selectedCount ? ` (${selectedCount})` : ''}`;
+  }
   icons();
 }
 
@@ -1231,7 +1461,7 @@ function applyAcceptStates() {
   const lightbox = document.querySelector('.media-lightbox');
   if (!lightbox) return;
   const busy = reviewAccepting.size > 0;
-  lightbox.querySelectorAll('.use-lightbox-candidate, .accept-lightbox-item, .manual-lightbox-source').forEach(button => {
+  lightbox.querySelectorAll('.use-lightbox-candidate, .accept-lightbox-item, .manual-lightbox-source, .reject-lightbox-item').forEach(button => {
     button.disabled = busy;
   });
   const progress = lightbox.querySelector('.media-lightbox-progress');
@@ -1309,13 +1539,22 @@ async function drainReviewSearchQueue() {
 }
 
 async function reviewAction(id, action) {
+  id = Number(id);
+  if (reviewAccepting.has(id)) return;
+  reviewAccepting.add(id);
+  applyAcceptStates();
   try {
     await api(`/api/v1/review-items/${id}/${action}`,{method:'POST'});
-    reviewSelection.delete(Number(id));
+    reviewSelection.delete(id);
     toast(action === 'accept' ? 'File accepted' : 'File rejected');
     await refreshCounts();
     showReview();
-  } catch (error) { toast(error.message,true); }
+  } catch (error) {
+    toast(error.message,true);
+  } finally {
+    reviewAccepting.delete(id);
+    applyAcceptStates();
+  }
 }
 
 function openMediaInLibrary(mediaId) {
@@ -1326,6 +1565,19 @@ function openMediaInLibrary(mediaId) {
   navigate('library');
 }
 
+function duplicateSideHtml(side, other) {
+  const sidePixels = (side.width && side.height) ? (side.width * side.height) : 0;
+  const otherPixels = (other.width && other.height) ? (other.width * other.height) : 0;
+  const badges = [];
+  if (sidePixels && otherPixels && (side.width * side.height) > (other.width * other.height)) {
+    badges.push('<span class="badge good">Higher resolution</span>');
+  }
+  if ((side.file_size || 0) > (other.file_size || 0)) {
+    badges.push('<span class="badge">Larger file</span>');
+  }
+  return `<figure class="duplicate-side"><img src="${esc(side.thumbnail_url)}" alt="Media #${side.id}" data-open-duplicate="${esc(side.content_url)}" data-duplicate-type="${esc(side.type || 'image')}" data-duplicate-title="Media #${side.id}" title="Open full size"><figcaption class="duplicate-meta"><div class="duplicate-meta-info"><strong>Media #${side.id}</strong>${side.author ? `<span class="duplicate-author">${esc(side.author)}</span>` : ''}<small>${side.width || '?'}×${side.height || '?'} · ${formatBytes(side.file_size)}</small>${badges.length ? `<div class="duplicate-badges">${badges.join('')}</div>` : ''}</div><a class="icon-btn open-duplicate-library" href="${libraryHref(side.id)}" target="${libraryTarget()}" rel="noopener" title="Open in Library" aria-label="Open in Library"><i data-lucide="images"></i></a></figcaption></figure>`;
+}
+
 async function showDuplicates() {
   const epoch = renderEpoch;
   setHeader('Duplicates','');
@@ -1333,13 +1585,32 @@ async function showDuplicates() {
   const threshold=Math.min(100,Math.max(70,Number(duplicateState.threshold)||90));
   const data = await api('/api/v1/duplicate-matches');
   if (epoch !== renderEpoch || currentView !== 'duplicates') return;
-  workspace.innerHTML = `<div class="duplicates-toolbar"><label for="duplicateThreshold">Similarity threshold</label><input id="duplicateThreshold" type="range" min="70" max="100" step="1" value="${threshold}"><output id="duplicateThresholdValue" for="duplicateThreshold">${threshold}%</output><button id="scanDuplicates" class="btn primary"><i data-lucide="scan-search"></i>Scan</button></div><div class="page item-list">${data.items.length ? data.items.map(match => `<section class="panel"><div class="panel-head">Match ${match.confidence}%</div><div class="panel-body"><div class="compare"><img src="${esc(match.left.thumbnail_url)}" alt=""><img src="${esc(match.right.thumbnail_url)}" alt=""></div><div class="actions" style="margin-top:10px"><button class="btn resolve" data-id="${match.id}" data-keep="left">Keep left</button><button class="btn resolve" data-id="${match.id}" data-keep="right">Keep right</button><button class="btn family" data-id="${match.id}"><i data-lucide="users-round"></i>Family</button><button class="btn ignore" data-id="${match.id}">Ignore</button></div></div></section>`).join('') : '<div class="empty">No matches</div>'}</div>`;
+  meta.textContent = `${data.items.length} matches`;
+  const duplicatesCount = document.querySelector('#duplicatesCount');
+  if (duplicatesCount) duplicatesCount.textContent = data.items.length || '';
+  workspace.innerHTML = `<div class="duplicates-toolbar"><label for="duplicateThreshold">Similarity threshold</label><input id="duplicateThreshold" type="range" min="70" max="100" step="1" value="${threshold}"><output id="duplicateThresholdValue" for="duplicateThreshold">${threshold}%</output><button id="scanDuplicates" class="btn primary"><i data-lucide="scan-search"></i>Scan</button></div><div class="page item-list">${data.items.length ? data.items.map(match => `<section class="panel"><div class="panel-head">Match ${match.confidence}%</div><div class="panel-body"><div class="compare">${duplicateSideHtml(match.left, match.right)}${duplicateSideHtml(match.right, match.left)}</div><div class="actions" style="margin-top:10px"><button class="btn resolve" data-id="${match.id}" data-keep="left">Keep left (#${match.left.id})</button><button class="btn resolve" data-id="${match.id}" data-keep="right">Keep right (#${match.right.id})</button><button class="btn family" data-id="${match.id}"><i data-lucide="users-round"></i>Family</button><button class="btn ignore" data-id="${match.id}">Ignore</button></div></div></section>`).join('') : '<div class="empty">No matches</div>'}</div>`;
   const slider=document.querySelector('#duplicateThreshold');
   slider.oninput=()=>{document.querySelector('#duplicateThresholdValue').value=`${slider.value}%`;saveViewState('duplicates',{threshold:Number(slider.value)});};
-  document.querySelector('#scanDuplicates').onclick = async () => { try { await runJob(() => api('/api/v1/duplicate-scan-jobs',{method:'POST',body:JSON.stringify({threshold:Number(slider.value)})})); showDuplicates(); } catch(error){toast(error.message,true);} };
-  document.querySelectorAll('.ignore').forEach(node => node.onclick = async () => { try { await api(`/api/v1/duplicate-matches/${node.dataset.id}/ignore`,{method:'POST'}); showDuplicates(); } catch (error) { toast(error.message, true); } });
-  document.querySelectorAll('.resolve').forEach(node => node.onclick = async () => { try { await api(`/api/v1/duplicate-matches/${node.dataset.id}/resolve`,{method:'POST',body:JSON.stringify({keep:node.dataset.keep,merge_metadata:true})}); showDuplicates(); } catch(error){toast(error.message,true);} }); icons();
-  document.querySelectorAll('.family').forEach(node => node.onclick = async () => { try { await api(`/api/v1/duplicate-matches/${node.dataset.id}/family`,{method:'POST'}); toast('Both files were added to the family'); showDuplicates(); } catch(error){toast(error.message,true);} }); icons();
+  document.querySelector('#scanDuplicates').onclick = async () => { try { await runJob(() => api('/api/v1/duplicate-scan-jobs',{method:'POST',body:JSON.stringify({threshold:Number(slider.value)})})); await refreshCounts(); showDuplicates(); } catch(error){toast(error.message,true);} };
+  document.querySelectorAll('[data-open-duplicate]').forEach(node => node.onclick = () => openMediaLightbox({contentUrl: node.dataset.openDuplicate, type: node.dataset.duplicateType || 'image', title: node.dataset.duplicateTitle || 'Preview'}));
+  document.querySelectorAll('.open-duplicate-library').forEach(node => node.onclick = libraryLinkClick);
+  const runDuplicateAction = async (node, action) => {
+    const buttons = [...(node.closest('.panel')?.querySelectorAll('button') || [node])];
+    if (buttons.some(btn => btn.disabled)) return;
+    buttons.forEach(btn => { btn.disabled = true; });
+    try {
+      await action();
+      await refreshCounts();
+      showDuplicates();
+    } catch (error) {
+      buttons.forEach(btn => { btn.disabled = false; });
+      toast(error.message, true);
+    }
+  };
+  document.querySelectorAll('.ignore').forEach(node => node.onclick = () => runDuplicateAction(node, () => api(`/api/v1/duplicate-matches/${node.dataset.id}/ignore`,{method:'POST'})));
+  document.querySelectorAll('.resolve').forEach(node => node.onclick = () => runDuplicateAction(node, () => api(`/api/v1/duplicate-matches/${node.dataset.id}/resolve`,{method:'POST',body:JSON.stringify({keep:node.dataset.keep,merge_metadata:true})})));
+  document.querySelectorAll('.family').forEach(node => node.onclick = () => runDuplicateAction(node, async () => { await api(`/api/v1/duplicate-matches/${node.dataset.id}/family`,{method:'POST'}); toast('Both files were added to the family'); }));
+  icons();
 }
 
 async function showEditor() {
@@ -1476,6 +1747,7 @@ async function showEditor() {
   };
 
   const imageToolTabs=(tool)=>`<div class="editor-tabs image-tool-tabs" role="tablist" aria-label="Image tools"><button type="button" role="tab" aria-selected="${tool==='crop'}" class="editor-tab tone-crop${tool==='crop'?' active':''}" data-image-tool="crop"><i data-lucide="crop"></i><span>Crop</span></button><button type="button" id="toggleBackgroundEditor" role="tab" aria-selected="${tool==='background'}" class="editor-tab tone-background${tool==='background'?' active':''}" data-image-tool="background"><i data-lucide="image-plus"></i><span>Background</span></button></div>`;
+  const operationDetails=revision=>revision.operation==='crop'&&Array.isArray(revision.details?.box)?`Crop: ${revision.details.box.join(', ')}${revision.details.method?` · ${operationName(revision.details.method)} analysis`:''}`:operationName(revision.operation);
   const bindImageTools=mediaId=>document.querySelectorAll('[data-image-tool]').forEach(node=>node.onclick=()=>{
     if(node.dataset.imageTool!==viewState('editor').tool)openMediaEditor(mediaId,node.dataset.imageTool);
   });
@@ -1530,7 +1802,6 @@ async function showEditor() {
     syncEditorRoute(mediaId,chosenTool);
     const active=revisions.items.find(revision=>revision.active);
     const original=[...revisions.items].reverse().find(revision=>revision.operation==='original'&&!revision.parent_revision_id);
-    const operationDetails=revision=>revision.operation==='crop'&&Array.isArray(revision.details?.box)?`Crop: ${revision.details.box.join(', ')}${revision.details.method?` · ${operationName(revision.details.method)} analysis`:''}`:operationName(revision.operation);
     const editorState=viewState('editor');
     const backgroundStateMatches=Number(editorState.backgroundMediaId)===Number(mediaId);
     const backgroundOpen=Boolean(editorState.backgroundOpen);
@@ -1541,7 +1812,7 @@ async function showEditor() {
       <div class="page-head"><button class="btn" id="backEditor"><i data-lucide="chevron-left"></i>Editor</button><a class="icon-btn" id="cropOpenLibrary" title="Open in Library" href="${libraryHref(mediaId)}" target="${libraryTarget()}" rel="noopener" aria-label="Open in Library"><i data-lucide="images"></i></a><h2>Media #${mediaId}</h2>${state.is_edited?`<span class="badge good">${esc(editSummary(state.edit_operations))}</span>`:'<span class="badge">Original</span>'}</div>
       ${imageToolTabs(chosenTool)}
       ${state.crop_review?.blocked?`<div class="crop-admission-notice"><strong>Crop review required before collections</strong><p>${esc(state.crop_review.error_message||"Review the current version and apply a crop or confirm No crop needed.")}</p></div>`:""}
-      <div class="editor-version-compare"><section><h3>Current version</h3><img src="${esc(active?.content_url||state.content_url)}" alt=""></section><section><h3>Original</h3><img src="${esc(original?.content_url||state.content_url)}" alt=""></section></div>
+      <div class="editor-version-compare" ${chosenTool==='background'?'hidden':''}><section><h3>Current version</h3><img src="${esc(active?.content_url||state.content_url)}" alt=""></section><section><h3>Original</h3><img src="${esc(original?.content_url||state.content_url)}" alt=""></section></div>
       <div class="actions editor-state-actions"><button class="btn primary" id="analyzeCurrent" ${chosenTool!=='crop'?'hidden':''}><i data-lucide="scan-line"></i>Analyze current</button><button class="btn" id="approveCurrentCrop" ${chosenTool!=='crop'?'hidden':''}><i data-lucide="check"></i>No crop needed</button><button class="btn danger" id="resetOriginal" ${state.is_edited?'':'disabled'}><i data-lucide="rotate-ccw"></i>Reset to original</button></div>
        <section id="backgroundPanel" class="background-panel" ${backgroundOpen?'':'hidden'}>
          <div class="background-panel-head"><div><h3>Background replacement</h3><span id="backgroundStatus" class="background-status">${savedPreview?.status==='ready'?'Preview ready':'Preview required'}</span></div><div class="actions"><button id="analyzeBackgroundCurrent" class="btn"><i data-lucide="scan-search"></i>Check candidate</button><button id="removeBackgroundPreview" class="btn primary"><i data-lucide="scan-eye"></i>${savedPreview?.status==='ready'?'Regenerate automatic mask':'Remove background / Preview'}</button></div></div>
@@ -1562,8 +1833,6 @@ async function showEditor() {
     document.querySelector('#cropOpenLibrary').onclick=libraryLinkClick;
     document.querySelector('#approveCurrentCrop').onclick=async()=>{if(!confirm('Confirm that the current image needs no crop?'))return;try{await api(`/api/v1/media/${mediaId}/crop-review/approve`,{method:'POST',body:JSON.stringify({revision_id:state.active_revision_id})});toast('Image approved');refreshCounts();await openMediaEditor(mediaId,'crop',false);}catch(error){toast(error.message,true);}};
     document.querySelector('#analyzeCurrent').onclick=async()=>{try{const method=cropSettings.crop_selected_analysis;const result=method==='vision'?await api(`/api/v1/media/${mediaId}/crop-vision-analysis`,{method:'POST'}):await api('/api/v1/crop-analyses',{method:'POST',body:JSON.stringify({media_id:mediaId,min_area:cropSettings.crop_min_area_percent,padding:cropSettings.crop_padding_percent/100,tolerance:cropSettings.crop_background_tolerance})});if(result.id)await openCrop(result.id);else toast('No removable margins found')}catch(error){toast(error.message,true)}};
-    const panel=document.querySelector('#backgroundPanel');
-    const toggleBackground=document.querySelector('#toggleBackgroundEditor');
     const backgroundStatus=document.querySelector('#backgroundStatus');
     const afterPreview=document.querySelector('#backgroundAfterPreview');
     const chooseBackground=document.querySelector('#chooseBackground');
@@ -1621,7 +1890,6 @@ async function showEditor() {
     const renderLocalPreview=async()=>{if(!preview||!foregroundImage)return;drawForegroundPreview(compositionForegroundCanvas.getContext('2d'),foregroundImage,0,preview.width,preview.height,0,'cutout');drawForegroundPreview(foregroundCanvas.getContext('2d'),foregroundImage,0,preview.width,preview.height,0,previewMode);if(selectedBackgroundData){if(!selectedBackgroundImage||selectedBackgroundImage.src!==selectedBackgroundData.content_url)selectedBackgroundImage=await loadImage(selectedBackgroundData.content_url);drawCompositionPreview(compositionResult.getContext('2d'),compositionForegroundCanvas,selectedBackgroundImage,Number(blur.value));compositionFigure.hidden=false;compositionReady=true}else{compositionFigure.hidden=true;compositionReady=false}applyZoom();updateApply();setBackgroundStatus(selectedBackgroundData?'Composition preview ready':'Preview ready · '+Number(preview.subject_coverage).toFixed(1)+'% subject','good')};
     const scheduleLocalPreview=()=>{if(!preview||localFrame)return;setBackgroundStatus('Updating preview...');localFrame=requestAnimationFrame(()=>{localFrame=0;renderLocalPreview().catch(error=>setBackgroundStatus(error.message,'error'))})};
     const prepareForeground=async()=>{if(!preview)return;foregroundImage=await loadImage(preview.content_url.split('?')[0]);afterPreview.hidden=false;categoryFilter.disabled=false;categoryInput.disabled=false;chooseBackground.disabled=false;blur.disabled=false;foregroundCanvas.nextElementSibling?.setAttribute('hidden','');await renderLocalPreview()};
-    toggleBackground.onclick=()=>{const open=panel.hidden;panel.hidden=!open;toggleBackground.setAttribute('aria-expanded',String(open));saveViewState('editor',{backgroundOpen:open});if(open)panel.scrollIntoView({behavior:'smooth',block:'start'})};
     document.querySelector('#analyzeBackgroundCurrent').onclick=async()=>{const button=document.querySelector('#analyzeBackgroundCurrent');const saved=viewState('editor');const parameters={tolerance:Number(saved.backgroundTolerance)||24,min_background_percent:Number(saved.backgroundMinimumArea)||25};button.disabled=true;setBackgroundStatus('Analyzing background...');try{const result=await api(`/api/v1/media/${mediaId}/background-analysis`,{method:'POST',body:JSON.stringify(parameters)});if(result.status==='candidate'){const candidate=result.candidate;setBackgroundStatus(`Candidate · ${Number(candidate.background_area_percent).toFixed(1)}% background`,'good')}else setBackgroundStatus('No replaceable background found','warn')}catch(error){setBackgroundStatus(error.message,'error')}finally{button.disabled=false}};
     document.querySelector('#removeBackgroundPreview').onclick=async()=>{const button=document.querySelector('#removeBackgroundPreview');const previousPreview=preview;button.disabled=true;setBackgroundStatus(previousPreview?'Regenerating automatic mask...':'Preparing the automatic background removal...');try{preview=await api(`/api/v1/media/${mediaId}/background-preview`,{method:'POST',body:JSON.stringify({force:Boolean(previousPreview)})});button.innerHTML='<i data-lucide="scan-eye"></i>Regenerate automatic mask';const sameAsPrevious=Boolean(preview.same_as_previous);foregroundImage=null;selectedBackgroundImage=null;compositionReady=false;await resolveSelectedBackground().catch(()=>{});await prepareForeground();if(sameAsPrevious)setBackgroundStatus('The automatic model produced the same mask again.','warn')}catch(error){if(error.message&&preview!==previousPreview){setBackgroundStatus(error.message,'error');afterPreview.hidden=false;updateApply();}else{preview=previousPreview;if(previousPreview){afterPreview.hidden=false;setBackgroundStatus(error.message,'error');updateApply()}else{afterPreview.hidden=true;setBackgroundStatus(error.message,'error')}}}finally{button.disabled=false;icons()}};
     const onKey=event=>{if(event.key==='Escape'&&!modal.hidden)closeModal()};
@@ -1661,7 +1929,7 @@ async function showEditor() {
     syncEditorRoute(item.media_id,'crop');
     const isManual=item.method==='manual';
     const methodLabel=isManual?'Manual crop':item.method;
-    workspace.innerHTML=`<div class="page editor-page"><div class="page-head"><button class="btn" id="backEditor"><i data-lucide="chevron-left"></i>Editor</button><h2>Media #${item.media_id}</h2><span class="badge" id="proposalMethod">${esc(methodLabel)}</span></div>${imageToolTabs("crop")}<div class="crop-workspace"><div class="crop-source"><img id="cropSource" src="${esc(item.content_url)}" alt=""></div><canvas id="cropPreview"></canvas></div><div class="crop-controls">${['Left','Top','Right','Bottom'].map((name,index)=>`<label>${name}<input class="control crop-coordinate" data-index="${index}" type="number" value="${item.box[index]}"></label>`).join('')}<button id="resetCrop" class="icon-btn" title="${isManual?'Reset to full image':'Reset suggested crop'}"><i data-lucide="rotate-ccw"></i></button></div><div class="actions"><button class="btn" id="analyzeCrop"><i data-lucide="scan-line"></i>Analyze</button><button class="btn" id="visionCrop"><i data-lucide="scan-eye"></i>Vision model</button><button class="btn primary" id="applyCrop"><i data-lucide="check"></i>Apply crop</button><button class="btn" id="noCrop">No crop needed</button>${isManual?'':'<button class="btn" id="skipCrop">Skip</button>'}</div><section class="revision-list"><h3>Versions</h3>${revisions.items.map(r=>`<article><img src="${esc(r.content_url)}" alt=""><span>${esc(r.operation)} · ${r.width}×${r.height} · ${formatBytes(r.file_size)}</span><button class="btn restore-revision" data-id="${r.id}" ${r.active?'disabled':''}>${r.active?'Active':'Restore'}</button></article>`).join('')}</section></div>`;
+    workspace.innerHTML=`<div class="page editor-page"><div class="page-head"><button class="btn" id="backEditor"><i data-lucide="chevron-left"></i>Editor</button><h2>Media #${item.media_id}</h2><span class="badge" id="proposalMethod">${esc(methodLabel)}</span></div>${imageToolTabs("crop")}<div class="crop-workspace"><div class="crop-source"><div class="crop-stage" id="cropStage"><img id="cropSource" src="${esc(item.content_url)}" alt=""><div id="cropBoxOverlay" class="crop-box-overlay" data-crop-drag="move">${['nw','n','ne','e','se','s','sw','w'].map(h=>`<span class="crop-handle crop-handle-${h}" data-crop-drag="${h}"></span>`).join('')}</div></div></div><canvas id="cropPreview"></canvas></div><div class="crop-controls">${['Left','Top','Right','Bottom'].map((name,index)=>`<label>${name}<input class="control crop-coordinate" data-index="${index}" type="number" value="${item.box[index]}"></label>`).join('')}<button id="resetCrop" class="icon-btn" title="${isManual?'Reset to full image':'Reset suggested crop'}"><i data-lucide="rotate-ccw"></i></button></div><div class="actions"><button class="btn" id="analyzeCrop"><i data-lucide="scan-line"></i>Analyze</button><button class="btn" id="visionCrop"><i data-lucide="scan-eye"></i>Vision model</button><button class="btn primary" id="applyCrop"><i data-lucide="check"></i>Apply crop</button><button class="btn" id="noCrop">No crop needed</button>${isManual?'':'<button class="btn" id="skipCrop">Skip</button>'}<button class="btn danger" id="resetCropOriginal" ${revisions.items.length > 1 ? '' : 'disabled'}><i data-lucide="rotate-ccw"></i>Reset to original</button></div><section class="revision-list"><h3>Versions</h3>${revisions.items.map(r=>`<article class="${r.in_active_chain?'active-chain':''}"><img src="${esc(r.content_url)}" alt=""><span><strong>${esc(operationDetails(r))}</strong><small>${r.width}×${r.height} · ${formatBytes(r.file_size)}${r.active?' · Active':''}</small></span><button class="btn restore-revision" data-id="${r.id}" ${r.active?'disabled':''}>${r.active?'Active':'Restore'}</button></article>`).join('')}</section></div>`;
     document.querySelector('#backEditor').insertAdjacentHTML('afterend',`<a class="icon-btn" id="cropOpenLibrary" title="Open in Library" href="${libraryHref(item.media_id)}" target="${libraryTarget()}" rel="noopener" aria-label="Open in Library"><i data-lucide="images"></i></a>`);
     document.querySelector('#cropOpenLibrary').onclick=libraryLinkClick;
     document.querySelector('#backEditor').onclick=()=>{saveViewState('editor',{analysisId:null,targetMediaId:null});render({tab:'crop'})};
@@ -1676,22 +1944,28 @@ async function showEditor() {
     document.querySelector('#noCrop').onclick=async()=>{try{await api(`/api/v1/media/${item.media_id}/crop-review/approve`,{method:'POST',body:JSON.stringify({revision_id:item.revision_id})});await openNextPending()}catch(error){toast(error.message,true)}};
     const skipCrop=document.querySelector('#skipCrop');
     if(skipCrop)skipCrop.onclick=async()=>{try{if(item.status==='pending')await api(`/api/v1/crop-analyses/${id}/deferred`,{method:'POST'});await render({tab:'crop',cropStatus:'needs_attention'});refreshCounts()}catch(error){toast(error.message,true)}};
-    const source=document.querySelector('#cropSource'),canvas=document.querySelector('#cropPreview'),inputs=[...document.querySelectorAll('.crop-coordinate')];
+    const sourcePane=document.querySelector('.crop-source'),cropStage=document.querySelector('#cropStage'),cropBoxOverlay=document.querySelector('#cropBoxOverlay'),source=document.querySelector('#cropSource'),canvas=document.querySelector('#cropPreview'),inputs=[...document.querySelectorAll('.crop-coordinate')];
     const savedState=viewState('editor'); const savedBox=Number(savedState.boxRevisionId)===Number(item.revision_id)?savedState.box:null;
     if(Array.isArray(savedBox)&&savedBox.length===4)inputs.forEach((n,i)=>n.value=savedBox[i]);
     const previewPane=document.createElement('div');previewPane.className='crop-preview-pane';canvas.replaceWith(previewPane);previewPane.append(canvas);
     document.querySelector('.crop-workspace').insertAdjacentHTML('beforebegin',`<label class="crop-zoom">Zoom <input id="cropZoom" type="range" min="100" max="400" value="${Number(viewState('editor').zoom || 100)}"><output id="cropZoomValue">100%</output></label>`);
     const box=()=>inputs.map(n=>Number(n.value));
-    const applyZoom=()=>{if(!source.naturalWidth||!canvas.width)return;const factor=Number(document.querySelector('#cropZoom').value)/100;const leftPane=source.parentElement;const base=Math.min(leftPane.clientWidth/source.naturalWidth,previewPane.clientWidth/canvas.width,1);source.style.maxWidth='none';source.style.maxHeight='none';source.style.width=`${source.naturalWidth*base*factor}px`;canvas.style.width=`${canvas.width*base*factor}px`;canvas.style.height=`${canvas.height*base*factor}px`;document.querySelector('#cropZoomValue').value=`${Math.round(factor*100)}%`};
-    const draw=()=>{if(!source.naturalWidth)return;const [l,t,r,b]=box();canvas.width=Math.max(1,r-l);canvas.height=Math.max(1,b-t);canvas.getContext('2d').drawImage(source,l,t,r-l,b-t,0,0,r-l,b-t);saveViewState('editor',{box:box(),boxRevisionId:item.revision_id});applyZoom()}; source.onload=draw; inputs.forEach(n=>n.oninput=draw);document.querySelector('#cropZoom').oninput=()=>{saveViewState('editor',{zoom:Number(document.querySelector('#cropZoom').value)});applyZoom()};document.querySelector('#resetCrop').title=isManual?'Reset to full image':'Reset suggested crop';document.querySelector('#resetCrop').onclick=()=>{inputs.forEach((n,i)=>n.value=item.box[i]);draw()};
+    const applyZoom=()=>{if(!source.naturalWidth||!canvas.width)return;const factor=Number(document.querySelector('#cropZoom').value)/100;const base=Math.min(sourcePane.clientWidth/source.naturalWidth,previewPane.clientWidth/canvas.width,1);const scaledW=source.naturalWidth*base*factor,scaledH=source.naturalHeight*base*factor;source.style.maxWidth='none';source.style.maxHeight='none';source.style.width=`${scaledW}px`;source.style.height=`${scaledH}px`;if(cropStage){cropStage.style.width=`${scaledW}px`;cropStage.style.height=`${scaledH}px`;}canvas.style.width=`${canvas.width*base*factor}px`;canvas.style.height=`${canvas.height*base*factor}px`;document.querySelector('#cropZoomValue').value=`${Math.round(factor*100)}%`};
+    const draw=()=>{if(!source.naturalWidth)return;const [l,t,r,b]=clampCropBox(box(),source.naturalWidth,source.naturalHeight);canvas.width=Math.max(1,r-l);canvas.height=Math.max(1,b-t);canvas.getContext('2d').drawImage(source,l,t,r-l,b-t,0,0,r-l,b-t);if(cropBoxOverlay&&source.naturalHeight){cropBoxOverlay.style.left=`${(l/source.naturalWidth)*100}%`;cropBoxOverlay.style.top=`${(t/source.naturalHeight)*100}%`;cropBoxOverlay.style.width=`${(Math.max(1,r-l)/source.naturalWidth)*100}%`;cropBoxOverlay.style.height=`${(Math.max(1,b-t)/source.naturalHeight)*100}%`;}saveViewState('editor',{box:box(),boxRevisionId:item.revision_id});applyZoom()}; source.onload=draw; inputs.forEach(n=>n.oninput=draw);document.querySelector('#cropZoom').oninput=()=>{saveViewState('editor',{zoom:Number(document.querySelector('#cropZoom').value)});applyZoom()};document.querySelector('#resetCrop').title=isManual?'Reset to full image':'Reset suggested crop';document.querySelector('#resetCrop').onclick=()=>{inputs.forEach((n,i)=>n.value=item.box[i]);draw()};
+    let cropDrag=null;
+    cropBoxOverlay.onpointerdown=event=>{if(event.button!==0||!source.naturalWidth||!source.naturalHeight)return;const target=event.target.closest('[data-crop-drag]');if(!target)return;event.preventDefault();event.stopPropagation();cropDrag={pointerId:event.pointerId,handle:target.dataset.cropDrag||'move',startX:event.clientX,startY:event.clientY,startBox:clampCropBox(box(),source.naturalWidth,source.naturalHeight)};try{cropBoxOverlay.setPointerCapture(event.pointerId)}catch{}};
+    cropBoxOverlay.onpointermove=event=>{if(!cropDrag||event.pointerId!==cropDrag.pointerId)return;const rect=source.getBoundingClientRect();if(!rect.width||!rect.height)return;const dx=(event.clientX-cropDrag.startX)*(source.naturalWidth/rect.width),dy=(event.clientY-cropDrag.startY)*(source.naturalHeight/rect.height);const next=dragCropBox(cropDrag.startBox,cropDrag.handle,dx,dy,source.naturalWidth,source.naturalHeight);inputs.forEach((n,i)=>{n.value=next[i]});draw()};
+    const endCropDrag=event=>{if(!cropDrag||event.pointerId!==cropDrag.pointerId)return;cropDrag=null;try{if(cropBoxOverlay.hasPointerCapture(event.pointerId))cropBoxOverlay.releasePointerCapture(event.pointerId)}catch{}};
+    cropBoxOverlay.onpointerup=endCropDrag;cropBoxOverlay.onpointercancel=endCropDrag;
     let syncingPan=false;
     const syncPan=(from,to)=>{if(syncingPan)return;syncingPan=true;const maxX=Math.max(1,from.scrollWidth-from.clientWidth),maxY=Math.max(1,from.scrollHeight-from.clientHeight);to.scrollLeft=(from.scrollLeft/maxX)*Math.max(0,to.scrollWidth-to.clientWidth);to.scrollTop=(from.scrollTop/maxY)*Math.max(0,to.scrollHeight-to.clientHeight);syncingPan=false};
-    const bindPan=(pane,other)=>{pane.onscroll=()=>{syncPan(pane,other);if(pane===source.parentElement)saveViewState('editor',{cropScrollLeft:pane.scrollLeft,cropScrollTop:pane.scrollTop});};let start=null;pane.onpointerdown=event=>{if(event.button!==0)return;start={x:event.clientX,y:event.clientY,left:pane.scrollLeft,top:pane.scrollTop};pane.setPointerCapture(event.pointerId);pane.classList.add('panning')};pane.onpointermove=event=>{if(!start)return;pane.scrollLeft=start.left-(event.clientX-start.x);pane.scrollTop=start.top-(event.clientY-start.y)};pane.onpointerup=event=>{start=null;pane.classList.remove('panning');if(pane.hasPointerCapture(event.pointerId))pane.releasePointerCapture(event.pointerId)}};
-    bindPan(source.parentElement,previewPane);bindPan(previewPane,source.parentElement);
-    source.addEventListener('load',()=>requestAnimationFrame(()=>{source.parentElement.scrollLeft=savedState.cropScrollLeft||0;source.parentElement.scrollTop=savedState.cropScrollTop||0;}),{once:true});
+    const bindPan=(pane,other)=>{pane.onscroll=()=>{syncPan(pane,other);if(pane===sourcePane)saveViewState('editor',{cropScrollLeft:pane.scrollLeft,cropScrollTop:pane.scrollTop});};let start=null;pane.onpointerdown=event=>{if(event.button!==0)return;start={x:event.clientX,y:event.clientY,left:pane.scrollLeft,top:pane.scrollTop};pane.setPointerCapture(event.pointerId);pane.classList.add('panning')};pane.onpointermove=event=>{if(!start)return;pane.scrollLeft=start.left-(event.clientX-start.x);pane.scrollTop=start.top-(event.clientY-start.y)};pane.onpointerup=event=>{start=null;pane.classList.remove('panning');if(pane.hasPointerCapture(event.pointerId))pane.releasePointerCapture(event.pointerId)}};
+    bindPan(sourcePane,previewPane);bindPan(previewPane,sourcePane);
+    source.addEventListener('load',()=>requestAnimationFrame(()=>{sourcePane.scrollLeft=savedState.cropScrollLeft||0;sourcePane.scrollTop=savedState.cropScrollTop||0;}),{once:true});
     document.querySelector('#analyzeCrop').onclick=async()=>{try{const result=await api('/api/v1/crop-analyses',{method:'POST',body:JSON.stringify({media_id:item.media_id,min_area:cropSettings.crop_min_area_percent,padding:cropSettings.crop_padding_percent/100,tolerance:cropSettings.crop_background_tolerance})});if(result.id)await openCrop(result.id);else toast('No removable margins found')}catch(error){toast(error.message,true)}};
     document.querySelector('#visionCrop').onclick=async()=>{try{const proposal=await api(`/api/v1/media/${item.media_id}/crop-vision-analysis`,{method:'POST'});inputs.forEach((n,i)=>n.value=proposal.box[i]);document.querySelector('#proposalMethod').textContent='vision';draw();toast('Vision proposal loaded')}catch(error){toast(error.message,true)}};
     document.querySelector('#applyCrop').onclick=async()=>{if(!confirm('Apply this crop? The original is kept in version history.'))return;try{if(item.status!=='pending')await api(`/api/v1/crop-analyses/${id}/reset`,{method:'POST'});await api(`/api/v1/crop-analyses/${id}/apply`,{method:'POST',body:JSON.stringify({box:box()})});toast('Crop applied');await openNextPending()}catch(error){toast(error.message,true)}};
+    document.querySelector('#resetCropOriginal').onclick=async()=>{if(!confirm('Reset this image to the original version? Saved versions will remain available.'))return;try{await api(`/api/v1/media/${item.media_id}/reset-to-original`,{method:'POST'});toast('Original restored');await openMediaEditor(item.media_id,'crop',false)}catch(error){toast(error.message,true)}};
     document.querySelectorAll('.restore-revision').forEach(n=>n.onclick=async()=>{if(!confirm('Restore this version?'))return;try{await api(`/api/v1/media/${item.media_id}/revisions/${n.dataset.id}/activate`,{method:'POST'});toast('Version restored');openMediaEditor(item.media_id,null,false)}catch(error){toast(error.message,true)}}); icons();
   };
   const openTrim = async mediaId => {
@@ -1952,7 +2226,7 @@ async function showCollections() {
     saveViewState('collections',{search:document.querySelector('#collectionSearch')?.value || '',page});
     const smart = document.querySelector('#collectionView')?.value === 'cards';
     const warning = item => Number(item.author_warning_count) > 0 ? `<span class="badge warn" title="Author limit exceeded"><i data-lucide="triangle-alert"></i>${item.author_warning_count}</span>` : '';
-    const body = smart ? visible.map(item => `<article class="smart-collection"><div class="smart-previews">${item.cover_urls.map(url => `<img src="${esc(url)}" loading="lazy" alt="">`).join('') || '<div class="empty">No files</div>'}</div><div class="smart-body"><strong>${esc(item.name)}</strong><small>${item.item_count} files · ${esc(formatDateTime(item.created_at || ''))}</small><div class="actions">${warning(item)}<button class="btn open" data-id="${item.id}"><i data-lucide="eye"></i>Open</button><button class="btn export" data-id="${item.id}"><i data-lucide="download"></i>Export</button><button class="icon-btn archive" data-id="${item.id}" title="Download ZIP"><i data-lucide="file-archive"></i></button><button class="icon-btn danger delete" data-id="${item.id}" title="Delete"><i data-lucide="trash-2"></i></button></div></div></article>`).join('') : visible.map(item => `<article class="collection-item"><i data-lucide="folder"></i><div><strong>${esc(item.name)}</strong><small>${item.item_count} files · created ${esc(formatDateTime(item.created_at || ''))}</small></div><div class="actions">${warning(item)}<button class="btn open" data-id="${item.id}"><i data-lucide="eye"></i>Open</button><button class="btn export" data-id="${item.id}"><i data-lucide="download"></i>Export</button><button class="icon-btn archive" data-id="${item.id}" title="Download ZIP"><i data-lucide="file-archive"></i></button><button class="icon-btn danger delete" data-id="${item.id}" title="Delete"><i data-lucide="trash-2"></i></button></div></article>`).join('');
+    const body = smart ? visible.map(item => `<article class="smart-collection"><div class="smart-previews" data-cover-count="${Math.min(4, (item.cover_urls || []).length)}">${item.cover_urls.map(url => `<img src="${esc(url)}" loading="lazy" alt="">`).join('') || '<div class="empty">No files</div>'}</div><div class="smart-body"><strong>${esc(item.name)}</strong><small>${item.item_count} files · ${esc(formatDateTime(item.created_at || ''))}</small><div class="actions">${warning(item)}<button class="btn open" data-id="${item.id}"><i data-lucide="eye"></i>Open</button><button class="btn export" data-id="${item.id}"><i data-lucide="download"></i>Export</button><button class="icon-btn archive" data-id="${item.id}" title="Download ZIP"><i data-lucide="file-archive"></i></button><button class="icon-btn danger delete" data-id="${item.id}" title="Delete"><i data-lucide="trash-2"></i></button></div></div></article>`).join('') : visible.map(item => `<article class="collection-item"><i data-lucide="folder"></i><div><strong>${esc(item.name)}</strong><small>${item.item_count} files · created ${esc(formatDateTime(item.created_at || ''))}</small></div><div class="actions">${warning(item)}<button class="btn open" data-id="${item.id}"><i data-lucide="eye"></i>Open</button><button class="btn export" data-id="${item.id}"><i data-lucide="download"></i>Export</button><button class="icon-btn archive" data-id="${item.id}" title="Download ZIP"><i data-lucide="file-archive"></i></button><button class="icon-btn danger delete" data-id="${item.id}" title="Delete"><i data-lucide="trash-2"></i></button></div></article>`).join('');
     document.querySelector('#collectionResults').innerHTML = body || '<div class="empty">No collections found</div>';
     document.querySelector('#collectionPager').innerHTML = `<span>${filtered.length} collections</span><button class="icon-btn" id="collectionPrev" title="Previous" ${page===1?'disabled':''}><i data-lucide="chevron-left"></i></button><span>Page ${page} of ${totalPages}</span><button class="icon-btn" id="collectionNext" title="Next" ${page===totalPages?'disabled':''}><i data-lucide="chevron-right"></i></button>`;
     document.querySelector('#collectionPrev').onclick=()=>{page--;render()}; document.querySelector('#collectionNext').onclick=()=>{page++;render()};
@@ -1988,10 +2262,33 @@ async function showSavedCollection(id) {
   const c=await api(`/api/v1/collections/${id}`);
   if(epoch!==renderEpoch)return;
   setHeader('Collections');
-  const collectionMedia=item=>`<figure class="collection-media">${item.media_type==='video'?`<video class="collection-preview" src="${esc(item.content_url)}" poster="${esc(item.thumbnail_url)}" controls preload="metadata"></video>`:`<a href="${esc(item.content_url)}" target="_blank" rel="noopener"><img class="collection-preview" src="${esc(item.thumbnail_url)}" loading="lazy" alt=""></a>`}<figcaption>${item.source_url?`<a href="${safeHref(item.source_url)}" target="_blank" rel="noopener">Source</a>`:'<span>Unknown source</span>'}<a class="icon-btn collection-library" data-media-id="${item.id}" href="${libraryHref(item.id)}" target="${libraryTarget()}" rel="noopener" title="Open in Library" aria-label="Open in Library"><i data-lucide="images"></i></a></figcaption></figure>`;
-  workspace.innerHTML=`<div class="page collection-page"><div class="page-head"><button class="btn" id="backCollections"><i data-lucide="chevron-left"></i>Collections</button><h2>${esc(c.name)}</h2><span class="badge">${c.items.length}</span><button class="btn archive" data-id="${c.id}" title="Download ZIP"><i data-lucide="file-archive"></i>ZIP</button><button id="copyCollectionSources" class="icon-btn" title="Copy image source links" aria-label="Copy image source links"><i data-lucide="copy"></i></button></div><div class="collection-meta"><span>Created: ${esc(formatDateTime(c.created_at))}</span>${c.preset_name?`<span>Preset: ${esc(c.preset_name)}</span>`:''}<span>Rules: ${esc(c.preset_query||(c.included_tags||[]).join(' '))}</span><form id="jiggieForm"><label for="jiggieUrl">URL Jiggie</label><div class="jiggie-control"><input id="jiggieUrl" class="control" type="url" value="${esc(c.jiggie_url||'')}" placeholder="https://jiggie.fun/..."><button class="btn primary"><i data-lucide="save"></i>Save</button>${c.jiggie_url?`<a class="icon-btn" href="${safeHref(c.jiggie_url)}" target="_blank" rel="noopener" title="Open Jiggie"><i data-lucide="external-link"></i></a>`:''}</div></form></div><div class="collection-gallery">${c.items.map(collectionMedia).join('')}</div></div>`;
+  const collectionMedia=item=>`<figure class="collection-media">${item.media_type==='video'?`<video class="collection-preview" src="${esc(item.content_url)}" poster="${esc(item.thumbnail_url)}" controls preload="metadata"></video>`:`<a class="collection-preview-link" data-media-id="${item.id}" href="${esc(item.content_url)}" target="_blank" rel="noopener"><img class="collection-preview" src="${esc(item.thumbnail_url)}" loading="lazy" alt=""></a>`}<figcaption>${item.source_url?`<a href="${safeHref(item.source_url)}" target="_blank" rel="noopener">Source</a>`:'<span>Unknown source</span>'}<a class="icon-btn collection-library" data-media-id="${item.id}" href="${libraryHref(item.id)}" target="${libraryTarget()}" rel="noopener" title="Open in Library" aria-label="Open in Library"><i data-lucide="images"></i></a></figcaption></figure>`;
+  workspace.innerHTML=`<div class="page collection-page"><div class="page-head"><button class="btn" id="backCollections"><i data-lucide="chevron-left"></i>Collections</button><h2>${esc(c.name)}</h2><span class="badge">${c.items.length}</span><button id="exportSavedCollection" type="button" class="btn"><i data-lucide="download"></i>Export</button><button class="btn archive" data-id="${c.id}" title="Download ZIP"><i data-lucide="file-archive"></i>ZIP</button><button id="copyCollectionSources" class="icon-btn" title="Copy image source links" aria-label="Copy image source links"><i data-lucide="copy"></i></button><button id="reuseCollectionRules" type="button" class="btn" title="Open these rules as a new draft in Collection Builder"><i data-lucide="wand-sparkles"></i>Use rules</button><button id="deleteSavedCollection" type="button" class="icon-btn danger" title="Delete"><i data-lucide="trash-2"></i></button></div><div class="collection-meta"><span>Created: ${esc(formatDateTime(c.created_at))}</span>${c.preset_name?`<span>Preset: ${esc(c.preset_name)}</span>`:''}<span>Rules: ${esc(c.preset_query||(c.included_tags||[]).join(' '))}</span><form id="jiggieForm"><label for="jiggieUrl">URL Jiggie</label><div class="jiggie-control"><input id="jiggieUrl" class="control" type="url" value="${esc(c.jiggie_url||'')}" placeholder="https://jiggie.fun/..."><button class="btn primary"><i data-lucide="save"></i>Save</button>${c.jiggie_url?`<a class="icon-btn" href="${safeHref(c.jiggie_url)}" target="_blank" rel="noopener" title="Open Jiggie"><i data-lucide="external-link"></i></a>`:''}</div></form></div><div class="collection-gallery">${c.items.map(collectionMedia).join('')}</div></div>`;
   document.querySelector('#backCollections').onclick=()=>navigate('collections?screen=list');
+  document.querySelector('#exportSavedCollection').onclick=()=>exportCollection(c.id);
   document.querySelector('#copyCollectionSources').onclick=()=>copyCollectionSources(c);
+  document.querySelector('#reuseCollectionRules').onclick=()=>{
+    saveViewState('collections',{screen:'builder',draft:{id:`${Date.now()}-${Math.random()}`,name:'',query:c.preset_query||(c.included_tags||[]).join(' '),requested_count:Number(c.requested_count||c.items.length||10),preset_id:c.preset_id||null,preset_name:c.preset_name||'',preview:null,rejectedIds:[]}});
+    navigate('collections?screen=builder');
+  };
+  document.querySelector('#deleteSavedCollection').onclick=async()=>{
+    if(!confirm('Delete this collection? Library files are kept.'))return;
+    try{
+      await api(`/api/v1/collections/${c.id}`,{method:'DELETE'});
+      toast('Collection deleted');
+      navigate('collections?screen=list');
+    }catch(error){
+      toast(error.message,true);
+    }
+  };
+  document.querySelectorAll('.collection-preview-link').forEach(node=>node.onclick=event=>{
+    if(!event.ctrlKey&&!event.metaKey&&!event.shiftKey&&event.button===0){
+      const item=c.items.find(entry=>Number(entry.id)===Number(node.dataset.mediaId));
+      if(!item)return;
+      event.preventDefault();
+      openMediaLightbox({contentUrl:item.content_url,type:item.media_type||'image',title:`Media #${item.id}`});
+    }
+  });
   document.querySelectorAll('.collection-library').forEach(node=>node.onclick=libraryLinkClick);
   document.querySelector('#jiggieForm').onsubmit=async event=>{event.preventDefault();try{await api(`/api/v1/collections/${c.id}`,{method:'PATCH',body:JSON.stringify({jiggie_url:document.querySelector('#jiggieUrl').value})});toast('URL saved');}catch(error){toast(error.message,true);}};
   icons();
@@ -2007,7 +2304,7 @@ async function showCollectionBuilder() {
   let preview=draft.preview;
   let rejectedIds=[...(draft.rejectedIds||[])];
   let operation=0;
-  workspace.innerHTML = `<div class="page collection-builder"><section class="panel"><div class="panel-head"><i data-lucide="wand-sparkles"></i>Selection rules</div><div class="panel-body builder-fields"><div class="form-row"><label>Preset</label><select id="builderPreset" class="control"><option value="">No preset</option>${presets.items.map(item => `<option value="${item.id}">${esc(item.name)}</option>`).join('')}</select></div><div class="form-row"><label>Preset name</label><input id="builderPresetName" class="control" maxlength="120" placeholder="Name for a new preset"></div><div class="form-row"><label>Collection name</label><input id="builderName" class="control" maxlength="120"></div><div class="form-row"><label>Count</label><input id="builderCount" class="control" type="number" min="1" max="1000" value="10"></div><div class="form-row builder-search"><label>Search</label><input id="builderQuery" class="control" placeholder="portrait blue_eyes -comic author:artist"><div id="builderQueryChips" class="search-chips"></div></div><div class="builder-actions"><button id="savePreset" class="btn"><i data-lucide="bookmark-plus"></i>Save preset</button><button id="deletePreset" class="icon-btn danger" title="Delete selected preset"><i data-lucide="trash-2"></i></button><button id="generateCollection" class="btn primary"><i data-lucide="shuffle"></i>Generate</button></div></div></section><div id="builderSummary" class="builder-summary"></div><div id="builderPreview" class="collection-preview-grid"><div class="empty">Enter tags and generate a selection</div></div><div class="builder-savebar"><button id="cancelBuilder" class="btn"><i data-lucide="chevron-left"></i>Collections</button><span id="builderStatus">No collection generated yet</span><button id="commitCollection" class="btn primary" disabled><i data-lucide="save"></i>Save collection</button></div></div>`;
+  workspace.innerHTML = `<div class="page collection-builder"><section class="panel"><div class="panel-head"><i data-lucide="wand-sparkles"></i>Selection rules</div><div class="panel-body builder-fields"><div class="form-row"><label>Preset</label><select id="builderPreset" class="control"><option value="">No preset</option>${presets.items.map(item => `<option value="${item.id}">${esc(item.name)}</option>`).join('')}</select></div><div class="form-row"><label>Preset name</label><input id="builderPresetName" class="control" maxlength="120" placeholder="Name for a new preset"></div><div class="form-row"><label>Collection name</label><input id="builderName" class="control" maxlength="120"></div><div class="form-row"><label>Count</label><input id="builderCount" class="control" type="number" min="1" max="1000" value="10"></div><div class="form-row builder-search"><label>Search</label><div class="search-wrap"><input id="builderQuery" class="control" placeholder="portrait blue_eyes -comic author:artist" autocomplete="off" spellcheck="false"><div id="builderQuerySuggest" class="tag-suggest" hidden></div></div><div id="builderQueryChips" class="search-chips"></div></div><div class="builder-actions"><button id="savePreset" class="btn"><i data-lucide="bookmark-plus"></i>Save preset</button><button id="deletePreset" class="icon-btn danger" title="Delete selected preset"><i data-lucide="trash-2"></i></button><button id="generateCollection" class="btn primary"><i data-lucide="shuffle"></i>Generate</button></div></div></section><div id="builderSummary" class="builder-summary"></div><div id="builderPreview" class="collection-preview-grid"><div class="empty">Enter tags and generate a selection</div></div><div class="builder-savebar"><button id="cancelBuilder" class="btn"><i data-lucide="chevron-left"></i>Collections</button><span id="builderStatus">No collection generated yet</span><button id="commitCollection" class="btn primary" disabled><i data-lucide="save"></i>Save collection</button></div></div>`;
   const root=document.querySelector('.collection-builder');
   const input=id=>root.querySelector(`#${id}`);
   input('builderName').value=draft.name||'';
@@ -2048,8 +2345,13 @@ async function showCollectionBuilder() {
     if(!preview){input('builderStatus').textContent='No collection generated yet';return;}
     const similar=preview.most_similar_collection?`Similarity ${Math.round(preview.max_similarity*100)}% with "${esc(preview.most_similar_collection.name)}"`:'';
     input('builderSummary').innerHTML=`<span class="badge ${preview.can_save?'good':'warn'}">Available ${preview.available_count}, selected ${preview.items.length} of ${preview.requested_count}</span>${similar?`<span>${similar}</span>`:''}`;
-    input('builderPreview').innerHTML=preview.items.map((item,index)=>`<article class="builder-card${item.author_limit_exceeded?' limit-warning':''}${item.issue?' invalid-selection':''}"><div class="builder-image"><img src="${esc(item.thumbnail_url)}" loading="lazy" alt="Media #${item.id}"><a class="icon-btn open-builder-library" data-media-id="${item.id}" href="${libraryHref(item.id)}" target="${libraryTarget()}" rel="noopener" title="Open in Library" aria-label="Open in Library"><i data-lucide="images"></i></a>${item.author_limit_exceeded?'<span class="limit-icon" title="Author item limit exceeded"><i data-lucide="triangle-alert"></i></span>':''}<button class="icon-btn swap-builder-item" data-index="${index}" title="Replace"><i data-lucide="refresh-cw"></i></button></div><div><strong>${esc(item.author||'Unknown author')}</strong><small>Media #${item.id} · ${item.usage_count} collections${item.last_used_at?` · ${esc(formatDateTime(item.last_used_at))}`:' · never used'}</small>${item.issue?`<p class="selection-issue">${esc(item.issue)}</p>`:''}</div></article>`).join('')||'<div class="empty">No matching images</div>';
+    input('builderPreview').innerHTML=preview.items.map((item,index)=>`<article class="builder-card${item.author_limit_exceeded?' limit-warning':''}${item.issue?' invalid-selection':''}"><div class="builder-image"><img src="${esc(item.thumbnail_url)}" data-open-builder-preview="${index}" title="Open full size" loading="lazy" alt="Media #${item.id}"><a class="icon-btn open-builder-library" data-media-id="${item.id}" href="${libraryHref(item.id)}" target="${libraryTarget()}" rel="noopener" title="Open in Library" aria-label="Open in Library"><i data-lucide="images"></i></a>${item.author_limit_exceeded?'<span class="limit-icon" title="Author item limit exceeded"><i data-lucide="triangle-alert"></i></span>':''}<button class="icon-btn swap-builder-item" data-index="${index}" title="Replace"><i data-lucide="refresh-cw"></i></button></div><div><strong>${esc(item.author||'Unknown author')}</strong><small>Media #${item.id} · ${item.usage_count} collections${item.last_used_at?` · ${esc(formatDateTime(item.last_used_at))}`:' · never used'}</small>${item.issue?`<p class="selection-issue">${esc(item.issue)}</p>`:''}</div></article>`).join('')||'<div class="empty">No matching images</div>';
     input('builderStatus').textContent=!selectionRulesMatch(draft)?'Rules changed — Generate a new selection before saving':preview.can_save?'Selection is ready to save':preview.items.some(item=>item.issue)?'Review the highlighted files; your selection has not been replaced':'Not enough matching images';
+    root.querySelectorAll('[data-open-builder-preview]').forEach(node=>node.onclick=()=>{
+      const item=preview.items[Number(node.dataset.openBuilderPreview)];
+      if(!item)return;
+      openMediaLightbox({contentUrl:item.content_url||`/api/v1/media/${item.id}/content`,type:item.media_type||item.type||'image',title:`${item.author||'Unknown author'} · Media #${item.id}`});
+    });
     root.querySelectorAll('.open-builder-library').forEach(node=>node.onclick=libraryLinkClick);
     root.querySelectorAll('.swap-builder-item').forEach(node=>node.onclick=async()=>{
       if(collectionDraftRequests.has(draft.id))return;
@@ -2075,6 +2377,7 @@ async function showCollectionBuilder() {
     saveDraft();renderPreview();
   };
   root.querySelectorAll('input').forEach(node=>node.addEventListener('input',()=>{node.classList.remove('invalid');saveDraft();renderPreview();}));
+  attachSearchAutocomplete(input('builderQuery'), input('builderQuerySuggest'), () => { input('builderQuery').classList.remove('invalid'); saveDraft(); renderPreview(); });
   input('generateCollection').onclick=async()=>{
     const rules=fields(),version=beginRequest();
     renderPreview();
@@ -2288,6 +2591,8 @@ async function refreshCounts(){
     const state=viewState('editor');
     const [reviews,counts]=await Promise.all([api('/api/v1/review-items?limit=1'),api(`/api/v1/editor-counts?background_tolerance=${state.backgroundTolerance||24}&background_minimum_area=${state.backgroundMinimumArea||25}`)]);
     document.querySelector('#reviewCount').textContent=reviews.page.total||'';
+    const duplicatesCount=document.querySelector('#duplicatesCount');
+    if(duplicatesCount)duplicatesCount.textContent=counts.duplicates||'';
     editorCounts=counts;paintEditorCounts();
   }catch{}
 }
@@ -2298,6 +2603,7 @@ async function navigate(destination, options={}) {
   const route=parseRoute(destination), view=route.view;
   closeActiveLightbox?.();
   cleanupEditorModalKey();
+  cleanupImportPaste();
   saveScrollState();
   const epoch=++renderEpoch;
   currentView=view;
@@ -2327,6 +2633,24 @@ async function navigate(destination, options={}) {
 document.querySelectorAll('.nav-item').forEach(node=>node.onclick=()=>navigate(node.dataset.view));
 document.querySelectorAll('[data-editor-shortcut]').forEach(node=>node.onclick=()=>navigate(`editor?tab=${node.dataset.editorShortcut}`));
 window.addEventListener('hashchange',()=>navigate(location.hash||'library',{history:false}));
+window.addEventListener('keydown', event => {
+  if (currentView !== 'library' || !selectedMedia) return;
+  if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+  if (event.altKey || event.ctrlKey || event.metaKey) return;
+  if (document.querySelector('.media-lightbox')) return;
+  const activeTag = document.activeElement?.tagName;
+  if (['INPUT', 'TEXTAREA', 'SELECT', 'VIDEO'].includes(activeTag) || document.activeElement?.isContentEditable) return;
+  const cards = [...document.querySelectorAll('#gallery .media-card[data-id]')];
+  if (!cards.length) return;
+  const currentIndex = cards.findIndex(card => Number(card.dataset.id) === Number(selectedMedia.id));
+  if (currentIndex < 0) return;
+  const nextIndex = currentIndex + (event.key === 'ArrowRight' ? 1 : -1);
+  if (nextIndex < 0 || nextIndex >= cards.length) return;
+  event.preventDefault();
+  const nextCard = cards[nextIndex];
+  nextCard.scrollIntoView?.({block: 'nearest'});
+  inspectMedia(Number(nextCard.dataset.id));
+});
 window.addEventListener('beforeunload',saveScrollState);
 window.addEventListener('pagehide',saveScrollState);
 window.addEventListener('focus',()=>{refreshCounts();});
