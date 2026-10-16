@@ -322,14 +322,19 @@ function diagnosticResultCount(item) {
     ? ' (only ≥80% similarity are kept)' : '';
   return ` · ${count} result${count === 1 ? '' : 's'}${hint}`;
 }
-function diagnosticRowHtml(item) {
-  const status = diagnosticStatusLabels[item.status] || item.status || 'unknown';
-  const count = diagnosticResultCount(item);
-  const remote = item.remote_id ? ` · #${esc(item.remote_id)}` : '';
-  const technical = item.code ? ` <code>${esc(item.code)}</code>` : '';
-  const message = item.message ? `: ${esc(item.message)}` : '';
-  const icon = diagnosticStatusIcons[item.status] || 'info';
-  return `<li class="diagnostic-row diagnostic-${esc(item.status || 'unknown')}"><i class="diagnostic-icon" data-lucide="${icon}"></i><span><strong>${esc(item.provider || 'unknown')}</strong> · ${esc(status)}${count}${remote}${technical}${message}</span></li>`;
+function diagnosticRowHtml(row) {
+  const status = diagnosticStatusLabels[row.status] || row.status || 'unknown';
+  const count = diagnosticResultCount(row);
+  const remote = row.remote_id ? ` · #${esc(row.remote_id)}` : '';
+  const confidence = row.confidence != null ? ` · ${Math.round(Number(row.confidence))}%` : '';
+  const author = row.author ? ` · by ${esc(row.author)}` : '';
+  const technical = row.code ? ` <code>${esc(row.code)}</code>` : '';
+  const message = row.message ? `: ${esc(row.message)}` : '';
+  const sourceLink = row.source_url
+    ? ` · <a href="${esc(row.source_url)}" target="_blank" rel="noopener noreferrer">${esc(row.source_url)}</a>`
+    : '';
+  const icon = diagnosticStatusIcons[row.status] || 'info';
+  return `<li class="diagnostic-row diagnostic-${esc(row.status || 'unknown')}"><i class="diagnostic-icon" data-lucide="${icon}"></i><span><strong>${esc(row.provider || 'unknown')}</strong> · ${esc(status)}${count}${remote}${confidence}${author}${technical}${message}${sourceLink}</span></li>`;
 }
 function diagnosticRowsHtml(diagnostics) {
   if (!diagnostics.length) return '<li>No provider diagnostics were recorded.</li>';
@@ -1064,8 +1069,10 @@ function warnIfReviewSearchApiIsOutdated(items) {
 
 function reviewCardHtml(item) {
   const reason = `<span class="review-card-reason">${esc(reviewReasonLabel(item.reason))}</span>`;
+  const kindMarker = item.type === 'video' ? '<span class="media-kind-marker">Video</span>' : '';
+  const videoFallbackAttr = item.type === 'video' ? ` data-video-fallback="${esc(item.content_url)}"` : '';
   if (item.kind === 'metadata') {
-    return `<article class="media-card review-card" data-review-kind="metadata"><div class="review-card-preview" data-open-review-content="${esc(item.content_url)}" data-review-type="${esc(item.type || 'image')}" title="Open full size"><img loading="lazy" src="${esc(item.thumbnail_url)}" alt="">${reason}</div><div class="review-card-actions"><button type="button" class="icon-btn" data-open-review-content="${esc(item.content_url)}" data-review-type="${esc(item.type || 'image')}" data-review-title="Media #${item.media_id}" title="Open full size"><i data-lucide="maximize-2"></i></button><button type="button" class="icon-btn good" data-accept-metadata="${item.suggestion_id}" title="Apply metadata"><i data-lucide="check"></i></button><button type="button" class="icon-btn danger" data-reject-metadata="${item.suggestion_id}" title="Ignore"><i data-lucide="trash-2"></i></button></div></article>`;
+    return `<article class="media-card review-card" data-review-kind="metadata"><div class="review-card-preview" data-open-review-content="${esc(item.content_url)}" data-review-type="${esc(item.type || 'image')}" title="Open full size"><img loading="lazy" src="${esc(item.thumbnail_url)}" alt=""${videoFallbackAttr}>${reason}${kindMarker}</div><div class="review-card-actions"><button type="button" class="icon-btn" data-open-review-content="${esc(item.content_url)}" data-review-type="${esc(item.type || 'image')}" data-review-title="Media #${item.media_id}" title="Open full size"><i data-lucide="maximize-2"></i></button><button type="button" class="icon-btn good" data-accept-metadata="${item.suggestion_id}" title="Apply metadata"><i data-lucide="check"></i></button><button type="button" class="icon-btn danger" data-reject-metadata="${item.suggestion_id}" title="Ignore"><i data-lucide="trash-2"></i></button></div></article>`;
   }
   const selected = reviewSelection.has(item.id) ? ' checked' : '';
   const candidateCount = (item.source_candidates || []).length;
@@ -1100,7 +1107,7 @@ function reviewCardHtml(item) {
   // accept cannot be mistaken for "nothing happened" and clicked again.
   const acceptingBadge = accepting ? '<span class="review-card-accepting-badge"><i data-lucide="refresh-cw" class="spin"></i>Applying source…</span>' : '';
   const cardClass = ['media-card', 'review-card', found ? 'review-card-source-found' : '', rechecked ? 'review-card-already-searched' : '', accepting ? 'review-card-accepting' : ''].filter(Boolean).join(' ');
-  return `<article class="${cardClass}" data-review-kind="candidate" data-review-id="${item.id}"><div class="review-card-preview" data-open-review="${item.id}" title="Open full size"><img loading="lazy" src="${esc(item.thumbnail_url)}" alt="">${reason}${verdictBadges}${acceptingBadge}<label class="review-card-select" title="Select for recheck"><input type="checkbox" data-review-select="${item.id}"${selected}></label></div><div class="review-card-actions"><button type="button" class="icon-btn" data-open-review="${item.id}" title="Open full size to choose a source"><i data-lucide="maximize-2"></i></button>${recheck}${log}<button type="button" class="icon-btn danger" data-review-reject="${item.id}" title="Reject"><i data-lucide="trash-2"></i></button></div></article>`;
+  return `<article class="${cardClass}" data-review-kind="candidate" data-review-id="${item.id}"><div class="review-card-preview" data-open-review="${item.id}" title="Open full size"><img loading="lazy" src="${esc(item.thumbnail_url)}" alt=""${videoFallbackAttr}>${reason}${kindMarker}${verdictBadges}${acceptingBadge}<label class="review-card-select" title="Select for recheck"><input type="checkbox" data-review-select="${item.id}"${selected}></label></div><div class="review-card-actions"><button type="button" class="icon-btn" data-open-review="${item.id}" title="Open full size to choose a source"><i data-lucide="maximize-2"></i></button>${recheck}${log}<button type="button" class="icon-btn danger" data-review-reject="${item.id}" title="Reject"><i data-lucide="trash-2"></i></button></div></article>`;
 }
 
 function lightboxCandidateMedia(candidate) {
@@ -1502,6 +1509,13 @@ async function showReview() {
   document.querySelectorAll('[data-open-review-content]').forEach(node => node.onclick = event => {
     if (event.target.closest('.review-card-select')) return;
     openMediaLightbox({contentUrl:node.dataset.openReviewContent, type:node.dataset.reviewType || 'image', title:node.dataset.reviewTitle || 'Preview'});
+  });
+  document.querySelectorAll('.review-card-preview img[data-video-fallback]').forEach(img => {
+    img.onerror = () => {
+      const item = {content_url: img.dataset.videoFallback};
+      img.insertAdjacentHTML('afterend', `<video src="${esc(item.content_url)}" preload="metadata" muted playsinline></video>`);
+      img.remove();
+    };
   });
   meta.textContent = `${data.page.total} awaiting review`;
   updateSelectionUi(); applySearchStates(); applyAcceptStates(); await refreshCounts();
@@ -2588,6 +2602,7 @@ async function showSettingsPage() {
       ${provider('gelbooru','Gelbooru','User ID and API key',[field('gelbooru_user_id','User ID',{hint:'Paste the whole account line if it is easier: &amp;api_key=...&amp;user_id=... Jiffle splits it into both fields.'}),field('gelbooru_api_key','API key',{type:'password',secret:true})])}
       ${provider('rule34','Rule34.xxx','User ID and API key (required)',[field('rule34_user_id','User ID',{hint:'Paste the whole account line if it is easier: &amp;api_key=...&amp;user_id=... Jiffle splits it into both fields.'}),field('rule34_api_key','API key',{type:'password',secret:true})],'<a class="btn" href="https://rule34.xxx/index.php?page=account&s=options" target="_blank" rel="noopener"><i data-lucide="external-link"></i>Open account options</a>')}
       ${provider('furaffinity','FurAffinity','Cookie a and b from an active session',[field('furaffinity_cookie_a','Cookie a',{type:'password',secret:true}),field('furaffinity_cookie_b','Cookie b',{type:'password',secret:true})],'<a class="btn" href="https://www.furaffinity.net/login/" target="_blank" rel="noopener"><i data-lucide="external-link"></i>Open login</a>')}
+      ${provider('saucenao','SauceNAO','API key for reverse image search',[field('saucenao_api_key','API key',{type:'password',secret:true})],'<a class="btn" href="https://saucenao.com/user.php?page=search-api" target="_blank" rel="noopener"><i data-lucide="external-link"></i>Open API page</a>')}
       <div class="section-actions"><button id="backfillImplicitTags" type="button" class="btn"><i data-lucide="tags"></i>Fill implicit tags</button><small class="field-hint">Re-reads each media's source page and adds the furry tag when the original post is from e621/e926 or FurAffinity.</small></div>
     </div></details>
     <details class="settings-section"><summary><span class="section-icon"><i data-lucide="eraser"></i></span><span><strong>Background removal</strong><small>Automatic subject isolation and model access</small></span><i data-lucide="chevron-down"></i></summary><div class="settings-section-body">
@@ -2657,7 +2672,7 @@ async function showSettingsPage() {
     const form = new FormData(event.currentTarget);
     const export_format_rules={};document.querySelectorAll('.format-rule').forEach(row=>export_format_rules[row.querySelector('.rule-source').value]=row.querySelector('.rule-target').value);
     const payload = {media_path:form.get('media_path'),export_path:form.get('export_path'),thumbnail_path:form.get('thumbnail_path'),import_staging_path:form.get('import_staging_path'),max_items_per_author:Number(form.get('max_items_per_author')),max_image_export_size_bytes:Number(form.get('max_image_export_size_mb'))*1048576,max_video_export_size_bytes:Number(form.get('max_video_export_size_mb'))*1048576,export_format_rules,collection_export_mode:form.get('collection_export_mode'),block_previously_deleted:form.has('block_previously_deleted'),crop_review_enabled:form.has('crop_review_enabled'),trim_review_enabled:form.has('trim_review_enabled'),trim_block_unreviewed_export:form.has('trim_block_unreviewed_export'),crop_vision_format:form.get('crop_vision_format'),crop_vision_url:form.get('crop_vision_url')||null,crop_vision_model:form.get('crop_vision_model')||null,crop_min_area_percent:Number(form.get('crop_min_area_percent')),crop_padding_percent:Number(form.get('crop_padding_percent')),crop_background_tolerance:Number(form.get('crop_background_tolerance')),crop_selected_analysis:form.get('crop_selected_analysis'),background_model:form.get('background_model')||'auto',background_device:form.get('background_device')||'auto'};
-    ['huggingface_token','crop_vision_key','danbooru_login','danbooru_api_key','e621_login','e621_api_key','gelbooru_user_id','gelbooru_api_key','rule34_user_id','rule34_api_key','furaffinity_cookie_a','furaffinity_cookie_b'].forEach(key => { if (form.get(key)) payload[key]=form.get(key); });
+    ['huggingface_token','crop_vision_key','danbooru_login','danbooru_api_key','e621_login','e621_api_key','gelbooru_user_id','gelbooru_api_key','rule34_user_id','rule34_api_key','furaffinity_cookie_a','furaffinity_cookie_b','saucenao_api_key'].forEach(key => { if (form.get(key)) payload[key]=form.get(key); });
     const lines = name => String(form.get(name) || '').split(/\r?\n/).map(value => value.trim()).filter(Boolean);
     const aliases = {};
     for (const line of lines('tag_aliases')) {

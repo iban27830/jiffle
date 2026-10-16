@@ -212,6 +212,8 @@ textarea.control { height: 86px; padding-top: 9px; resize: vertical; }
 .review-card { display: flex; flex-direction: column; }
 .review-card-preview { position: relative; display: block; cursor: zoom-in; }
 .review-card-preview img { display: block; width: 100%; aspect-ratio: 4/3; object-fit: contain; background: #dfe4e6; }
+.review-card-preview video { display: block; width: 100%; aspect-ratio: 4/3; object-fit: contain; background: #dfe4e6; }
+.review-card-preview .media-kind-marker { left: auto; right: 7px; }
 .review-card-reason { position: absolute; left: 7px; bottom: 7px; max-width: calc(100% - 46px); padding: 3px 7px; overflow: hidden; border-radius: 4px; color: #fff; background: rgba(24,32,36,.78); font-size: .72em; text-overflow: ellipsis; white-space: nowrap; }
 .review-card-candidates { position: absolute; left: 7px; top: 7px; padding: 3px 7px; border-radius: 4px; color: #075e50; background: rgba(223,243,238,.96); font-size: .72em; font-weight: 650; }
 .review-card-select { position: absolute; top: 7px; right: 7px; width: 27px; height: 27px; display: grid; place-items: center; border-radius: 5px; background: rgba(255,255,255,.94); box-shadow: 0 1px 4px rgba(18,30,36,.24); cursor: pointer; }
