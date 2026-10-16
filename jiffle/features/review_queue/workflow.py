@@ -531,7 +531,12 @@ def _reimport_review_item(
         raise ReviewFailure("review.file_missing", "The staged file is unavailable.")
     diagnostics: list[dict[str, object]] = []
     matches, verified, errors = resolve_exact_downloads(
-        staged, providers, downloader, settings, diagnostics
+        staged,
+        providers,
+        downloader,
+        settings,
+        diagnostics,
+        original_name=row["original_name"],
     )
     try:
         if verified:
@@ -558,15 +563,30 @@ def _reimport_review_item(
         if not matches:
             # No byte-identical copy exists, so look for an approximate match
             # and offer it for confirmation instead of giving up silently.
-            similar = _reverse_similar(staged, providers, diagnostics)
+            similar = _reverse_similar(
+                staged, providers, diagnostics, settings=settings
+            )
             stored_candidates = _stage_reverse_candidates(
                 connection, settings, review_id, similar, downloader, diagnostics
             ) if similar else 0
-            if stored_candidates:
+            pending_candidates = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM import_source_candidates "
+                    "WHERE review_item_id=? AND status='pending'",
+                    (review_id,),
+                ).fetchone()[0]
+                or 0
+            )
+            if stored_candidates or pending_candidates:
+                connection.execute(
+                    "UPDATE review_items SET reason='source_candidates' WHERE id=?",
+                    (review_id,),
+                )
+                connection.commit()
                 return {
                     "review_item_id": review_id,
                     "status": "candidates",
-                    "candidate_count": stored_candidates,
+                    "candidate_count": pending_candidates or stored_candidates,
                     "provider_diagnostics": diagnostics,
                 }
             return {
@@ -648,12 +668,21 @@ def _stage_reverse_candidates(
         # were the source file.
         media_url = match.direct_media_url
         if not media_url:
+            unresolved_message = (
+                f"A similar source was found ({match.canonical_url}), "
+                "but its media file could not be loaded automatically."
+                if match.canonical_url
+                else "A similar source was found, but its post could not be loaded, so "
+                "only a search preview is available. It is not offered as a file."
+            )
             _record_provider_diagnostic(
                 diagnostics, "perceptual_search", match.provider, "unavailable", 0,
                 "import.source_link_unresolved",
-                "A similar source was found, but its post could not be loaded, so "
-                "only a search preview is available. It is not offered as a file.",
+                unresolved_message,
                 remote_id=match.remote_id,
+                source_url=match.canonical_url,
+                author=match.author,
+                confidence=match.confidence,
             )
             continue
         name = f"candidate-{uuid4().hex}{_extension(media_url)}"
@@ -678,6 +707,7 @@ def _stage_reverse_candidates(
         existing.add(key)
     if not stored:
         return 0
+    stored.sort(key=lambda item: item[0].confidence, reverse=True)
     max_rank_row = connection.execute(
         "SELECT MAX(rank) FROM import_source_candidates WHERE review_item_id=?",
         (review_id,),
@@ -699,6 +729,16 @@ def _stage_reverse_candidates(
                 inspection.file_size,
             ),
         )
+    all_rows = connection.execute(
+        "SELECT id FROM import_source_candidates WHERE review_item_id=? "
+        "ORDER BY confidence DESC, id ASC",
+        (review_id,),
+    ).fetchall()
+    for rank, cand_row in enumerate(all_rows):
+        connection.execute(
+            "UPDATE import_source_candidates SET rank=? WHERE id=?",
+            (rank, cand_row["id"]),
+        )
     connection.commit()
     return len(stored)
 
@@ -706,7 +746,7 @@ def _stage_reverse_candidates(
 def _pending_review(connection: sqlite3.Connection, review_id: int) -> sqlite3.Row:
     row = connection.execute(
         "SELECT review.id, review.status, candidate.id AS candidate_id, "
-        "candidate.stored_path, candidate.media_type, candidate.content_hash, "
+        "candidate.original_name, candidate.stored_path, candidate.media_type, candidate.content_hash, "
         "candidate.width, candidate.height, candidate.file_size, "
         "candidate.source_metadata_json "
         "FROM review_items review JOIN import_candidates candidate "

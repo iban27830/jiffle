@@ -35,7 +35,7 @@ class E621SourceProvider:
     # real matches.  e621 itself hides anything below 60 by default; the lookup
     # lowers that server-side cut-off and applies this provider threshold instead.
     min_similar_confidence = 50.0
-    domains = {"e621.net", "e926.net"}
+    domains = {"e621.net", "www.e621.net", "e926.net", "www.e926.net"}
     page_limit = 320
     _transient_statuses = {408, 429, 500, 502, 503, 504}
     _max_attempts = 3
@@ -126,7 +126,8 @@ class E621SourceProvider:
             post_id = str(post["id"])
             file_payload = post.get("file") or {}
             sample_payload = post.get("sample") or {}
-            direct_url = _media_url(file_payload, sample_payload)
+            deleted = bool((post.get("flags") or {}).get("deleted"))
+            direct_url = _media_url(file_payload, sample_payload, deleted=deleted)
             tags_payload = post.get("tags") or {}
             tags = tuple(
                 tag
@@ -289,7 +290,8 @@ class E621SourceProvider:
     def _post_to_source(self, post: dict, domain: str, post_id: str, allow_missing: bool = False) -> SourceMedia:
         file_payload = post.get("file") or {}
         sample_payload = post.get("sample") or {}
-        direct_url = _media_url(file_payload, sample_payload)
+        deleted = bool((post.get("flags") or {}).get("deleted"))
+        direct_url = _media_url(file_payload, sample_payload, deleted=deleted)
         if not direct_url and not allow_missing:
             raise ValueError("missing media")
         tags_payload = post.get("tags") or {}
@@ -371,16 +373,19 @@ class E621SourceProvider:
 
 
 
-def _media_url(file_payload: dict, sample_payload: dict) -> str | None:
+def _media_url(file_payload: dict, sample_payload: dict, deleted: bool = False) -> str | None:
     """Prefer the original file URL and rebuild old e621 CDN URLs when needed."""
     explicit = _normalize_url(file_payload.get("url"))
     if explicit:
         return explicit
+    sample = _normalize_url(sample_payload.get("url"))
+    if deleted and not sample:
+        return None
     digest = _valid_md5(file_payload.get("md5"))
     extension = _valid_extension(file_payload.get("ext"))
-    if digest and extension:
+    if digest and extension and not deleted:
         return f"https://static1.e621.net/data/{digest[:2]}/{digest[2:4]}/{digest}.{extension}"
-    return _normalize_url(sample_payload.get("url"))
+    return sample
 
 
 def _normalize_url(value) -> str | None:
@@ -438,6 +443,10 @@ def _post_id(path: str) -> int | None:
     parts = [part for part in path.split("/") if part]
     if len(parts) >= 2 and parts[0] == "posts":
         value = parts[1][:-5] if parts[1].endswith(".json") else parts[1]
+        if value.isdigit():
+            return int(value)
+    if len(parts) >= 3 and parts[0] == "post" and parts[1] in {"show", "view"}:
+        value = parts[2][:-5] if parts[2].endswith(".json") else parts[2]
         if value.isdigit():
             return int(value)
     return None

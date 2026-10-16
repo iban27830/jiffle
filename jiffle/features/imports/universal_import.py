@@ -79,6 +79,10 @@ def _mark_provider_cooldown(name: str) -> None:
         _provider_cooldowns[name] = time.monotonic() + PROVIDER_COOLDOWN_SECONDS
 
 
+def _mark_provider_failure(name: str) -> None:
+    _mark_provider_cooldown(name)
+
+
 def _clear_provider_cooldown(name: str) -> None:
     with _provider_cooldowns_lock:
         _provider_cooldowns.pop(name, None)
@@ -191,17 +195,54 @@ def filter_source_tags(
     return replace(source, tags=tags, character_tags=character_tags)
 
 
+def _clean_original_name(name: str | None) -> str:
+    raw = Path(str(name or "").strip()).name
+    cleaned = re.sub(
+        r"^(?:upload|candidate|media|resolve)-[0-9a-fA-F]{32}-",
+        "",
+        raw,
+    )
+    return cleaned or raw or "import"
+
+
+def _filename_hash_hints(
+    original_name: str | None, fallback_name: str | None = None
+) -> tuple[str | None, str | None]:
+    text = _clean_original_name(original_name or fallback_name or "")
+    text = re.sub(
+        r"^(?:upload|candidate|media|resolve)-[0-9a-fA-F]{32}\b[_.-]*",
+        "",
+        text,
+    )
+    stem = Path(text).stem
+    if not stem:
+        return None, None
+    sha_match = re.search(r"(?<![0-9a-fA-F])([0-9a-fA-F]{64})(?![0-9a-fA-F])", stem)
+    sha256_hint = sha_match.group(1).lower() if sha_match else None
+    md5_match = re.search(r"(?<![0-9a-fA-F])([0-9a-fA-F]{32})(?![0-9a-fA-F])", stem)
+    md5_hint = md5_match.group(1).lower() if md5_match else None
+    return md5_hint, sha256_hint
+
+
 def create_universal_import_job(
-    connection: sqlite3.Connection, submitted_input: str, input_kind: str
+    connection: sqlite3.Connection,
+    submitted_input: str,
+    input_kind: str,
+    original_name: str | None = None,
 ) -> int:
     cursor = connection.execute(
         "INSERT INTO background_jobs (job_type, status) VALUES ('import_resolve', 'pending')"
     )
     job_id = int(cursor.lastrowid)
+    display_name = (
+        _clean_original_name(original_name or Path(submitted_input).name)
+        if input_kind == "file"
+        else (original_name or Path(submitted_input).name or "import")
+    )
     connection.execute(
         "INSERT INTO import_candidates (job_id, source_path, original_name, status) "
         "VALUES (?, ?, ?, 'pending')",
-        (job_id, submitted_input, Path(submitted_input).name or "import",),
+        (job_id, submitted_input, display_name),
     )
     create_import_history(connection, job_id, {
         "submitted_input": submitted_input,
@@ -623,6 +664,7 @@ def run_universal_import_job(
             digest = _md5(original_path)
         _progress(connection, job_id, 45, "Searching supported sources")
         exact_started = time.perf_counter()
+        exact_verify_digest = digest
         exact, errors = _search_exact(
             providers, digest, source_hint, details["provider_timings"], details["provider_diagnostics"],
             on_progress=lambda names: _progress(
@@ -630,6 +672,33 @@ def run_universal_import_job(
             ),
             sha256_digest=inspection.content_hash,
         )
+        if not exact and input_kind == "file":
+            cand_row = connection.execute(
+                "SELECT original_name FROM import_candidates WHERE id=?",
+                (candidate_id,),
+            ).fetchone()
+            orig_name = cand_row["original_name"] if cand_row else source_path.name
+            hint_md5, hint_sha256 = _filename_hash_hints(orig_name, source_path.name)
+            query_md5 = hint_md5 if (hint_md5 and hint_md5 != digest) else None
+            query_sha256 = (
+                hint_sha256
+                if (hint_sha256 and hint_sha256 != inspection.content_hash)
+                else None
+            )
+            if query_md5 or query_sha256:
+                hint_exact, hint_errors = _search_exact(
+                    providers,
+                    query_md5 or "",
+                    source_hint,
+                    details["provider_timings"],
+                    details["provider_diagnostics"],
+                    sha256_digest=query_sha256,
+                )
+                errors = errors + hint_errors
+                if hint_exact:
+                    exact = hint_exact
+                    if query_md5:
+                        exact_verify_digest = query_md5
         details["timing"]["phases_ms"]["exact_search"] = _elapsed_ms(exact_started)
         details["exact_candidates_checked"] = len(exact)
         details["provider_errors"] = list(details.get("provider_errors", [])) + errors
@@ -681,7 +750,7 @@ def run_universal_import_job(
         _progress(connection, job_id, 70 if exact else 65, "Checking source files")
         download_started = time.perf_counter()
         valid_candidates, download_errors = _download_exact_candidates(
-            exact, digest, settings, downloader, details["provider_diagnostics"]
+            exact, exact_verify_digest, settings, downloader, details["provider_diagnostics"]
         )
         details["timing"]["phases_ms"]["exact_download"] = _elapsed_ms(download_started)
         details["provider_errors"] = list(details.get("provider_errors", [])) + download_errors
@@ -783,19 +852,37 @@ def run_universal_import_job(
             # Videos are searched through one representative frame, so a re-encoded
             # or sample-quality copy can still match the post it was taken from even
             # though its bytes differ from the original.
-            similar.extend(_reverse_similar(original_path, providers, details["provider_diagnostics"]))
-            similar = [_coerce_match(match, "perceptual") for match in similar]
-            similar = [match for match in _unique_similar(similar) if match.confidence >= MIN_SIMILAR_CONFIDENCE]
+            for raw_match in _reverse_similar(
+                original_path, providers, details["provider_diagnostics"], settings=settings
+            ):
+                if isinstance(raw_match, SourceMatch):
+                    similar.append(raw_match)
+                else:
+                    coerced = _coerce_match(raw_match, "perceptual")
+                    if coerced is not None and coerced.confidence >= _reverse_min_confidence_by_name(
+                        coerced.provider, providers
+                    ):
+                        similar.append(coerced)
+            similar = _unique_similar(similar)
             details["similar_candidates_found"] = len(similar)
             for match in similar:
                 media_url = match.direct_media_url
                 if not media_url:
+                    unresolved_message = (
+                        f"A similar source was found ({match.canonical_url}), "
+                        "but its media file could not be loaded automatically."
+                        if match.canonical_url
+                        else "A similar source was found, but its post could not be loaded, so "
+                        "only a search preview is available. It is not offered as a file."
+                    )
                     _record_provider_diagnostic(
                         details["provider_diagnostics"], "perceptual_search", match.provider,
                         "unavailable", 0, "import.source_link_unresolved",
-                        "A similar source was found, but its post could not be loaded, so "
-                        "only a search preview is available. It is not offered as a file.",
+                        unresolved_message,
                         remote_id=match.remote_id,
+                        source_url=match.canonical_url,
+                        author=match.author,
+                        confidence=match.confidence,
                     )
                     continue
                 path = settings.resolved_import_staging_path / f"candidate-{uuid4().hex}{_extension(media_url)}"
@@ -815,6 +902,7 @@ def run_universal_import_job(
                         remote_id=match.remote_id,
                     )
             if candidate_paths:
+                candidate_paths.sort(key=lambda item: item[0].confidence, reverse=True)
                 connection.execute(
                     "UPDATE import_candidates SET status='review', stored_path=?, media_type=?, "
                     "content_hash=?, width=?, height=?, file_size=?, source_metadata_json=? WHERE id=?",
@@ -1180,7 +1268,14 @@ def _download_exact_candidates(exact, digest, settings, downloader, diagnostics=
     return valid, errors
 
 
-def resolve_exact_downloads(path, providers, downloader, settings, diagnostics=None):
+def resolve_exact_downloads(
+    path,
+    providers,
+    downloader,
+    settings,
+    diagnostics=None,
+    original_name: str | None = None,
+):
     """Find exact copies of a local file and download the bytes that verify.
 
     Returns ``(matches, verified, errors)``.  ``matches`` are every exact source
@@ -1190,11 +1285,33 @@ def resolve_exact_downloads(path, providers, downloader, settings, diagnostics=N
     returned paths and must remove them.
     """
     digest = _md5(path)
+    sha256_digest = _sha256(path)
+    verify_digest = digest
     matches, search_errors = _search_exact(
-        providers, digest, None, None, diagnostics, sha256_digest=_sha256(path)
+        providers, digest, None, None, diagnostics, sha256_digest=sha256_digest
     )
+    if not matches:
+        hint_md5, hint_sha256 = _filename_hash_hints(original_name, Path(path).name)
+        query_md5 = hint_md5 if (hint_md5 and hint_md5 != digest) else None
+        query_sha256 = (
+            hint_sha256 if (hint_sha256 and hint_sha256 != sha256_digest) else None
+        )
+        if query_md5 or query_sha256:
+            hint_matches, hint_errors = _search_exact(
+                providers,
+                query_md5 or "",
+                None,
+                None,
+                diagnostics,
+                sha256_digest=query_sha256,
+            )
+            search_errors = search_errors + hint_errors
+            if hint_matches:
+                matches = hint_matches
+                if query_md5:
+                    verify_digest = query_md5
     verified, download_errors = _download_exact_candidates(
-        matches, digest, settings, downloader, diagnostics
+        matches, verify_digest, settings, downloader, diagnostics
     )
     return matches, verified, search_errors + download_errors
 
@@ -1221,6 +1338,9 @@ def _record_provider_diagnostic(
     raw_count: int | None = None,
     above_threshold: int | None = None,
     min_confidence: float | None = None,
+    source_url: str | None = None,
+    author: str | None = None,
+    confidence: float | None = None,
 ) -> None:
     """Append a safe, UI-friendly result for one provider and resolution stage."""
     if target is None:
@@ -1236,6 +1356,8 @@ def _record_provider_diagnostic(
         item["error_code"] = str(code)
     if message:
         safe_message = _safe_error_message(message, "The provider did not complete this step.")
+        if source_url:
+            safe_message = safe_message.replace("<redacted-url>", str(source_url))
         item["message"] = safe_message
         item["error_message"] = safe_message
     if duration_ms is not None:
@@ -1248,6 +1370,12 @@ def _record_provider_diagnostic(
         item["above_threshold"] = max(0, int(above_threshold))
     if min_confidence is not None:
         item["min_confidence"] = round(float(min_confidence), 2)
+    if source_url:
+        item["source_url"] = str(source_url)
+    if author:
+        item["author"] = str(author)
+    if confidence is not None:
+        item["confidence"] = round(float(confidence), 2)
     target.append(item)
 
 
@@ -1367,7 +1495,12 @@ def _local_similar(connection, settings, original_path, inspection):
     return results
 
 
-def _reverse_similar(image_path, providers, diagnostics=None):
+def _reverse_similar(
+    image_path,
+    providers,
+    diagnostics=None,
+    settings: Settings | None = None,
+):
     """Run every available reverse search and return confirmable candidates.
 
     Providers are queried at the same time under one deadline so a slow service
@@ -1387,13 +1520,20 @@ def _reverse_similar(image_path, providers, diagnostics=None):
             )
         return []
     reverse_providers = []
-    for provider in list(providers) + [_iqdb_reverse_search(), _saucenao_reverse_search()]:
+    seen_reverse_names: set[str] = set()
+    for provider in list(providers) + [
+        _iqdb_reverse_search(),
+        _saucenao_reverse_search(settings),
+    ]:
         if provider is None or not callable(getattr(provider, "search_similar", None)):
             continue
         name = (
             getattr(provider, "provider_name", None)
             or provider.__class__.__name__.lower()
         )
+        if name in seen_reverse_names:
+            continue
+        seen_reverse_names.add(name)
         # A provider that answers exact MD5 lookups may still have no reverse
         # search at all.  Report that honestly once instead of listing it as a
         # service that was queried and found nothing.
@@ -1413,6 +1553,14 @@ def _reverse_similar(image_path, providers, diagnostics=None):
                     diagnostics, "perceptual_search", name, "not_configured", 0,
                     "import.provider_not_configured",
                     f"{name} was not checked because its account is not configured.",
+                )
+            continue
+        if _provider_on_cooldown(name):
+            if diagnostics is not None:
+                _record_provider_diagnostic(
+                    diagnostics, "perceptual_search", name, "skipped", 0,
+                    "import.provider_cooldown",
+                    f"{name} did not answer recently and was skipped for a few minutes.",
                 )
             continue
         reverse_providers.append(provider)
@@ -1440,6 +1588,7 @@ def _reverse_similar(image_path, providers, diagnostics=None):
         future.cancel()
         provider = futures[future]
         name = getattr(provider, "provider_name", None) or provider.__class__.__name__.lower()
+        _mark_provider_failure(name)
         raw_results.append({
             "provider": name,
             "matches": [],
@@ -1462,6 +1611,19 @@ def _reverse_similar(image_path, providers, diagnostics=None):
     for result in raw_results:
         provider_name = str(result["provider"])
         error = result.get("error")
+        if error:
+            error_code = str(error.get("code") or "")
+            if error_code in {
+                "import.rate_limited",
+                "import.provider_unavailable",
+                "import.e621_rate_limited",
+                "import.e621_unavailable",
+                "import.e621_timeout",
+                "import.provider_timeout",
+            }:
+                _mark_provider_failure(provider_name)
+        else:
+            _clear_provider_cooldown(provider_name)
         raw_matches = list(result.get("matches") or [])
         # Each service reports similarity on its own scale, so keep the
         # provider-specific cut-off that the lookup used.
@@ -1506,12 +1668,22 @@ def _iqdb_reverse_search():
         return None
 
 
-def _saucenao_reverse_search():
+def _saucenao_reverse_search(settings: Settings | None = None):
     try:
         from jiffle.features.imports.source_adapters.saucenao import SaucenaoReverseSearch
-        return SaucenaoReverseSearch()
+        api_key = getattr(settings, "saucenao_api_key", None) if settings is not None else None
+        return SaucenaoReverseSearch(api_key=api_key)
     except Exception:
         return None
+
+
+def _reverse_min_confidence_by_name(provider_name: str, providers) -> float:
+    for provider in providers or ():
+        if getattr(provider, "provider_name", None) == provider_name:
+            return _reverse_min_confidence(provider)
+    if str(provider_name or "").lower() == "e621":
+        return 50.0
+    return MIN_SIMILAR_CONFIDENCE
 
 
 def _run_reverse_search(provider, image_path) -> dict[str, object]:
@@ -1583,12 +1755,57 @@ def _reverse_links(raw) -> list[str]:
     return list(dict.fromkeys(values))
 
 
+_PREVIEW_MD5_RE = re.compile(
+    r"(?:^|/|_|-)([0-9a-fA-F]{32})\.(?:jpg|jpeg|png|gif|webp|webm|mp4)$",
+    re.IGNORECASE,
+)
+
+
+def _valid_md5_hex(value: object) -> str | None:
+    text = str(value or "").strip().lower()
+    if len(text) == 32 and all(character in "0123456789abcdef" for character in text):
+        return text
+    return None
+
+
 def _reverse_md5(url: str) -> str | None:
     """Read a 32-character MD5 from a booru search link, when present."""
     query = parse_qs(urlsplit(url).query)
-    value = str((query.get("md5") or [""])[0]).strip().lower()
-    if len(value) == 32 and all(character in "0123456789abcdef" for character in value):
-        return value
+    return _valid_md5_hex((query.get("md5") or [""])[0])
+
+
+def _extract_md5_from_reverse_raw(raw, resolved_candidate=None) -> str | None:
+    if resolved_candidate is not None:
+        digest = _valid_md5_hex(getattr(resolved_candidate, "content_md5", None))
+        if digest:
+            return digest
+    if isinstance(raw, dict):
+        for key in ("content_md5", "md5"):
+            digest = _valid_md5_hex(raw.get(key))
+            if digest:
+                return digest
+    else:
+        digest = _valid_md5_hex(getattr(raw, "content_md5", None))
+        if digest:
+            return digest
+    for url in _reverse_links(raw):
+        digest = _reverse_md5(url)
+        if digest:
+            return digest
+        path_match = _PREVIEW_MD5_RE.search(urlsplit(url).path or url)
+        if path_match:
+            return path_match.group(1).lower()
+    preview_url = (
+        raw.get("preview_url")
+        if isinstance(raw, dict)
+        else getattr(raw, "preview_url", None)
+    )
+    if preview_url:
+        path_match = _PREVIEW_MD5_RE.search(
+            urlsplit(str(preview_url)).path or str(preview_url)
+        )
+        if path_match:
+            return path_match.group(1).lower()
     return None
 
 
@@ -1612,22 +1829,37 @@ def _reverse_candidate_from_url(url: str, providers):
             if not callable(search):
                 continue
             try:
+                fallback_match = None
                 for raw in search(digest) or []:
                     match = _coerce_match(raw, "perceptual")
                     if match is not None and (match.direct_media_url or match.preview_url):
                         return match
+                    if match is not None and fallback_match is None:
+                        fallback_match = match
+                if fallback_match is not None:
+                    return fallback_match
             except Exception:
                 continue
             continue
         fetch = getattr(provider, "fetch", None)
-        if not callable(fetch):
+        fetch_metadata = getattr(provider, "fetch_metadata", None)
+        if not callable(fetch) and not callable(fetch_metadata):
             continue
-        try:
-            source = _coerce_source(
-                fetch(url), url, getattr(provider, "provider_name", "unknown")
-            )
-        except Exception:
-            continue
+        source = None
+        if callable(fetch):
+            try:
+                source = _coerce_source(
+                    fetch(url), url, getattr(provider, "provider_name", "unknown")
+                )
+            except Exception:
+                source = None
+        if source is None and callable(fetch_metadata):
+            try:
+                source = _coerce_source(
+                    fetch_metadata(url), url, getattr(provider, "provider_name", "unknown")
+                )
+            except Exception:
+                source = None
         if isinstance(source, SourceMedia):
             return SourceMatch(
                 provider=source.provider,
@@ -1666,9 +1898,65 @@ def _resolve_reverse_candidate(raw, providers):
         # that only carries a search-service thumbnail is not a real source.
         # Keep looking through the remaining links for a loadable post.
         if candidate.direct_media_url:
+            if fallback is not None:
+                best_meta = _select_metadata_source([fallback, candidate]) or candidate
+                return replace(
+                    best_meta,
+                    direct_media_url=candidate.direct_media_url,
+                    content_md5=best_meta.content_md5 or candidate.content_md5,
+                    match_method="perceptual",
+                    confidence=candidate.confidence,
+                    preview_url=best_meta.preview_url or candidate.preview_url or preview,
+                    width=best_meta.width or candidate.width,
+                    height=best_meta.height or candidate.height,
+                )
             return candidate
         if fallback is None:
             fallback = candidate
+
+    digest = _extract_md5_from_reverse_raw(raw, fallback)
+    if digest:
+        md5_matches: list[SourceMatch] = []
+        for provider in providers or ():
+            search = getattr(provider, "search_by_md5", None)
+            if not callable(search):
+                continue
+            provider_name = getattr(provider, "provider_name", "unknown")
+            if _provider_on_cooldown(provider_name) or _provider_needs_configuration(provider):
+                continue
+            algorithm = str(getattr(provider, "hash_algorithm", "md5") or "md5").strip().lower()
+            if algorithm != "md5":
+                continue
+            try:
+                for item in search(digest) or []:
+                    match = _coerce_match(item, "perceptual")
+                    if match is not None:
+                        md5_matches.append(match)
+            except Exception:
+                continue
+        file_match = next((item for item in md5_matches if item.direct_media_url), None)
+        if file_match is not None:
+            pool = [item for item in ([fallback] if fallback is not None else []) + md5_matches if item is not None]
+            best_meta = _select_metadata_source(pool) or file_match
+            return replace(
+                best_meta,
+                direct_media_url=file_match.direct_media_url,
+                content_md5=best_meta.content_md5 or file_match.content_md5 or digest,
+                match_method="perceptual",
+                confidence=confidence if confidence is not None else file_match.confidence,
+                preview_url=best_meta.preview_url or file_match.preview_url or preview,
+                width=best_meta.width or file_match.width,
+                height=best_meta.height or file_match.height,
+            )
+        if fallback is None and md5_matches:
+            best_meta = _select_metadata_source(md5_matches)
+            if best_meta is not None:
+                fallback = replace(
+                    best_meta,
+                    match_method="perceptual",
+                    confidence=confidence if confidence is not None else best_meta.confidence,
+                    preview_url=best_meta.preview_url or preview,
+                )
     return fallback if fallback is not None else raw
 
 
@@ -1720,9 +2008,20 @@ def _unique_similar(matches):
         if match is None:
             continue
         key = (match.provider, match.remote_id or match.canonical_url)
-        if key not in unique or unique[key].confidence < match.confidence:
+        existing = unique.get(key)
+        if existing is None or (
+            bool(match.direct_media_url),
+            match.confidence,
+        ) > (
+            bool(existing.direct_media_url),
+            existing.confidence,
+        ):
             unique[key] = match
-    return sorted(unique.values(), key=lambda item: item.confidence, reverse=True)
+    return sorted(
+        unique.values(),
+        key=lambda item: (bool(item.direct_media_url), item.confidence),
+        reverse=True,
+    )
 
 
 def _metadata_richness(match: SourceMatch) -> tuple[int, int, int, int]:

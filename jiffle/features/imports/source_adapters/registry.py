@@ -5,6 +5,7 @@ from jiffle.features.imports.source_adapters.furaffinity import FurAffinitySourc
 from jiffle.features.imports.source_adapters.gelbooru import GelbooruSourceProvider
 from jiffle.features.imports.source_adapters.pawchive import PawchiveSourceProvider
 from jiffle.features.imports.source_adapters.rule34 import Rule34SourceProvider
+from jiffle.features.imports.source_adapters.saucenao import SaucenaoReverseSearch
 from jiffle.features.imports.source_adapters.tbib import TbibSourceProvider
 
 
@@ -18,3 +19,7 @@ def build_source_providers(settings: Settings):
         TbibSourceProvider(),
         PawchiveSourceProvider(),
     )
+
+
+def build_saucenao_provider(settings: Settings) -> SaucenaoReverseSearch:
+    return SaucenaoReverseSearch(settings.saucenao_api_key)

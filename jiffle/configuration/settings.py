@@ -113,6 +113,7 @@ class Settings:
     rule34_api_key: str | None = None
     furaffinity_cookie_a: str | None = None
     furaffinity_cookie_b: str | None = None
+    saucenao_api_key: str | None = None
 
     @property
     def resolved_import_staging_path(self) -> Path:
@@ -183,6 +184,7 @@ class Settings:
                 "gelbooru_user_id", "gelbooru_api_key",
                 "rule34_user_id", "rule34_api_key",
                 "furaffinity_cookie_a", "furaffinity_cookie_b",
+                "saucenao_api_key",
             }
             values = {key: value for key, value in payload.items() if key in allowed}
             if "collection_export_mode" in values:
@@ -262,6 +264,7 @@ def persist_settings(settings: Settings) -> None:
         "rule34_api_key": settings.rule34_api_key,
         "furaffinity_cookie_a": settings.furaffinity_cookie_a,
         "furaffinity_cookie_b": settings.furaffinity_cookie_b,
+        "saucenao_api_key": settings.saucenao_api_key,
     }
     try:
         with temporary.open("w", encoding="utf-8") as file:

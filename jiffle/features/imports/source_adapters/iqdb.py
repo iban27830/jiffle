@@ -7,6 +7,7 @@ uploads, and the original bytes are not needed for a perceptual match.
 """
 
 import re
+import threading
 from html import unescape
 from pathlib import Path
 from urllib.parse import urljoin
@@ -17,6 +18,13 @@ from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailu
 from jiffle.features.imports.source_adapters.reverse_search import (
     REVERSE_SEARCH_USER_AGENT,
     reverse_preview_bytes,
+)
+
+_IQDB_LOCK = threading.Lock()
+_IQDB_RATE_LIMIT_PHRASES = (
+    "can't do more than one search at a time",
+    "too many requests",
+    "rate limit",
 )
 
 RESULT_TABLE = re.compile(r"<table\b.*?</table>", re.I | re.S)
@@ -53,16 +61,43 @@ class IqdbReverseSearch:
         if preview is None:
             return []
         try:
-            response = self._request(
-                files={"file": ("jiffle-preview.jpg", preview, "image/jpeg")},
-                timeout=self.timeout,
-            )
+            with _IQDB_LOCK:
+                response = self._request(
+                    files={"file": ("jiffle-preview.jpg", preview, "image/jpeg")},
+                    timeout=self.timeout,
+                )
+            status = getattr(response, "status_code", None)
+            if status in {429, 503}:
+                raise SourceProviderFailure(
+                    "import.rate_limited", "IQDB rate limit was reached."
+                )
             response.raise_for_status()
+        except SourceProviderFailure:
+            raise
+        except requests.HTTPError as error:
+            resp = getattr(error, "response", None)
+            status = getattr(resp, "status_code", None)
+            body_text = str(getattr(resp, "text", "") or "").lower()
+            if status in {429, 503} or any(
+                phrase in body_text for phrase in _IQDB_RATE_LIMIT_PHRASES
+            ):
+                raise SourceProviderFailure(
+                    "import.rate_limited", "IQDB rate limit was reached."
+                ) from error
+            raise SourceProviderFailure(
+                "import.provider_unavailable", "IQDB reverse search is unavailable."
+            ) from error
         except requests.RequestException as error:
             raise SourceProviderFailure(
                 "import.provider_unavailable", "IQDB reverse search is unavailable."
             ) from error
-        return _parse_results(response.text)
+        text = response.text or ""
+        lowered = text.lower()
+        if any(phrase in lowered for phrase in _IQDB_RATE_LIMIT_PHRASES):
+            raise SourceProviderFailure(
+                "import.rate_limited", "IQDB rate limit was reached."
+            )
+        return _parse_results(text)
 
 
 def _parse_results(html: str) -> list[dict[str, object]]:

@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from PIL import Image, ImageOps
 
+from jiffle.features.imports.source_adapters.reverse_search import extract_video_frame
 from jiffle.features.library.domain import MediaItem, MediaType
 
 
@@ -44,15 +45,7 @@ def _load_preview(media_type: MediaType, source: Path) -> Image.Image:
     if media_type is MediaType.IMAGE:
         return Image.open(source)
 
-    try:
-        import cv2
-    except ImportError as error:
-        raise RuntimeError("Video thumbnail support is unavailable") from error
-    capture = cv2.VideoCapture(str(source))
-    try:
-        success, frame = capture.read()
-        if not success:
-            raise ValueError("Could not read a video frame")
-        return Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-    finally:
-        capture.release()
+    frame = extract_video_frame(source)
+    if frame is None:
+        raise ValueError("Could not read a video frame")
+    return frame

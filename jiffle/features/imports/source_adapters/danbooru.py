@@ -26,7 +26,13 @@ class DanbooruSourceProvider:
     # endpoint is authenticated-only.
     credentials_improve_results = True
     reverse_search_requires_auth = True
-    domains = {"danbooru.donmai.us", "safebooru.donmai.us"}
+    domains = {
+        "danbooru.donmai.us",
+        "www.danbooru.donmai.us",
+        "safebooru.donmai.us",
+        "hijiribe.donmai.us",
+        "sonohara.donmai.us",
+    }
     page_limit = 200
 
     def __init__(self, login: str | None = None, api_key: str | None = None):
@@ -422,6 +428,10 @@ def _post_id(path: str) -> int | None:
     parts = [part for part in path.split("/") if part]
     if len(parts) >= 2 and parts[0] == "posts":
         value = parts[1][:-5] if parts[1].endswith(".json") else parts[1]
+        if value.isdigit():
+            return int(value)
+    if len(parts) >= 3 and parts[0] == "post" and parts[1] in {"show", "view"}:
+        value = parts[2][:-5] if parts[2].endswith(".json") else parts[2]
         if value.isdigit():
             return int(value)
     return None

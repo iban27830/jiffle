@@ -25,6 +25,9 @@ def create_app(
     source_providers: tuple[object, ...] | None = None,
     media_downloader: object | None = None,
 ) -> Flask:
+    from jiffle.features.imports import universal_import
+
+    universal_import._provider_cooldowns.clear()
     resolved_settings = settings or Settings.from_environment()
     app = Flask(__name__, static_folder="frontend", static_url_path="/app-assets")
     app.config["JIFFLE_SETTINGS"] = resolved_settings

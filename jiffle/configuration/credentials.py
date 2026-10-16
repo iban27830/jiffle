@@ -16,6 +16,7 @@ CREDENTIAL_GROUPS: tuple[tuple[str, ...], ...] = (
     ("gelbooru_user_id", "gelbooru_api_key"),
     ("danbooru_login", "danbooru_api_key"),
     ("e621_login", "e621_api_key"),
+    ("saucenao_api_key",),
 )
 
 # Settings field -> parameter name accepted inside a pasted credential string.
@@ -28,6 +29,7 @@ PARAMETER_FIELDS = {
     "danbooru_api_key": "api_key",
     "e621_login": "login",
     "e621_api_key": "api_key",
+    "saucenao_api_key": "api_key",
 }
 
 

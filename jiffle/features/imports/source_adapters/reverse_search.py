@@ -17,17 +17,27 @@ once per provider.
 import io
 from collections import OrderedDict
 from pathlib import Path
+import shutil
+import subprocess
 from threading import Lock
 
-from PIL import Image
+from PIL import Image, ImageStat
 
 REVERSE_PREVIEW_MAX_SIDE = 256
 REVERSE_PREVIEW_QUALITY = 85
+REVERSE_PREVIEW_MAX_BYTES = 12_000
 REVERSE_SEARCH_USER_AGENT = "Jiffle/2.0"
 # A frame near the start is what boorus use for their own animated previews, but
 # a title card, fade-in or black lead-in can be unrepresentative, so sample a
 # little way into the video and fall back to the first frame when needed.
 VIDEO_PREVIEW_POSITION = 0.2
+_REVERSE_PREVIEW_FALLBACK_STEPS = (
+    (224, 78),
+    (192, 72),
+    (160, 68),
+    (128, 62),
+    (96, 52),
+)
 
 _PREVIEW_CACHE: "OrderedDict[tuple, bytes]" = OrderedDict()
 _PREVIEW_CACHE_LIMIT = 8
@@ -71,18 +81,41 @@ def _cache_key(path: Path, max_side: int, quality: int) -> tuple | None:
     return (str(path), stat.st_size, int(stat.st_mtime_ns), max_side, quality)
 
 
+def _encode_jpeg(
+    image: Image.Image, max_side: int, quality: int, optimize: bool = False
+) -> bytes:
+    resized = image.copy()
+    try:
+        resized.thumbnail((max_side, max_side))
+        buffer = io.BytesIO()
+        resized.save(buffer, "JPEG", quality=quality, optimize=optimize)
+        return buffer.getvalue()
+    finally:
+        resized.close()
+
+
 def _render_preview(path: Path, max_side: int, quality: int) -> bytes | None:
     image = _open_preview_source(path)
     if image is None:
         return None
     try:
         with image:
-            if image.mode != "RGB":
-                image = image.convert("RGB")
-            image.thumbnail((max_side, max_side))
-            buffer = io.BytesIO()
-            image.save(buffer, "JPEG", quality=quality)
-            return buffer.getvalue()
+            rgb = image.convert("RGB") if image.mode != "RGB" else image.copy()
+            try:
+                encoded = _encode_jpeg(rgb, max_side, quality)
+                if len(encoded) > REVERSE_PREVIEW_MAX_BYTES:
+                    for side, step_quality in _REVERSE_PREVIEW_FALLBACK_STEPS:
+                        encoded = _encode_jpeg(
+                            rgb,
+                            min(side, max_side),
+                            step_quality,
+                            optimize=True,
+                        )
+                        if len(encoded) <= REVERSE_PREVIEW_MAX_BYTES:
+                            break
+                return encoded
+            finally:
+                rgb.close()
     except (OSError, ValueError):
         return None
 
@@ -92,11 +125,28 @@ def _open_preview_source(path: Path) -> Image.Image | None:
         return Image.open(path)
     except (OSError, ValueError):
         pass
-    return _video_frame(path)
+    return extract_video_frame(path)
+
+
+def extract_video_frame(
+    path: Path, position: float = VIDEO_PREVIEW_POSITION
+) -> Image.Image | None:
+    """Extract one representative frame from a video via OpenCV or FFmpeg."""
+    source_path = Path(path)
+    if not source_path.is_file():
+        return None
+    frame = _video_frame_cv2(source_path, position)
+    if frame is not None:
+        return frame
+    return _video_frame_ffmpeg(source_path, position)
 
 
 def _video_frame(path: Path) -> Image.Image | None:
-    """Extract one representative frame from a video for the reverse search."""
+    """Backward-compatible wrapper around :func:`extract_video_frame`."""
+    return extract_video_frame(path, VIDEO_PREVIEW_POSITION)
+
+
+def _video_frame_cv2(path: Path, position: float) -> Image.Image | None:
     try:
         import cv2
     except ImportError:
@@ -110,18 +160,157 @@ def _video_frame(path: Path) -> Image.Image | None:
             count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         except Exception:
             count = 0
-        if count > 1:
-            target = min(count - 1, int(count * VIDEO_PREVIEW_POSITION))
-            capture.set(cv2.CAP_PROP_POS_FRAMES, target)
-        ok, frame = capture.read()
-        if not ok or frame is None:
-            capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            ok, frame = capture.read()
-        if not ok or frame is None:
+
+        def _read_at(pos: float):
+            if count > 1 and pos > 0:
+                target = min(count - 1, max(0, int(count * pos)))
+                capture.set(cv2.CAP_PROP_POS_FRAMES, target)
+            elif pos == 0:
+                capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ok, raw_frame = capture.read()
+            return raw_frame if ok and raw_frame is not None else None
+
+        frame = _read_at(position)
+        if frame is None and position > 0:
+            frame = _read_at(0.0)
+        if frame is not None and count > 1 and _frame_mean_intensity(frame) < 8.0:
+            for alt_pos in (0.5, 0.1, 0.0):
+                if abs(alt_pos - position) < 1e-6:
+                    continue
+                alt_frame = _read_at(alt_pos)
+                if alt_frame is not None and _frame_mean_intensity(alt_frame) >= 8.0:
+                    frame = alt_frame
+                    break
+        if frame is None:
             return None
         return Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     finally:
         capture.release()
+
+
+def _frame_mean_intensity(frame) -> float:
+    try:
+        return float(frame.mean())
+    except Exception:
+        return 255.0
+
+
+def _probe_video_duration(path: Path) -> float | None:
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+    try:
+        completed = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0 or not completed.stdout:
+        return None
+    for line in completed.stdout.splitlines():
+        line = line.strip()
+        if not line or line.upper() == "N/A":
+            continue
+        try:
+            duration = float(line)
+        except ValueError:
+            continue
+        if duration > 0:
+            return duration
+    return None
+
+
+def _ffmpeg_decode_png_frame(
+    ffmpeg: str, path: Path, seek_seconds: float
+) -> Image.Image | None:
+    command = [
+        ffmpeg,
+        "-nostdin",
+        "-v",
+        "error",
+        "-ss",
+        f"{max(0.0, seek_seconds):.3f}",
+        "-i",
+        str(path),
+        "-frames:v",
+        "1",
+        "-f",
+        "image2pipe",
+        "-vcodec",
+        "png",
+        "-",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0 or not completed.stdout:
+        return None
+    try:
+        with Image.open(io.BytesIO(completed.stdout)) as opened:
+            return opened.convert("RGB")
+    except (OSError, ValueError):
+        return None
+
+
+def _pil_mean_intensity(image: Image.Image) -> float:
+    try:
+        means = ImageStat.Stat(image).mean
+        return sum(means) / max(1, len(means))
+    except Exception:
+        return 255.0
+
+
+def _video_frame_ffmpeg(path: Path, position: float) -> Image.Image | None:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return None
+    duration = _probe_video_duration(path) if position > 0 else None
+    seek_seconds = max(0.0, duration * position) if duration and duration > 0 else 0.0
+    frame = _ffmpeg_decode_png_frame(ffmpeg, path, seek_seconds)
+    if frame is None and seek_seconds > 0:
+        frame = _ffmpeg_decode_png_frame(ffmpeg, path, 0.0)
+    if (
+        frame is not None
+        and duration
+        and duration > 0
+        and _pil_mean_intensity(frame) < 8.0
+    ):
+        for alt_pos in (0.5, 0.1, 0.0):
+            alt_seek = max(0.0, duration * alt_pos)
+            if abs(alt_seek - seek_seconds) < 1e-3:
+                continue
+            alt_frame = _ffmpeg_decode_png_frame(ffmpeg, path, alt_seek)
+            if alt_frame is not None and _pil_mean_intensity(alt_frame) >= 8.0:
+                frame.close()
+                frame = alt_frame
+                break
+            if alt_frame is not None:
+                alt_frame.close()
+    return frame
+
+
+def _valid_md5(value: object) -> str | None:
+    text = str(value or "").strip().lower()
+    return text if len(text) == 32 and all(c in "0123456789abcdef" for c in text) else None
 
 
 def iqdb_query_matches(
@@ -161,8 +350,21 @@ def iqdb_query_matches(
             "confidence": round(score, 2),
             "match_method": "perceptual",
         }
-        preview = (post or {}).get("preview") if isinstance(post, dict) else None
-        if isinstance(preview, dict) and preview.get("url"):
-            match["preview_url"] = str(preview["url"])
+        if isinstance(post, dict):
+            preview = post.get("preview")
+            preview_url = (
+                preview.get("url")
+                if isinstance(preview, dict) and preview.get("url")
+                else (post.get("preview_file_url") or post.get("sample_file_url"))
+            )
+            if preview_url:
+                match["preview_url"] = str(preview_url)
+            file_obj = post.get("file")
+            raw_md5 = post.get("md5") or (
+                file_obj.get("md5") if isinstance(file_obj, dict) else None
+            )
+            md5_value = _valid_md5(raw_md5)
+            if md5_value:
+                match["content_md5"] = md5_value
         matches.append(match)
     return matches

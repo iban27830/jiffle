@@ -23,7 +23,10 @@ from jiffle.features.background_editor.workflow import (
     background_device_value,
     background_model_value,
 )
-from jiffle.features.imports.source_adapters.registry import build_source_providers
+from jiffle.features.imports.source_adapters.registry import (
+    build_saucenao_provider,
+    build_source_providers,
+)
 from jiffle.infrastructure.database.connection import get_database
 from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
 
@@ -37,6 +40,7 @@ def get_settings():
 
 
 @settings_blueprint.patch("/api/v1/settings")
+@settings_blueprint.put("/api/v1/settings")
 def update_settings():
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
@@ -55,7 +59,7 @@ def update_settings():
         "huggingface_token",
         "danbooru_login", "danbooru_api_key", "e621_login", "e621_api_key",
         "gelbooru_user_id", "gelbooru_api_key", "rule34_user_id", "rule34_api_key",
-        "furaffinity_cookie_a", "furaffinity_cookie_b",
+        "furaffinity_cookie_a", "furaffinity_cookie_b", "saucenao_api_key",
     }
     if any(key not in allowed for key in payload):
         return _error("settings.unknown_field", "The request contains an unknown field.", 400)
@@ -190,6 +194,8 @@ def choose_directory():
 @settings_blueprint.post("/api/v1/settings/source-providers/<provider_name>/test")
 def test_source_provider(provider_name: str):
     provider = next((item for item in current_app.config["JIFFLE_SOURCE_PROVIDERS"] if item.provider_name == provider_name), None)
+    if provider is None and provider_name == "saucenao":
+        provider = build_saucenao_provider(current_app.config["JIFFLE_SETTINGS"])
     if provider is None:
         return _error("providers.not_found", "Source provider was not found.", 404)
     try:
@@ -367,10 +373,12 @@ def _validated_update(settings, payload):
         "crop_vision_url", "crop_vision_key", "crop_vision_model", "danbooru_login",
         "danbooru_api_key", "e621_login", "e621_api_key", "gelbooru_user_id",
         "gelbooru_api_key", "rule34_user_id", "rule34_api_key",
-        "furaffinity_cookie_a", "furaffinity_cookie_b",
+        "furaffinity_cookie_a", "furaffinity_cookie_b", "saucenao_api_key",
     ):
         if field in values and values[field] is not None and not isinstance(values[field], str):
             raise ValueError(f"{field} must be a string or null.")
+    if "saucenao_api_key" in values and isinstance(values["saucenao_api_key"], str):
+        values["saucenao_api_key"] = values["saucenao_api_key"].strip() or None
     return replace(settings, **values)
 
 
@@ -414,6 +422,7 @@ def _public_settings(settings):
         "rule34_api_key_configured": bool(settings.rule34_api_key),
         "furaffinity_cookie_a_configured": bool(settings.furaffinity_cookie_a),
         "furaffinity_cookie_b_configured": bool(settings.furaffinity_cookie_b),
+        "saucenao_api_key_configured": bool(settings.saucenao_api_key),
     }
 
 

@@ -55,18 +55,19 @@ def create_import_resolve_job():
         *request.files.getlist("file"),
         *request.files.getlist("files"),
     ]
-    inputs: list[tuple[str, str]] = []
+    inputs: list[tuple[str, str, str | None]] = []
     if uploaded_files:
         valid_files = [item for item in uploaded_files if item and item.filename]
         if not valid_files:
             return _error("import.invalid_request", "A file is required.", 400)
         settings.resolved_import_staging_path.mkdir(parents=True, exist_ok=True)
         for uploaded in valid_files:
+            raw_original_name = Path(uploaded.filename or "upload").name
             target = _staged_upload_target(
                 settings.resolved_import_staging_path, uploaded.filename
             )
             uploaded.save(target)
-            inputs.append((str(target), "file"))
+            inputs.append((str(target), "file", raw_original_name))
     else:
         payload = request.get_json(silent=True)
         if not isinstance(payload, dict):
@@ -88,13 +89,13 @@ def create_import_resolve_job():
                 normalized = normalize_source_url(raw_item)
             except ValueError as error:
                 return _error("import.invalid_source_url", str(error), 400)
-            inputs.append((normalized, "url"))
+            inputs.append((normalized, "url", None))
 
     connection = get_database()
     providers = current_app.config["JIFFLE_SOURCE_PROVIDERS"]
     downloader = current_app.config["JIFFLE_MEDIA_DOWNLOADER"]
     job_ids: list[int] = []
-    for submitted_input, input_kind in inputs:
+    for submitted_input, input_kind, original_name in inputs:
         if input_kind == "url":
             provider = next(
                 (item for item in providers if item.can_handle(submitted_input)),
@@ -128,7 +129,9 @@ def create_import_resolve_job():
                     Thread(target=run_set_import_job, args=arguments, daemon=True).start()
                 job_ids.append(job_id)
                 continue
-        job_id = create_universal_import_job(connection, submitted_input, input_kind)
+        job_id = create_universal_import_job(
+            connection, submitted_input, input_kind, original_name=original_name
+        )
         arguments = (
             settings.database_path,
             settings,
@@ -429,7 +432,7 @@ def _staged_upload_target(staging_root: Path, filename: str) -> Path:
     suffix = Path(raw_name).suffix.lower()
     safe_suffix = suffix if re.fullmatch(r"\.[a-z0-9]{1,10}", suffix) else ""
     stem_source = raw_name[: -len(safe_suffix)] if safe_suffix else raw_name
-    safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem_source).strip("._-")[:64] or "file"
+    safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem_source).strip("._-")[:120] or "file"
     return staging_root / f"upload-{uuid4().hex}-{safe_stem}{safe_suffix}"
 
 

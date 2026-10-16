@@ -438,7 +438,7 @@ def _source_candidates_by_review_ids(review_ids):
     rows = get_database().execute(
         "SELECT id, review_item_id, rank, match_method, confidence, provider, source_metadata_json, stored_path, "
         "media_type, content_hash, width, height, file_size, status FROM import_source_candidates "
-        f"WHERE review_item_id IN ({placeholders}) ORDER BY review_item_id, rank, id",
+        f"WHERE review_item_id IN ({placeholders}) ORDER BY review_item_id, confidence DESC, rank ASC, id ASC",
         unique_ids,
     ).fetchall()
     items_by_review = {review_id: [] for review_id in unique_ids}
