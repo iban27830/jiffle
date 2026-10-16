@@ -1,5 +1,9 @@
 import {parseRoute, libraryHref, editorDraftKey, imageDraftFields, pickImageDraft, restoreImageDraft, restoreTrimDraft, selectionRulesMatch} from './ui_state.js';
-import {api, waitForJob} from './api.js';
+import {api, waitForJob as pollJob} from './api.js';
+const waitForJob = (idOrUrl, onProgress) => pollJob(
+  typeof idOrUrl === 'number' || /^\d+$/.test(String(idOrUrl)) ? `/api/v1/jobs/${idOrUrl}` : idOrUrl,
+  onProgress,
+);
 
 import {parseLibrarySearch, withAuthorFilter, toggleSearchTerm} from './library_search.js';
 import {droppedUrl} from './import_drop.js';
@@ -396,9 +400,10 @@ function activeFiltersHtml() {
 }
 
 function tagHtml(tag, manual = false) {
-  const terms = parseLibrarySearch(librarySearch).terms;
-  const included = terms.includes(tag);
-  const excluded = terms.includes(`-${tag}`);
+  const parsed = parseLibrarySearch(librarySearch);
+  const tagLower = String(tag ?? '').toLowerCase();
+  const included = parsed.includedTags.some(t => t.toLowerCase() === tagLower);
+  const excluded = parsed.excludedTags.some(t => t.toLowerCase() === tagLower);
   const state = included ? ' included' : excluded ? ' excluded' : '';
   const remove = manual ? `<button type="button" class="tag-remove" data-remove-tag="${esc(tag)}" title="Remove tag"><i data-lucide="x"></i></button>` : '';
   return `<span class="tag tag-filter${state}${manual ? ' manual' : ''}" data-include-tag="${esc(tag)}" role="button" tabindex="0" title="${manual ? 'Manual tag - click to add to search' : 'Add to search'}">${esc(tag)}${remove}<button type="button" class="tag-exclude" data-exclude-tag="${esc(tag)}" title="Exclude from search"><i data-lucide="circle-minus"></i></button></span>`;
@@ -408,7 +413,7 @@ function authorHtml(author) {
   if (!author) return '<span class="muted-value">Unknown author</span>';
   const selectedAuthors = parseLibrarySearch(librarySearch).authors;
   return author.split(',').map(value => value.trim()).filter(Boolean).map(value => {
-    const selected = selectedAuthors.includes(value) ? ' included' : '';
+    const selected = selectedAuthors.some(a => a.toLowerCase() === value.toLowerCase()) ? ' included' : '';
     return `<button type="button" class="tag tag-filter author-filter${selected}" data-include-author="${esc(value)}" title="Search by author">${esc(value)}</button>`;
   }).join('');
 }
@@ -506,6 +511,8 @@ async function removeMediaTag(tag) {
 
 let tagSuggestToken = 0;
 
+const escapeHtml = esc;
+
 function attachTagInput(input, suggest, mediaId) {
   if (!input || !suggest) return;
   let items = [];
@@ -513,9 +520,14 @@ function attachTagInput(input, suggest, mediaId) {
   let timer = null;
   const close = () => { clearTimeout(timer); suggest.hidden = true; suggest.innerHTML = ''; items = []; active = -1; };
   const pick = tag => { close(); addMediaTag(mediaId, tag, input, suggest); };
-  const render = () => {
+  const renderItems = () => {
     if (!items.length) { close(); return; }
-    suggest.innerHTML = items.map((item, index) => `<button type="button" class="tag-suggest-item${index === active ? ' active' : ''}" data-tag="${esc(item.tag)}"><span>${esc(item.tag)}</span><small>${item.count}</small></button>`).join('');
+    suggest.innerHTML = items.map((item, index) => {
+      const label = item.matched_alias
+        ? `${escapeHtml(item.tag)} <span class="muted">← ${escapeHtml(item.matched_alias)} (${Number(item.count || 0)})</span>`
+        : escapeHtml(item.tag);
+      return `<button type="button" class="tag-suggest-item${index === active ? ' active' : ''}" data-tag="${escapeHtml(item.tag)}" data-tag-suggest="${escapeHtml(item.tag)}"><span>${label}</span><small>${item.count}</small></button>`;
+    }).join('');
     suggest.hidden = false;
     suggest.querySelectorAll('.tag-suggest-item').forEach((node, index) => { node.onmousedown = event => { event.preventDefault(); pick(items[index].tag); }; });
   };
@@ -524,7 +536,7 @@ function attachTagInput(input, suggest, mediaId) {
     try {
       const data = await api(`/api/v1/tags?q=${encodeURIComponent(prefix)}&limit=20`);
       if (token !== tagSuggestToken) return;
-      items = data.items || []; active = -1; render();
+      items = data.items || []; active = -1; renderItems();
     } catch { close(); }
   };
   input.oninput = () => {
@@ -534,8 +546,8 @@ function attachTagInput(input, suggest, mediaId) {
     timer = setTimeout(() => request(prefix), 150);
   };
   input.onkeydown = event => {
-    if (event.key === 'ArrowDown' && items.length) { event.preventDefault(); active = (active + 1) % items.length; render(); }
-    else if (event.key === 'ArrowUp' && items.length) { event.preventDefault(); active = (active - 1 + items.length) % items.length; render(); }
+    if (event.key === 'ArrowDown' && items.length) { event.preventDefault(); active = (active + 1) % items.length; renderItems(); }
+    else if (event.key === 'ArrowUp' && items.length) { event.preventDefault(); active = (active - 1 + items.length) % items.length; renderItems(); }
     else if (event.key === 'Escape') { close(); }
     else if (event.key === 'Enter') {
       event.preventDefault(); event.stopPropagation();
@@ -554,14 +566,19 @@ function attachSearchAutocomplete(input, suggest, onPick) {
   const close = () => { clearTimeout(timer); suggest.hidden = true; suggest.innerHTML = ''; items = []; active = -1; };
   const pick = tag => {
     close();
-    input.value = applySearchTokenSuggestion(input.value, tag);
+    input.value = applySearchTokenSuggestion(input.value, tag, input.selectionStart);
     input.focus();
     onPick?.(tag);
   };
-  const render = () => {
+  const renderItems = () => {
     if (!items.length) { close(); return; }
-    const {negated} = searchTokenSuggestionQuery(input.value);
-    suggest.innerHTML = items.map((item, index) => `<button type="button" class="tag-suggest-item${index === active ? ' active' : ''}" data-tag="${esc(item.tag)}"><span>${negated ? '-' : ''}${esc(item.tag)}</span><small>${item.count}</small></button>`).join('');
+    const {negated} = searchTokenSuggestionQuery(input.value, input.selectionStart);
+    suggest.innerHTML = items.map((item, index) => {
+      const label = item.matched_alias
+        ? `${escapeHtml(item.tag)} <span class="muted">← ${escapeHtml(item.matched_alias)} (${Number(item.count || 0)})</span>`
+        : escapeHtml(item.tag);
+      return `<button type="button" class="tag-suggest-item${index === active ? ' active' : ''}" data-tag="${escapeHtml(item.tag)}" data-tag-suggest="${escapeHtml(item.tag)}"><span>${negated ? '-' : ''}${label}</span><small>${item.count}</small></button>`;
+    }).join('');
     suggest.hidden = false;
     suggest.querySelectorAll('.tag-suggest-item').forEach((node, index) => {
       node.onmousedown = event => { event.preventDefault(); pick(items[index].tag); };
@@ -574,18 +591,18 @@ function attachSearchAutocomplete(input, suggest, onPick) {
       if (token !== tagSuggestToken) return;
       items = data.items || [];
       active = -1;
-      render();
+      renderItems();
     } catch { close(); }
   };
   input.addEventListener('input', () => {
-    const {prefix} = searchTokenSuggestionQuery(input.value);
+    const {prefix} = searchTokenSuggestionQuery(input.value, input.selectionStart);
     clearTimeout(timer);
     if (!prefix) { close(); return; }
     timer = setTimeout(() => request(prefix), 150);
   });
   input.addEventListener('keydown', event => {
-    if (event.key === 'ArrowDown' && items.length) { event.preventDefault(); active = (active + 1) % items.length; render(); }
-    else if (event.key === 'ArrowUp' && items.length) { event.preventDefault(); active = (active - 1 + items.length) % items.length; render(); }
+    if (event.key === 'ArrowDown' && items.length) { event.preventDefault(); active = (active + 1) % items.length; renderItems(); }
+    else if (event.key === 'ArrowUp' && items.length) { event.preventDefault(); active = (active - 1 + items.length) % items.length; renderItems(); }
     else if (event.key === 'Escape' && !suggest.hidden) { event.preventDefault(); close(); }
     else if (event.key === 'Enter') {
       if (active >= 0 && items[active]) {
@@ -711,10 +728,11 @@ async function showLibrary() {
   setHeader('Library', '', button('Import', 'upload', 'primary'));
   actions.querySelector('button').onclick = () => navigate('import');
   workspace.innerHTML = `<div class="library-layout"><div class="library-main">
-    <div class="toolbar"><div class="search-wrap"><input id="search" class="control search" placeholder="Tag, author, domain, source, or id:123" autocomplete="off" spellcheck="false"><button id="clearSearch" type="button" class="icon-btn" title="Clear search" ${librarySearch ? '' : 'hidden'}><i data-lucide="x"></i></button><div id="librarySearchSuggest" class="tag-suggest" hidden></div></div><select id="mediaType" class="control toolbar-select"><option value="">All types</option><option value="image">Images</option><option value="video">Videos</option></select><label class="toolbar-count" title="Items per page"><span>Per page</span><select id="pageSize" class="control">${[20,40,60,100].map(size => `<option value="${size}" ${size === prefs.pageSize ? 'selected' : ''}>${size}</option>`).join('')}</select></label><button id="searchBtn" class="icon-btn" title="Search"><i data-lucide="search"></i></button><div id="activeFilters" class="active-filters"></div></div>
+    <div class="toolbar"><div class="search-wrap"><input id="search" class="control search" placeholder="Tag, author, domain, source, or id:123" autocomplete="off" spellcheck="false"><button id="clearSearch" type="button" class="icon-btn" title="Clear search" ${librarySearch ? '' : 'hidden'}><i data-lucide="x"></i></button><div id="librarySearchSuggest" class="tag-suggest" hidden></div></div><select id="mediaType" class="control toolbar-select"><option value="">All types</option><option value="image">Images</option><option value="video">Videos</option><option value="animated">Animated / GIF</option></select><select id="librarySort" class="control toolbar-select"><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="resolution">Highest resolution</option><option value="file_size">Largest file</option><option value="least_used">Least used in collections</option><option value="most_used">Most used in collections</option><option value="random">Random</option></select><label class="toolbar-count" title="Items per page"><span>Per page</span><select id="pageSize" class="control">${[20,40,60,100].map(size => `<option value="${size}" ${size === prefs.pageSize ? 'selected' : ''}>${size}</option>`).join('')}</select></label><button id="searchBtn" class="icon-btn" title="Search"><i data-lucide="search"></i></button><div id="activeFilters" class="active-filters"></div></div>
     <div id="gallery" class="gallery"></div><div id="pager" class="pager"></div></div><div id="inspectorResize" class="inspector-resize" title="Resize panel"></div><aside id="inspector" class="inspector"><div class="empty">Select a file</div></aside></div>`;
   document.querySelector('#search').value = librarySearch;
   document.querySelector('#mediaType').value = state.mediaType || '';
+  document.querySelector('#librarySort').value = state.sort || 'newest';
   const load = async () => {
     const seq = ++loadSeq;
     const pageSize = libraryPrefs().pageSize;
@@ -722,15 +740,22 @@ async function showLibrary() {
     const clearBtn = document.querySelector('#clearSearch');
     if (clearBtn) clearBtn.hidden = !document.querySelector('#search').value;
     const parsedSearch = parseLibrarySearch(librarySearch);
-    const query = '';
-    const authorFilter = parsedSearch.authors.length ? `&author=${encodeURIComponent(parsedSearch.authors.at(-1))}` : '';
-    const idFilter = parsedSearch.mediaIds.length ? `&id=${parsedSearch.mediaIds.at(-1)}` : '';
-    const parentFilter = parsedSearch.parentIds?.length ? `&remote_id=${encodeURIComponent(parsedSearch.parentIds.at(-1))}` : '';
-    const type = document.querySelector('#mediaType').value;
+    const selectedType = document.querySelector('#mediaType').value;
+    const type = selectedType || (parsedSearch.types.length ? parsedSearch.types.at(-1) : '');
+    const sort = document.querySelector('#librarySort').value || 'newest';
+    const textFilter = parsedSearch.textTerms.length ? parsedSearch.textTerms.map(term => `&q=${encodeURIComponent(term)}`).join('') : '&q=';
+    const authorFilter = `${parsedSearch.authors.map(author => `&author=${encodeURIComponent(author)}`).join('')}${parsedSearch.excludedAuthors.map(author => `&exclude_author=${encodeURIComponent(author)}`).join('')}`;
+    const domainFilter = `${parsedSearch.domains.map(domain => `&domain=${encodeURIComponent(domain)}`).join('')}${parsedSearch.excludedDomains.map(domain => `&exclude_domain=${encodeURIComponent(domain)}`).join('')}`;
+    const sourceFilter = `${parsedSearch.sources.map(source => `&source=${encodeURIComponent(source)}`).join('')}${parsedSearch.excludedSources.map(source => `&exclude_source=${encodeURIComponent(source)}`).join('')}`;
+    const idFilter = `${parsedSearch.mediaIds.map(id => `&id=${id}`).join('')}${parsedSearch.excludedMediaIds.map(id => `&exclude_id=${id}`).join('')}`;
+    const parentFilter = (parsedSearch.parentIds || []).map(pid => `&parent=${encodeURIComponent(pid)}`).join('');
+    const flagFilter = `${parsedSearch.hasFlags.map(flag => `&has=${encodeURIComponent(flag)}`).join('')}${parsedSearch.excludedFlags.map(flag => `&exclude_has=${encodeURIComponent(flag)}`).join('')}`;
+    const orientationFilter = parsedSearch.orientations.map(orientation => `&orientation=${encodeURIComponent(orientation)}`).join('');
+    const dimensionFilter = `${parsedSearch.minWidth != null ? `&min_width=${parsedSearch.minWidth}` : ''}${parsedSearch.maxWidth != null ? `&max_width=${parsedSearch.maxWidth}` : ''}${parsedSearch.minHeight != null ? `&min_height=${parsedSearch.minHeight}` : ''}${parsedSearch.maxHeight != null ? `&max_height=${parsedSearch.maxHeight}` : ''}`;
     const filters = `${parsedSearch.includedTags.map(tag => `&tag=${encodeURIComponent(tag)}`).join('')}${parsedSearch.excludedTags.map(tag => `&exclude_tag=${encodeURIComponent(tag)}`).join('')}`;
-    saveViewState('library', {search:librarySearch, offset:libraryOffset, mediaType:type});
+    saveViewState('library', {search:librarySearch, offset:libraryOffset, mediaType:selectedType, sort});
     if(parseRoute(location.hash).id && librarySearch!==`id:${parseRoute(location.hash).id}`)history.replaceState(null,'','#library');
-    const data = await api(`/api/v1/media?limit=${pageSize}&offset=${libraryOffset}&q=${query}&type=${type}${authorFilter}${idFilter}${parentFilter}${filters}`);
+    const data = await api(`/api/v1/media?limit=${pageSize}&offset=${libraryOffset}${textFilter}&type=${encodeURIComponent(type)}&sort=${encodeURIComponent(sort)}${authorFilter}${domainFilter}${sourceFilter}${idFilter}${parentFilter}${flagFilter}${orientationFilter}${dimensionFilter}${filters}`);
     if (epoch !== renderEpoch || seq !== loadSeq || !document.querySelector('#gallery')) return;
     meta.textContent = `${data.page.total} files`;
     statusText.textContent = `Showing ${data.items.length}`;
@@ -769,6 +794,7 @@ async function showLibrary() {
   document.querySelector('#searchBtn').onclick = () => { libraryOffset = 0; load(); };
   searchInput.onkeydown = event => { if (event.key === 'Enter' && !event.defaultPrevented) { libraryOffset = 0; load(); } };
   document.querySelector('#mediaType').onchange = () => { libraryOffset = 0; load(); };
+  document.querySelector('#librarySort').onchange = () => { libraryOffset = 0; load(); };
   document.querySelector('#pageSize').onchange = event => { saveLibraryPrefs({pageSize:Number(event.target.value)}); libraryOffset = 0; load(); };
   bindInspectorResize();
   icons(); await load();
@@ -888,12 +914,81 @@ async function showImport() {
   }).join('');
   workspace.innerHTML = `<div class="page"><section id="dropImport" class="drop-import" tabindex="0"><i data-lucide="upload-cloud"></i><strong>Drop a file, image link, or post link here</strong><span>Paste an image, video, or URL into this window</span><input id="fileImport" type="file" accept="image/*,video/*" multiple hidden><button id="chooseImport" type="button" class="btn primary"><i data-lucide="file-up"></i>Choose file</button><input id="pasteImport" class="control" type="url" placeholder="https://..." aria-label="Image or post URL"><button id="submitUrlImport" type="button" class="btn"><i data-lucide="link"></i>Resolve and import</button><div id="importResolveStatus" class="muted" aria-live="polite"></div></section><section class="import-history"><div class="page-head"><h2>Import history</h2><span class="badge">${history.page.total}</span></div><div class="item-list">${historyRows || '<div class="empty">History is empty</div>'}</div></section></div>`;
   const drop = document.querySelector('#dropImport'); const fileInput = document.querySelector('#fileImport');
-  const showQueued = created => { const list=document.querySelector('.import-history .item-list'); const empty=list.querySelector('.empty'); if(empty) empty.remove(); list.insertAdjacentHTML('afterbegin',`<article class="history-row"><i data-lucide="loader-circle" class="spin"></i><div><strong>Importing</strong><small>Import #${created.job_id}</small><details class="history-diagnostics"><summary>Provider diagnostics</summary><p>Resolving providers...</p></details></div><time>now</time></article>`); document.querySelector('.import-history .badge').textContent=String(Number(document.querySelector('.import-history .badge').textContent)+1); const status=document.querySelector('#importResolveStatus'); if(status) status.textContent=`Resolving import #${created.job_id}...`; icons(); };
-  const submitFile = async file => { if (!file) return; try { const body = new FormData(); body.append('file', file); const job = await runJob(() => api('/api/v1/import-resolve-jobs',{method:'POST',body}),showQueued); toast(`Import: ${job.result?.outcome || 'failed'}`); refreshCounts(); if(currentView==='import')showImport(); } catch (error) { toast(error.message,true); if(currentView==='import')showImport(); } };
-  const submitFiles = async files => { for (const file of files) await submitFile(file); };
+  const showQueued = created => {
+    const ids = Array.isArray(created.job_ids) && created.job_ids.length ? created.job_ids : [created.job_id];
+    const list = document.querySelector('.import-history .item-list');
+    const empty = list?.querySelector('.empty');
+    if (empty) empty.remove();
+    if (list) {
+      ids.forEach(jobId => {
+        list.insertAdjacentHTML('afterbegin', `<article class="history-row"><i data-lucide="loader-circle" class="spin"></i><div><strong>Importing</strong><small>Import #${jobId}</small><details class="history-diagnostics"><summary>Provider diagnostics</summary><p>Resolving providers...</p></details></div><time>now</time></article>`);
+      });
+    }
+    const badge = document.querySelector('.import-history .badge');
+    if (badge) badge.textContent = String(Number(badge.textContent) + ids.length);
+    const status = document.querySelector('#importResolveStatus');
+    if (status) status.textContent = ids.length > 1 ? `Resolving ${ids.length} imports...` : `Resolving import #${created.job_id}...`;
+    icons();
+  };
+  const awaitImportJobs = async res => {
+    showQueued(res);
+    if (res.job_ids?.length > 1) {
+      const total = res.job_ids.length;
+      let done = 0;
+      jobStatus.textContent = `Importing 1/${total}...`;
+      const jobs = await Promise.all(res.job_ids.map(id => waitForJob(id, value => {
+        if (value.type === 'source_set_import') renderSetStatus(value);
+        else jobStatus.textContent = `Importing ${Math.min(total, done + 1)}/${total}...`;
+      }).then(job => {
+        done += 1;
+        jobStatus.textContent = `Importing ${done}/${total}...`;
+        return job;
+      })));
+      jobStatus.textContent = '';
+      toast(`Imported ${jobs.length} files`);
+      return jobs;
+    }
+    const job = await waitForJob(res.status_url || res.job_id, value => {
+      if (value.type === 'source_set_import') renderSetStatus(value);
+      else jobStatus.textContent = value.message || `${value.type}: ${value.progress}%`;
+    });
+    jobStatus.textContent = '';
+    toast(`Import: ${job.result?.outcome || 'failed'}`);
+    return [job];
+  };
+  const submitFiles = async files => {
+    const valid = [...(files || [])].filter(Boolean);
+    if (!valid.length) return;
+    try {
+      const body = new FormData();
+      valid.forEach(file => body.append('file', file));
+      const res = await api('/api/v1/import-resolve-jobs', {method:'POST', body});
+      await awaitImportJobs(res);
+      refreshCounts();
+      if (currentView === 'import') showImport();
+    } catch (error) {
+      jobStatus.textContent = '';
+      toast(error.message, true);
+      if (currentView === 'import') showImport();
+    }
+  };
   document.querySelector('#chooseImport').onclick = () => fileInput.click();
   fileInput.onchange = async () => { const files = [...(fileInput.files || [])]; fileInput.value = ''; await submitFiles(files); };
-  const submitUrl = async url => { if (!url) return; try { const job=await runJob(()=>api('/api/v1/import-resolve-jobs',{method:'POST',body:JSON.stringify({url})}),showQueued); toast(`Import: ${job.result?.outcome || 'failed'}`); refreshCounts(); if(currentView==='import')showImport(); } catch(error){toast(error.message,true);if(currentView==='import')showImport();} };
+  const submitUrl = async rawUrl => {
+    const urls = String(rawUrl ?? '').split(/[\r\n]+|\s+(?=https?:\/\/)/i).map(u => u.trim()).filter(Boolean);
+    if (!urls.length) return;
+    const url = urls.join('\n');
+    try {
+      const res = await api('/api/v1/import-resolve-jobs', {method:'POST', body:JSON.stringify({url})});
+      await awaitImportJobs(res);
+      refreshCounts();
+      if (currentView === 'import') showImport();
+    } catch (error) {
+      jobStatus.textContent = '';
+      toast(error.message, true);
+      if (currentView === 'import') showImport();
+    }
+  };
   drop.ondragover = event => { event.preventDefault(); drop.classList.add('dragging'); };
   drop.ondragleave = () => drop.classList.remove('dragging');
   drop.ondrop = async event => { event.preventDefault(); drop.classList.remove('dragging'); const files=[...(event.dataTransfer?.files || [])]; if (files.length) await submitFiles(files); else submitUrl(droppedUrl(event.dataTransfer)); };
@@ -901,8 +996,17 @@ async function showImport() {
     if (event.defaultPrevented || currentView !== 'import') return;
     const files = [...(event.clipboardData?.files || [])].filter(item => item.type?.startsWith('image/') || item.type?.startsWith('video/'));
     if (files.length) { event.preventDefault(); submitFiles(files); return; }
-    if (event.target === document.querySelector('#pasteImport')) return;
-    const url = droppedUrl(event.clipboardData);
+    const rawText = event.clipboardData?.getData('text/plain')?.trim() || '';
+    const multiUrls = rawText.split(/\r?\n/).map(line => line.trim()).filter(line => /^https?:\/\//i.test(line));
+    if (event.target === document.querySelector('#pasteImport')) {
+      if (multiUrls.length > 1) {
+        event.preventDefault();
+        const input = document.querySelector('#pasteImport');
+        if (input) { input.value = multiUrls.join('\n'); input.focus(); }
+      }
+      return;
+    }
+    const url = multiUrls.length > 1 ? multiUrls.join('\n') : droppedUrl(event.clipboardData);
     if (url) {
       event.preventDefault();
       const input = document.querySelector('#pasteImport');
@@ -2219,7 +2323,17 @@ async function showCollections() {
   let page = Number(collectionState.page || 1);
   const render = async () => {
     const query = (document.querySelector('#collectionSearch')?.value || '').trim().toLowerCase();
-    const filtered = data.items.filter(item => item.name.toLowerCase().includes(query));
+    const filtered = data.items.filter(item => {
+      if (!query) return true;
+      const fields = [
+        item.name,
+        item.preset_name,
+        ...(item.included_tags || []),
+        ...(item.excluded_tags || []),
+        ...(item.authors || []),
+      ];
+      return fields.some(val => String(val || '').toLowerCase().includes(query));
+    });
     const pageSize = Math.max(1, Number(document.querySelector('#collectionPageSize')?.value || prefs.pageSize));
     const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize)); page = Math.min(page, totalPages);
     const visible = filtered.slice((page-1)*pageSize, page*pageSize);
@@ -2333,9 +2447,21 @@ async function showCollectionBuilder() {
     else if(currentView==='collections'&&viewState('collections').screen==='builder')showCollectionBuilder();
     return true;
   };
-  const renderBuilderChips=()=>{
-    input('builderQueryChips').innerHTML=parseLibrarySearch(input('builderQuery').value).terms.map(tag=>`<span class="filter-chip${tag.startsWith('-')?' excluded':''}">${esc(tag)}</span>`).join('');
+  const renderQueryChips=()=>{
+    input('builderQueryChips').innerHTML=parseLibrarySearch(input('builderQuery').value).terms.map(token=>{
+      const excluded=token.startsWith('-')&&token.length>1;
+      const raw=excluded?token.slice(1):token;
+      const opMatch=raw.match(/^(author|source|domain|type|parent|has|is|orientation|ratio|width|height|id|text):(?:"([^"]*)"|(.*))$/i);
+      if(opMatch){
+        const op=opMatch[1].toLowerCase();
+        const val=(opMatch[2]??opMatch[3]??'').replace(/^"+|"+$/g,'').trim();
+        return `<span class="filter-chip operator-chip${excluded?' excluded':''}" data-operator="${esc(op)}">${esc(`${excluded?'-':''}${op}:${val}`)}</span>`;
+      }
+      const clean=raw.replace(/^"+|"+$/g,'').trim();
+      return `<span class="filter-chip${excluded?' excluded':''}">${esc(`${excluded?'-':''}${clean}`)}</span>`;
+    }).join('');
   };
+  const renderBuilderChips=renderQueryChips;
   const canSave=()=>Boolean(!collectionDraftRequests.has(draft.id)&&preview?.can_save&&selectionRulesMatch(draft)&&input('builderName').value.trim());
   const renderPreview=()=>{
     if(!root.isConnected)return;

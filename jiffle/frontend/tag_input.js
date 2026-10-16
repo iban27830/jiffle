@@ -17,30 +17,86 @@ export function suggestionQuery(raw, minChars = TAG_SUGGEST_MIN_CHARS) {
   return value.length >= minChars ? value : '';
 }
 
-export function searchTokenSuggestionQuery(value, minChars = TAG_SUGGEST_MIN_CHARS) {
+export function searchTokenSuggestionQuery(value, cursorIndex = undefined, minChars = TAG_SUGGEST_MIN_CHARS) {
   const text = String(value ?? '');
-  if (!text.trim() || /\s$/.test(text)) return {prefix: '', negated: false};
-  const match = text.match(/(\S+)$/);
-  if (!match) return {prefix: '', negated: false};
-  const last = match[1];
-  if (/^(?:author:|id:|parent:|["'])/i.test(last)) {
+  if (!text.trim()) return {prefix: '', negated: false};
+  let rawSlice = '';
+  if (cursorIndex === undefined || cursorIndex === null || cursorIndex >= text.length) {
+    if (/\s$/.test(text)) return {prefix: '', negated: false};
+    const match = text.match(/(\S+)$/);
+    if (!match) return {prefix: '', negated: false};
+    rawSlice = match[1];
+  } else {
+    const pos = Math.max(0, Math.min(text.length, Number(cursorIndex)));
+    let start = pos;
+    while (start > 0 && !/\s/.test(text[start - 1])) start -= 1;
+    let end = pos;
+    while (end < text.length && !/\s/.test(text[end])) end += 1;
+    rawSlice = pos > start ? text.slice(start, pos) : text.slice(start, end);
+  }
+  if (!rawSlice || /^["']/.test(rawSlice)) {
     return {prefix: '', negated: false};
   }
-  const negated = last.startsWith('-');
-  const rawToken = negated ? last.slice(1) : last;
-  if (/^(?:author:|id:|parent:|["'])/i.test(rawToken)) {
+  const negated = rawSlice.startsWith('-');
+  const rawToken = negated ? rawSlice.slice(1) : rawSlice;
+  if (!rawToken || /^["']/.test(rawToken)) {
+    return {prefix: '', negated: false};
+  }
+  const opMatch = rawToken.match(/^([a-z]+):(.*)$/i);
+  if (opMatch) {
+    const op = opMatch[1].toLowerCase();
+    if (op === 'author' || op === 'source' || op === 'domain') {
+      const queryPart = opMatch[2].replace(/^["']+|["']+$/g, '').trim().toLowerCase();
+      if (queryPart.length >= 1) {
+        return {prefix: `${op}:${queryPart}`, negated};
+      }
+    }
     return {prefix: '', negated: false};
   }
   const prefix = suggestionQuery(rawToken, minChars);
   return {prefix, negated};
 }
 
-export function applySearchTokenSuggestion(value, chosenTag) {
-  const tag = normalizeTagInput(chosenTag);
-  if (!tag) return String(value ?? '');
-  const text = String(value ?? '').replace(/\s+$/, '');
-  const match = text.match(/(\S+)$/);
-  if (!match) return `${tag} `;
-  const negated = match[1].startsWith('-');
-  return `${text.slice(0, match.index)}${negated ? '-' : ''}${tag} `;
+function formatSuggestedToken(selectedTag, negated) {
+  const raw = String(selectedTag ?? '').trim().replace(/^-+/, '');
+  const opMatch = raw.match(/^(author|source|domain):(.*)$/i);
+  if (opMatch) {
+    const op = opMatch[1].toLowerCase();
+    const val = opMatch[2].trim().replace(/^"+|"+$/g, '').trim();
+    if (!val) return '';
+    const formattedVal = op === 'author' && /\s/.test(val) ? `"${val}"` : val;
+    return `${negated ? '-' : ''}${op}:${formattedVal}`;
+  }
+  const tag = normalizeTagInput(raw);
+  if (!tag) return '';
+  return `${negated ? '-' : ''}${tag}`;
+}
+
+export function applySearchTokenSuggestion(value, selectedTag, cursorIndex = undefined) {
+  const text = String(value ?? '');
+  if (cursorIndex !== undefined && cursorIndex !== null && cursorIndex < text.length) {
+    const pos = Math.max(0, Math.min(text.length, Number(cursorIndex)));
+    let start = pos;
+    while (start > 0 && !/\s/.test(text[start - 1])) start -= 1;
+    let end = pos;
+    while (end < text.length && !/\s/.test(text[end])) end += 1;
+    const tokenSlice = text.slice(start, end);
+    const negated = tokenSlice.startsWith('-');
+    const replacement = formatSuggestedToken(selectedTag, negated);
+    if (!replacement) return text;
+    const before = text.slice(0, start);
+    const after = text.slice(end);
+    if (after.trim().length > 0) {
+      const separator = /^\s/.test(after) ? '' : ' ';
+      return `${before}${replacement}${separator}${after}`;
+    }
+    return `${before}${replacement} `;
+  }
+  const trimmed = text.replace(/\s+$/, '');
+  const match = trimmed.match(/(\S+)$/);
+  const negated = match ? match[1].startsWith('-') : false;
+  const replacement = formatSuggestedToken(selectedTag, negated);
+  if (!replacement) return text;
+  if (!match) return `${replacement} `;
+  return `${trimmed.slice(0, match.index)}${replacement} `;
 }
