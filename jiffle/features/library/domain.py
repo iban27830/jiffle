@@ -60,6 +60,24 @@ class LibraryQuery:
     excluded_tags: tuple[str, ...] = ()
     parent_id: str | None = None
     remote_id: str | None = None
+    authors: tuple[str, ...] = ()
+    exclude_authors: tuple[str, ...] = ()
+    domains: tuple[str, ...] = ()
+    exclude_domains: tuple[str, ...] = ()
+    sources: tuple[str, ...] = ()
+    exclude_sources: tuple[str, ...] = ()
+    media_ids: tuple[int, ...] = ()
+    exclude_media_ids: tuple[int, ...] = ()
+    parent_or_remote_id: str | None = None
+    is_animated: bool | None = None
+    has_flags: tuple[str, ...] = ()
+    exclude_flags: tuple[str, ...] = ()
+    orientation: str | None = None
+    min_width: int | None = None
+    max_width: int | None = None
+    min_height: int | None = None
+    max_height: int | None = None
+    sort: str = "newest"
 
 
 @dataclass(frozen=True)

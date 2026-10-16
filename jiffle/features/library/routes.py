@@ -179,6 +179,18 @@ def get_media_thumbnail(media_id: int):
     return send_file(thumbnail, mimetype="image/jpeg", conditional=True)
 
 
+_VALID_SORTS = frozenset({
+    "newest",
+    "oldest",
+    "resolution",
+    "file_size",
+    "random",
+    "least_used",
+    "most_used",
+})
+_VALID_ORIENTATIONS = frozenset({"portrait", "landscape", "square"})
+
+
 def _parse_query() -> tuple[LibraryQuery | None, str | None]:
     try:
         limit = int(request.args.get("limit", 20))
@@ -190,23 +202,102 @@ def _parse_query() -> tuple[LibraryQuery | None, str | None]:
     if offset < 0:
         return None, "Offset must not be negative."
     raw_type = _optional_parameter("type")
+    media_type: MediaType | None = None
+    is_animated: bool | None = None
+    if raw_type:
+        lowered_type = raw_type.lower()
+        if lowered_type in {"animated", "gif"}:
+            is_animated = True
+        else:
+            try:
+                media_type = MediaType(lowered_type)
+            except ValueError:
+                return None, "Type must be image, video, animated, or gif."
+
+    media_ids_list: list[int] = []
+    for raw_id_val in request.args.getlist("id"):
+        for part in raw_id_val.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                parsed_id = int(part)
+            except ValueError:
+                return None, "Media ID must be an integer."
+            if parsed_id < 1:
+                return None, "Media ID must be a positive integer."
+            if parsed_id not in media_ids_list:
+                media_ids_list.append(parsed_id)
+    media_id = media_ids_list[0] if media_ids_list else None
+
+    exclude_media_ids_list: list[int] = []
+    for raw_ex_id in request.args.getlist("exclude_id"):
+        for part in raw_ex_id.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                parsed_ex_id = int(part)
+            except ValueError:
+                return None, "Excluded media ID must be an integer."
+            if parsed_ex_id < 1:
+                return None, "Excluded media ID must be a positive integer."
+            if parsed_ex_id not in exclude_media_ids_list:
+                exclude_media_ids_list.append(parsed_ex_id)
+
+    orientation = _optional_parameter("orientation")
+    if orientation is not None:
+        orientation = orientation.lower()
+        if orientation not in _VALID_ORIENTATIONS:
+            return None, "Orientation must be portrait, landscape, or square."
+
     try:
-        media_type = MediaType(raw_type) if raw_type else None
+        min_width = _optional_int("min_width")
+        max_width = _optional_int("max_width")
+        min_height = _optional_int("min_height")
+        max_height = _optional_int("max_height")
     except ValueError:
-        return None, "Type must be image or video."
-    raw_id = _optional_parameter("id")
-    try:
-        media_id = int(raw_id) if raw_id else None
-    except ValueError:
-        return None, "Media ID must be an integer."
-    if media_id is not None and media_id < 1:
-        return None, "Media ID must be a positive integer."
+        return None, "Dimension filters must be positive integers."
+
+    sort = (_optional_parameter("sort") or "newest").lower()
+    if sort not in _VALID_SORTS:
+        return None, "Invalid sort order."
+
     text = _optional_parameter("q")
     remote_id = _optional_parameter("remote_id")
-    if remote_id is None and text:
+    parent_or_remote_id = _optional_parameter("parent")
+    if parent_or_remote_id is None and text:
         parent_match = re.fullmatch(r"parent:(\d+)", text, re.IGNORECASE)
         if parent_match:
-            remote_id, text = parent_match.group(1), None
+            parent_or_remote_id, text = parent_match.group(1), None
+
+    authors = tuple(
+        value.strip() for value in request.args.getlist("author") if value.strip()
+    )
+    exclude_authors = tuple(
+        value.strip() for value in request.args.getlist("exclude_author") if value.strip()
+    )
+    domains = tuple(
+        value.strip() for value in request.args.getlist("domain") if value.strip()
+    )
+    exclude_domains = tuple(
+        value.strip() for value in request.args.getlist("exclude_domain") if value.strip()
+    )
+    sources = tuple(
+        value.strip() for value in request.args.getlist("source") if value.strip()
+    )
+    exclude_sources = tuple(
+        value.strip() for value in request.args.getlist("exclude_source") if value.strip()
+    )
+    has_flags = tuple(
+        value.strip().lower() for value in request.args.getlist("has") if value.strip()
+    )
+    exclude_flags = tuple(
+        value.strip().lower()
+        for value in request.args.getlist("exclude_has")
+        if value.strip()
+    )
+
     return LibraryQuery(
         limit=limit,
         offset=offset,
@@ -221,7 +312,35 @@ def _parse_query() -> tuple[LibraryQuery | None, str | None]:
         excluded_tags=tuple(value.strip().lower() for value in request.args.getlist("exclude_tag") if value.strip()),
         parent_id=_optional_parameter("parent_id"),
         remote_id=remote_id,
+        authors=authors,
+        exclude_authors=exclude_authors,
+        domains=domains,
+        exclude_domains=exclude_domains,
+        sources=sources,
+        exclude_sources=exclude_sources,
+        media_ids=tuple(media_ids_list),
+        exclude_media_ids=tuple(exclude_media_ids_list),
+        parent_or_remote_id=parent_or_remote_id,
+        is_animated=is_animated,
+        has_flags=has_flags,
+        exclude_flags=exclude_flags,
+        orientation=orientation,
+        min_width=min_width,
+        max_width=max_width,
+        min_height=min_height,
+        max_height=max_height,
+        sort=sort,
     ), None
+
+
+def _optional_int(name: str) -> int | None:
+    raw = _optional_parameter(name)
+    if raw is None:
+        return None
+    val = int(raw)
+    if val < 0:
+        raise ValueError("Dimension must not be negative.")
+    return val
 
 
 def _optional_parameter(name: str) -> str | None:

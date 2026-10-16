@@ -7,6 +7,7 @@ from jiffle.features.library.sqlite_repository import SqliteLibraryRepository
 from jiffle.features.tag_management.normalization import (
     escape_glob_prefix,
     normalize_tag,
+    normalize_tag_name,
     normalize_tag_prefix,
 )
 from jiffle.infrastructure.database.connection import get_database
@@ -17,26 +18,205 @@ tag_management_blueprint = Blueprint("tag_management_v1", __name__)
 
 @tag_management_blueprint.get("/api/v1/tags")
 def list_tag_suggestions():
-    prefix = normalize_tag_prefix(request.args.get("q"))
-    if not prefix:
+    raw_q = request.args.get("q")
+    raw_prefix = (raw_q or "").strip()
+    if not raw_prefix:
         return _error("tags.invalid_query", "A search prefix is required.", 400)
     try:
         limit = int(request.args.get("limit", 20))
     except (TypeError, ValueError):
         return _error("tags.invalid_query", "Limit must be an integer.", 400)
     limit = max(1, min(limit, 50))
-    rows = get_database().execute(
-        "SELECT tag, COUNT(*) AS usage FROM media_tags "
-        "WHERE tag GLOB ? "
+    connection = get_database()
+
+    lower_raw = raw_prefix.lower()
+    if lower_raw.startswith("author:"):
+        author_prefix = raw_prefix.split(":", 1)[1].strip().strip('"').lower()
+        if len(author_prefix) < 1:
+            return jsonify({"items": [], "query": raw_prefix})
+        rows = connection.execute(
+            "SELECT COALESCE(NULLIF(TRIM(item.author), ''), source.author) AS raw_author "
+            "FROM media_items item "
+            "LEFT JOIN media_sources source ON source.media_item_id = item.id "
+            "WHERE item.deleted_at IS NULL"
+        ).fetchall()
+        counts: dict[str, int] = {}
+        for row in rows:
+            raw_author = row["raw_author"]
+            if not raw_author:
+                continue
+            seen_in_item: set[str] = set()
+            for part in str(raw_author).split(","):
+                normalized = part.strip().lower()
+                if normalized and normalized not in seen_in_item:
+                    seen_in_item.add(normalized)
+                    counts[normalized] = counts.get(normalized, 0) + 1
+        prefix_matches = sorted(
+            ((a, c) for a, c in counts.items() if a.startswith(author_prefix)),
+            key=lambda pair: (-pair[1], pair[0]),
+        )
+        substring_matches = sorted(
+            (
+                (a, c)
+                for a, c in counts.items()
+                if not a.startswith(author_prefix) and author_prefix in a
+            ),
+            key=lambda pair: (-pair[1], pair[0]),
+        )
+        combined = (prefix_matches + substring_matches)[:limit]
+        return jsonify({
+            "items": [
+                {"tag": f"author:{a}", "count": int(c), "kind": "author"}
+                for a, c in combined
+            ],
+            "query": raw_prefix,
+        })
+
+    if lower_raw.startswith(("source:", "domain:")):
+        op, val_raw = raw_prefix.split(":", 1)
+        op = op.lower()
+        val_prefix = val_raw.strip().strip('"').lower()
+        counts: dict[str, int] = {}
+        if op == "source":
+            rows = connection.execute(
+                "SELECT LOWER(TRIM(source.provider)) AS val, COUNT(DISTINCT item.id) AS usage "
+                "FROM media_items item "
+                "JOIN media_sources source ON source.media_item_id = item.id "
+                "WHERE item.deleted_at IS NULL "
+                "AND source.provider IS NOT NULL AND TRIM(source.provider) <> '' "
+                "GROUP BY LOWER(TRIM(source.provider))"
+            ).fetchall()
+            for row in rows:
+                if row["val"]:
+                    counts[str(row["val"])] = int(row["usage"])
+        else:
+            rows = connection.execute(
+                "SELECT LOWER(TRIM(item.domain)) AS val, COUNT(*) AS usage "
+                "FROM media_items item "
+                "WHERE item.deleted_at IS NULL "
+                "AND item.domain IS NOT NULL AND TRIM(item.domain) <> '' "
+                "GROUP BY LOWER(TRIM(item.domain))"
+            ).fetchall()
+            for row in rows:
+                if row["val"]:
+                    counts[str(row["val"])] = int(row["usage"])
+        prefix_matches = sorted(
+            ((v, c) for v, c in counts.items() if v.startswith(val_prefix)),
+            key=lambda pair: (-pair[1], pair[0]),
+        )
+        substring_matches = sorted(
+            (
+                (v, c)
+                for v, c in counts.items()
+                if not v.startswith(val_prefix) and val_prefix in v
+            ),
+            key=lambda pair: (-pair[1], pair[0]),
+        )
+        combined = (prefix_matches + substring_matches)[:limit]
+        return jsonify({
+            "items": [
+                {"tag": f"{op}:{v}", "count": int(c), "kind": op}
+                for v, c in combined
+            ],
+            "query": raw_prefix,
+        })
+
+    prefix = normalize_tag_name(raw_prefix)
+    if not prefix:
+        return _error("tags.invalid_query", "A search prefix is required.", 400)
+    glob_pattern = escape_glob_prefix(prefix)
+    rows = connection.execute(
+        "SELECT LOWER(tag) AS tag, COUNT(*) AS usage FROM media_tags "
+        "WHERE LOWER(tag) GLOB ? "
         "AND EXISTS (SELECT 1 FROM media_items item "
         "WHERE item.id = media_tags.media_item_id AND item.deleted_at IS NULL) "
-        "GROUP BY tag ORDER BY usage DESC, tag ASC LIMIT ?",
-        (escape_glob_prefix(prefix), limit),
+        "GROUP BY LOWER(tag) ORDER BY usage DESC, LOWER(tag) ASC LIMIT ?",
+        (glob_pattern, limit),
     ).fetchall()
+    by_tag: dict[str, dict[str, object]] = {
+        str(row["tag"]): {"tag": str(row["tag"]), "count": int(row["usage"])}
+        for row in rows
+    }
+
+    alias_rows = connection.execute(
+        "SELECT canonical_tag, alias FROM tag_aliases "
+        "WHERE LOWER(alias) GLOB ? OR LOWER(canonical_tag) GLOB ? "
+        "ORDER BY LOWER(canonical_tag), LOWER(alias)",
+        (glob_pattern, glob_pattern),
+    ).fetchall()
+    if alias_rows:
+        matched_canonicals: dict[str, str | None] = {}
+        for row in alias_rows:
+            canonical = str(row["canonical_tag"]).strip().lower()
+            alias = str(row["alias"]).strip().lower()
+            if not canonical:
+                continue
+            alias_matched = connection.execute(
+                "SELECT ? GLOB ?", (alias, glob_pattern)
+            ).fetchone()[0]
+            if canonical not in matched_canonicals:
+                matched_canonicals[canonical] = alias if alias_matched else None
+            elif matched_canonicals[canonical] is None and alias_matched:
+                matched_canonicals[canonical] = alias
+
+        for canonical, matched_alias in matched_canonicals.items():
+            group_rows = connection.execute(
+                "SELECT alias FROM tag_aliases WHERE LOWER(canonical_tag) = ?",
+                (canonical,),
+            ).fetchall()
+            group_tags = sorted(
+                {canonical, *(str(r["alias"]).strip().lower() for r in group_rows if str(r["alias"]).strip())}
+            )
+            placeholders = ",".join("?" for _ in group_tags)
+            group_count = int(
+                connection.execute(
+                    f"SELECT COUNT(DISTINCT mt.media_item_id) FROM media_tags mt "
+                    f"JOIN media_items item ON item.id = mt.media_item_id "
+                    f"WHERE item.deleted_at IS NULL AND LOWER(mt.tag) IN ({placeholders})",
+                    group_tags,
+                ).fetchone()[0]
+            )
+            if group_count > 0:
+                entry: dict[str, object] = {"tag": canonical, "count": group_count}
+                if matched_alias is not None:
+                    entry["matched_alias"] = matched_alias
+                by_tag[canonical] = entry
+
+    items = sorted(
+        by_tag.values(),
+        key=lambda item: (-int(item["count"]), str(item["tag"])),
+    )[:limit]
+
+    if len(items) < limit:
+        seen_tags = {str(item["tag"]).lower() for item in items}
+        remaining = limit - len(items)
+        like_escaped = (
+            prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        sub_rows = connection.execute(
+            "SELECT LOWER(tag) AS tag, COUNT(*) AS usage FROM media_tags "
+            "WHERE LOWER(tag) LIKE ? ESCAPE '\\' "
+            "AND EXISTS (SELECT 1 FROM media_items item "
+            "WHERE item.id = media_tags.media_item_id AND item.deleted_at IS NULL) "
+            "GROUP BY LOWER(tag) ORDER BY usage DESC, LOWER(tag) ASC LIMIT ?",
+            (f"%{like_escaped}%", limit * 2),
+        ).fetchall()
+        for row in sub_rows:
+            tag_val = str(row["tag"])
+            if tag_val.lower() in seen_tags:
+                continue
+            seen_tags.add(tag_val.lower())
+            items.append({"tag": tag_val, "count": int(row["usage"])})
+            if len(items) >= limit:
+                break
+
     return jsonify({
-        "items": [{"tag": row["tag"], "count": int(row["usage"])} for row in rows],
+        "items": items[:limit],
         "query": prefix,
     })
+
+
+list_tags = list_tag_suggestions
 
 
 @tag_management_blueprint.post("/api/v1/media/<int:media_id>/tags")

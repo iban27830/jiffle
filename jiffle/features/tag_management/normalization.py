@@ -50,3 +50,7 @@ def normalize_tag_prefix(raw: object) -> str:
     value = "" if raw is None else str(raw)
     value = _WHITESPACE.sub("_", value.strip().strip('"').strip()).lower()
     return value.strip("_")
+
+
+normalize_tag_name = normalize_tag_prefix
+

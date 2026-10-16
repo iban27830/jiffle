@@ -7,10 +7,26 @@ from urllib.parse import quote, urlsplit
 
 from jiffle.configuration.settings import Settings
 from jiffle.features.collections.workflow import (
-    CollectionFailure, ensure_crop_eligible, build_collection_preview, build_tag_alias_map, create_export_job,
-    expand_tag_aliases, export_archive_filename, export_archive_prefix,
-    export_collection_directory, export_staging_directory, iter_export_archive,
-    normalize_tags, parse_collection_query, preview_export, replace_collection_items,
+    CollectionFailure,
+    CollectionFilters,
+    _limited_author,
+    _operator_filter_clauses,
+    build_collection_preview,
+    build_tag_alias_map,
+    choose_replacement_candidate,
+    create_export_job,
+    ensure_crop_eligible,
+    expand_tag_aliases,
+    export_archive_filename,
+    export_archive_prefix,
+    export_collection_directory,
+    export_staging_directory,
+    iter_export_archive,
+    normalize_tags,
+    parse_collection_filters,
+    parse_collection_query,
+    preview_export,
+    replace_collection_items,
     run_export_job,
 )
 from jiffle.infrastructure.database.connection import get_database
@@ -101,7 +117,7 @@ def create_collection():
                 raise CollectionFailure("collections.invalid_items", "media_item_ids must be an integer array.")
             if not isinstance(requested_count, int) or requested_count != len(media_ids):
                 raise CollectionFailure("collections.invalid_count", "The saved composition must be complete.")
-            _validate_composition(get_database(), media_ids, included_tags, excluded_tags)
+            _validate_composition(get_database(), media_ids, included_tags, excluded_tags, query=query)
             ensure_crop_eligible(get_database(), current_app.config["JIFFLE_SETTINGS"], media_ids)
         connection = get_database()
         preset = connection.execute("SELECT id, name, requested_count FROM collection_presets WHERE id=?", (preset_id,)).fetchone() if preset_id else None
@@ -139,7 +155,9 @@ def create_collection_preview():
     if not isinstance(payload, dict):
         return _error("collections.invalid_request", "A JSON object is required.", 400)
     try:
-        included, excluded = parse_collection_query(payload.get("query", ""))
+        raw_query = payload.get("query", "")
+        included, excluded = parse_collection_query(raw_query)
+        extra_filters = parse_collection_filters(raw_query)
         included = normalize_tags(list(included))
         excluded = normalize_tags(list(excluded))
         count = payload.get("requested_count")
@@ -149,14 +167,20 @@ def create_collection_preview():
         if not isinstance(excluded_ids, list) or not all(isinstance(value, int) for value in excluded_ids):
             raise CollectionFailure("collections.invalid_items", "excluded_ids must be an integer array.")
         settings = current_app.config["JIFFLE_SETTINGS"]
+        connection = get_database()
         preview = build_collection_preview(
-            get_database(), included, excluded, count, settings.max_items_per_author,
+            connection, included, excluded, count, settings.max_items_per_author,
             tuple(excluded_ids),
             block_unreviewed=settings.trim_block_unreviewed_export,
             block_crop=settings.crop_review_enabled,
+            query=raw_query,
+            extra_filters=extra_filters,
         )
     except CollectionFailure as error:
         return _collection_error(error)
+    revision_by_id = _active_revisions_by_media_id(
+        connection, [item.id for item in preview.items]
+    )
     return jsonify({
         "requested_count": preview.requested_count,
         "available_count": preview.available_count,
@@ -165,8 +189,8 @@ def create_collection_preview():
         "most_similar_collection": preview.most_similar_collection,
         "items": [{
             **item.__dict__,
-            "content_url": f"/api/v1/media/{item.id}/content",
-            "thumbnail_url": f"/api/v1/media/{item.id}/thumbnail",
+            "content_url": _media_url(item.id, "content", revision_by_id.get(item.id)),
+            "thumbnail_url": _media_url(item.id, "thumbnail", revision_by_id.get(item.id)),
         } for item in preview.items],
     })
 
@@ -182,36 +206,96 @@ def replace_collection_preview_item():
             or not isinstance(rejected_ids, list) or not all(isinstance(value, int) for value in rejected_ids)):
         return _error("collections.invalid_items", "Replacement identifiers are invalid.", 400)
     try:
-        included, excluded = parse_collection_query(payload.get("query", ""))
+        raw_query = payload.get("query", "")
+        included, excluded = parse_collection_query(raw_query)
+        extra_filters = parse_collection_filters(raw_query)
         included = normalize_tags(list(included))
         excluded = normalize_tags(list(excluded))
         settings = current_app.config["JIFFLE_SETTINGS"]
+        connection = get_database()
         preview = build_collection_preview(
-            get_database(), included, excluded, 1, settings.max_items_per_author,
+            connection, included, excluded, 1, settings.max_items_per_author,
             tuple(dict.fromkeys((*current_ids, *rejected_ids))),
             block_unreviewed=settings.trim_block_unreviewed_export,
             block_crop=settings.crop_review_enabled,
+            query=raw_query,
+            extra_filters=extra_filters,
         )
         if not preview.items:
             raise CollectionFailure("collections.replacement_unavailable", "No replacement is available.")
         item = preview.items[0]
+        candidate_authors = _extract_limited_authors(connection, item.id, item.author)
         author_count = 0
-        if item.author and item.author.strip().lower() not in {
-            "unknown", "автор_неизвестен", "ии_теггер", "local_ai"
-        }:
-            placeholders = ",".join("?" for _ in current_ids) or "NULL"
-            author_count = get_database().execute(
-                f"SELECT COUNT(*) FROM media_items WHERE id IN ({placeholders}) AND LOWER(TRIM(author))=?",
-                (*current_ids, item.author.strip().lower()),
-            ).fetchone()[0]
+        if candidate_authors and current_ids:
+            placeholders = ",".join("?" for _ in current_ids)
+            current_rows = connection.execute(
+                "SELECT COALESCE(NULLIF(TRIM(item.author), ''), source.author) AS raw_author "
+                "FROM media_items item "
+                "LEFT JOIN media_sources source ON source.media_item_id = item.id "
+                f"WHERE item.id IN ({placeholders}) AND item.deleted_at IS NULL",
+                current_ids,
+            ).fetchall()
+            counts_by_author: dict[str, int] = {}
+            for row in current_rows:
+                row_authors = {
+                    a
+                    for part in str(row["raw_author"] or "").split(",")
+                    if (a := _limited_author(part))
+                }
+                for a in row_authors:
+                    counts_by_author[a] = counts_by_author.get(a, 0) + 1
+            author_count = max(
+                (counts_by_author.get(a, 0) for a in candidate_authors), default=0
+            )
         warning = bool(settings.max_items_per_author and author_count >= settings.max_items_per_author)
     except CollectionFailure as error:
         return _collection_error(error)
+    revision_id = _active_revisions_by_media_id(connection, [item.id]).get(item.id)
     return jsonify({
         **item.__dict__, "author_limit_exceeded": warning,
-        "content_url": f"/api/v1/media/{item.id}/content",
-        "thumbnail_url": f"/api/v1/media/{item.id}/thumbnail",
+        "content_url": _media_url(item.id, "content", revision_id),
+        "thumbnail_url": _media_url(item.id, "thumbnail", revision_id),
     })
+
+
+def _extract_limited_authors(connection, media_id: int, fallback_author: str | None) -> tuple[str, ...]:
+    raw_author = fallback_author
+    if not raw_author or not str(raw_author).strip():
+        row = connection.execute(
+            "SELECT COALESCE(NULLIF(TRIM(item.author), ''), source.author) AS raw_author "
+            "FROM media_items item "
+            "LEFT JOIN media_sources source ON source.media_item_id = item.id "
+            "WHERE item.id = ?",
+            (media_id,),
+        ).fetchone()
+        if row is not None:
+            raw_author = row["raw_author"]
+    if not raw_author:
+        return ()
+    result: list[str] = []
+    for part in str(raw_author).split(","):
+        limited = _limited_author(part)
+        if limited and limited not in result:
+            result.append(limited)
+    return tuple(result)
+
+
+def _active_revisions_by_media_id(connection, media_ids: list[int]) -> dict[int, int | None]:
+    if not media_ids:
+        return {}
+    placeholders = ",".join("?" for _ in media_ids)
+    rows = connection.execute(
+        f"SELECT id, active_revision_id FROM media_items WHERE id IN ({placeholders})",
+        media_ids,
+    ).fetchall()
+    return {int(row["id"]): row["active_revision_id"] for row in rows}
+
+
+def _media_url(media_id: int, endpoint: str, active_revision_id: int | None) -> str:
+    base = f"/api/v1/media/{media_id}/{endpoint}"
+    if active_revision_id is not None:
+        return f"{base}?revision={active_revision_id}"
+    return base
 
 
 @collections_blueprint.get("/api/v1/collection-presets")
@@ -468,7 +552,15 @@ def _collection_error(error):
     return jsonify({"error": {"code": error.code, "message": error.message, "details": error.details}}), status
 
 
-def _validate_composition(connection, media_ids, included_tags, excluded_tags, aliases=None):
+def _validate_composition(
+    connection,
+    media_ids,
+    included_tags,
+    excluded_tags,
+    aliases=None,
+    query: str = "",
+    extra_filters: CollectionFilters | None = None,
+):
     if len(media_ids) != len(set(media_ids)):
         raise CollectionFailure("collections.duplicate_item", "A collection cannot contain an item twice.")
     if not media_ids:
@@ -491,6 +583,22 @@ def _validate_composition(connection, media_ids, included_tags, excluded_tags, a
         media_ids,
     ).fetchall():
         tags_by_media_id.setdefault(int(row[0]), set()).add(str(row[1]).lower())
+
+    filters = extra_filters if extra_filters is not None else parse_collection_filters(query)
+    filter_matched_ids: set[int] | None = None
+    if filters.has_constraints:
+        op_clauses, op_params = _operator_filter_clauses(connection, filters)
+        if op_clauses:
+            filter_matched_ids = {
+                int(row[0])
+                for row in connection.execute(
+                    f"SELECT item.id FROM media_items item "
+                    f"WHERE item.id IN ({placeholders}) AND item.deleted_at IS NULL "
+                    f"AND {' AND '.join(op_clauses)}",
+                    (*media_ids, *op_params),
+                ).fetchall()
+            }
+
     for media_id in media_ids:
         if int(media_id) not in found_ids:
             raise CollectionFailure("collections.media_not_found", "One or more media items were not found.")
@@ -498,6 +606,10 @@ def _validate_composition(connection, media_ids, included_tags, excluded_tags, a
         if any(not values.intersection(tags) for values in included_values) or any(
             values.intersection(tags) for values in excluded_values
         ):
+            raise CollectionFailure(
+                "collections.composition_stale", "One or more items no longer match the collection tags."
+            )
+        if filter_matched_ids is not None and int(media_id) not in filter_matched_ids:
             raise CollectionFailure(
                 "collections.composition_stale", "One or more items no longer match the collection tags."
             )
@@ -583,7 +695,9 @@ def validate_collection_preview():
     if not isinstance(ids, list) or len(ids) > 1000 or not all(type(value) is int and value > 0 for value in ids):
         return _error("collections.invalid_items", "Expected up to 1000 media IDs.", 400)
     try:
-        included, excluded = parse_collection_query(payload.get("query", ""))
+        raw_query = payload.get("query", "")
+        included, excluded = parse_collection_query(raw_query)
+        extra_filters = parse_collection_filters(raw_query)
     except CollectionFailure as error:
         return _collection_error(error)
     connection = get_database()
@@ -594,6 +708,7 @@ def validate_collection_preview():
     rows_by_id = {}
     tags_by_media_id: dict[int, set[str]] = {}
     crop_blocked_ids: set[int] = set()
+    filter_matched_ids: set[int] | None = None
     if ids:
         unique_ids = list(dict.fromkeys(ids))
         placeholders = ",".join("?" for _ in unique_ids)
@@ -609,6 +724,18 @@ def validate_collection_preview():
             unique_ids,
         ).fetchall():
             tags_by_media_id.setdefault(int(tag_row[0]), set()).add(str(tag_row[1]).lower())
+        if extra_filters.has_constraints:
+            op_clauses, op_params = _operator_filter_clauses(connection, extra_filters)
+            if op_clauses:
+                filter_matched_ids = {
+                    int(r[0])
+                    for r in connection.execute(
+                        f"SELECT item.id FROM media_items item "
+                        f"WHERE item.id IN ({placeholders}) AND item.deleted_at IS NULL "
+                        f"AND {' AND '.join(op_clauses)}",
+                        (*unique_ids, *op_params),
+                    ).fetchall()
+                }
         try:
             ensure_crop_eligible(connection, settings, unique_ids)
         except CollectionFailure as error:
@@ -621,8 +748,10 @@ def validate_collection_preview():
             reason = "This file is no longer in the library."
         else:
             tags = tags_by_media_id.get(media_id, set())
-            if any(not values.intersection(tags) for values in included_values) or any(
-                values.intersection(tags) for values in excluded_values
+            if (
+                any(not values.intersection(tags) for values in included_values)
+                or any(values.intersection(tags) for values in excluded_values)
+                or (filter_matched_ids is not None and media_id not in filter_matched_ids)
             ):
                 reason = "One or more items no longer match the collection tags."
             elif media_id in crop_blocked_ids:

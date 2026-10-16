@@ -35,13 +35,34 @@ class SqliteLibraryRepository:
         total = self.connection.execute(
             f"SELECT COUNT(*) FROM media_items item {where_sql}", parameters
         ).fetchone()[0]
+        order_by = self._order_by_clause(query.sort)
         rows = self.connection.execute(
             "SELECT item.* FROM media_items item "
-            f"{where_sql} ORDER BY item.id DESC LIMIT ? OFFSET ?",
+            f"{where_sql} ORDER BY {order_by} LIMIT ? OFFSET ?",
             (*parameters, query.limit, query.offset),
         ).fetchall()
         items = self._hydrate_media_items(rows)
         return LibraryPage(items, int(total), query.limit, query.offset)
+
+    def _order_by_clause(self, sort: str) -> str:
+        sort_key = (sort or "newest").lower()
+        if sort_key == "oldest":
+            return "item.id ASC"
+        if sort_key == "resolution":
+            return "(COALESCE(item.width, 0) * COALESCE(item.height, 0)) DESC, item.id DESC"
+        if sort_key == "file_size":
+            return "COALESCE(item.file_size, 0) DESC, item.id DESC"
+        if sort_key == "random":
+            return "RANDOM()"
+        if sort_key == "least_used":
+            if self._table_exists("collection_items"):
+                return "(SELECT COUNT(*) FROM collection_items ci WHERE ci.media_item_id = item.id) ASC, item.id DESC"
+            return "item.id DESC"
+        if sort_key == "most_used":
+            if self._table_exists("collection_items"):
+                return "(SELECT COUNT(*) FROM collection_items ci WHERE ci.media_item_id = item.id) DESC, item.id DESC"
+            return "item.id DESC"
+        return "item.id DESC"
 
     def get_media(self, media_id: int) -> MediaItem | None:
         row = self.connection.execute(
@@ -305,17 +326,49 @@ class SqliteLibraryRepository:
 def _build_filter(
     query: LibraryQuery, connection, has_column=None
 ) -> tuple[str, tuple[object, ...]]:
+    def col_exists(table: str, column: str) -> bool:
+        if has_column is not None:
+            return has_column(table, column)
+        return _table_has_column(connection, table, column)
+
     clauses: list[str] = ["item.deleted_at IS NULL"]
     parameters: list[object] = []
-    if query.media_id is not None:
+
+    media_ids: list[int] = list(query.media_ids)
+    if query.media_id is not None and query.media_id not in media_ids:
+        media_ids.append(query.media_id)
+    if len(media_ids) == 1:
         clauses.append("item.id = ?")
-        parameters.append(query.media_id)
-    include_tags = query.tags or ((query.tag,) if query.tag else ())
-    exclude_tags = query.excluded_tags or ((query.exclude_tag,) if query.exclude_tag else ())
+        parameters.append(media_ids[0])
+    elif len(media_ids) > 1:
+        clauses.append(f"item.id IN ({','.join('?' for _ in media_ids)})")
+        parameters.extend(media_ids)
+
+    if query.exclude_media_ids:
+        clauses.append(
+            f"item.id NOT IN ({','.join('?' for _ in query.exclude_media_ids)})"
+        )
+        parameters.extend(query.exclude_media_ids)
+
+    include_tags = tuple(
+        dict.fromkeys([*(query.tags or ()), *((query.tag,) if query.tag else ())])
+    )
+    exclude_tags = tuple(
+        dict.fromkeys(
+            [
+                *(query.excluded_tags or ()),
+                *((query.exclude_tag,) if query.exclude_tag else ()),
+            ]
+        )
+    )
     aliases: dict[str, set[str]] = {}
-    if include_tags or exclude_tags:
-        for row in connection.execute("SELECT canonical_tag, alias FROM tag_aliases").fetchall():
-            aliases.setdefault(row["canonical_tag"].lower(), set()).add(row["alias"].lower())
+    if (include_tags or exclude_tags) and _table_exists(connection, "tag_aliases"):
+        for row in connection.execute(
+            "SELECT canonical_tag, alias FROM tag_aliases"
+        ).fetchall():
+            aliases.setdefault(row["canonical_tag"].lower(), set()).add(
+                row["alias"].lower()
+            )
         for canonical, values in list(aliases.items()):
             values.add(canonical)
 
@@ -329,7 +382,7 @@ def _build_filter(
     for tag_value in include_tags:
         values = expanded(tag_value)
         clauses.append(
-            "EXISTS (SELECT 1 FROM media_tags tag WHERE tag.media_item_id = item.id AND tag.tag IN ("
+            "EXISTS (SELECT 1 FROM media_tags tag WHERE tag.media_item_id = item.id AND LOWER(tag.tag) IN ("
             + ",".join("?" for _ in values)
             + "))"
         )
@@ -337,40 +390,278 @@ def _build_filter(
     for tag_value in exclude_tags:
         values = expanded(tag_value)
         clauses.append(
-            "NOT EXISTS (SELECT 1 FROM media_tags excluded_tag WHERE excluded_tag.media_item_id = item.id AND excluded_tag.tag IN ("
+            "NOT EXISTS (SELECT 1 FROM media_tags excluded_tag WHERE excluded_tag.media_item_id = item.id AND LOWER(excluded_tag.tag) IN ("
             + ",".join("?" for _ in values)
             + "))"
         )
         parameters.extend(values)
-    if query.author:
-        clauses.append(
-            "(',' || LOWER(REPLACE(COALESCE(NULLIF(TRIM(item.author), ''), "
-            "(SELECT author FROM media_sources source "
-            "WHERE source.media_item_id = item.id AND author IS NOT NULL "
-            "AND TRIM(author) <> '' LIMIT 1)), ', ', ',')) || ',') LIKE ?"
+
+    author_expr = (
+        "(',' || LOWER(REPLACE(COALESCE(NULLIF(TRIM(item.author), ''), "
+        "(SELECT author FROM media_sources source "
+        "WHERE source.media_item_id = item.id AND author IS NOT NULL "
+        "AND TRIM(author) <> '' LIMIT 1), ''), ', ', ',')) || ',')"
+    )
+    authors = list(
+        dict.fromkeys(
+            [
+                *(a.strip().lower() for a in query.authors if a and a.strip()),
+                *(
+                    (query.author.strip().lower(),)
+                    if query.author and query.author.strip()
+                    else ()
+                ),
+            ]
         )
-        parameters.append(f"%,{query.author.strip().lower()},%")
-    if query.domain:
-        clauses.append("item.domain = ?")
-        parameters.append(query.domain)
+    )
+    if len(authors) == 1:
+        clauses.append(f"{author_expr} LIKE ?")
+        parameters.append(f"%,{authors[0]},%")
+    elif len(authors) > 1:
+        clauses.append(
+            "(" + " OR ".join(f"{author_expr} LIKE ?" for _ in authors) + ")"
+        )
+        parameters.extend(f"%,{a},%" for a in authors)
+
+    for ex_author in query.exclude_authors:
+        cleaned = ex_author.strip().lower()
+        if cleaned:
+            clauses.append(f"{author_expr} NOT LIKE ?")
+            parameters.append(f"%,{cleaned},%")
+
+    domains = list(
+        dict.fromkeys(
+            [
+                *(d.strip().lower() for d in query.domains if d and d.strip()),
+                *(
+                    (query.domain.strip().lower(),)
+                    if query.domain and query.domain.strip()
+                    else ()
+                ),
+            ]
+        )
+    )
+    if domains:
+        domain_subclauses = []
+        for dom in domains:
+            domain_subclauses.append(
+                "(LOWER(COALESCE(item.domain, '')) = ? OR LOWER(COALESCE(item.domain, '')) LIKE ?)"
+            )
+            parameters.extend((dom, f"%{dom}%"))
+        clauses.append("(" + " OR ".join(domain_subclauses) + ")")
+
+    for ex_dom in query.exclude_domains:
+        cleaned = ex_dom.strip().lower()
+        if cleaned:
+            clauses.append(
+                "NOT (LOWER(COALESCE(item.domain, '')) = ? OR LOWER(COALESCE(item.domain, '')) LIKE ?)"
+            )
+            parameters.extend((cleaned, f"%{cleaned}%"))
+
+    has_source_provider = col_exists("media_sources", "provider")
+    if query.sources:
+        source_subclauses = []
+        for src in query.sources:
+            cleaned = src.strip().lower()
+            if not cleaned:
+                continue
+            if has_source_provider:
+                source_subclauses.append(
+                    "(EXISTS (SELECT 1 FROM media_sources s WHERE s.media_item_id = item.id AND LOWER(s.provider) = ?) "
+                    "OR LOWER(COALESCE(item.domain, '')) LIKE ?)"
+                )
+                parameters.extend((cleaned, f"%{cleaned}%"))
+            else:
+                source_subclauses.append("LOWER(COALESCE(item.domain, '')) LIKE ?")
+                parameters.append(f"%{cleaned}%")
+        if source_subclauses:
+            clauses.append("(" + " OR ".join(source_subclauses) + ")")
+
+    for ex_src in query.exclude_sources:
+        cleaned = ex_src.strip().lower()
+        if not cleaned:
+            continue
+        if has_source_provider:
+            clauses.append(
+                "NOT (EXISTS (SELECT 1 FROM media_sources s WHERE s.media_item_id = item.id AND LOWER(s.provider) = ?) "
+                "OR LOWER(COALESCE(item.domain, '')) LIKE ?)"
+            )
+            parameters.extend((cleaned, f"%{cleaned}%"))
+        else:
+            clauses.append("NOT (LOWER(COALESCE(item.domain, '')) LIKE ?)")
+            parameters.append(f"%{cleaned}%")
+
     if query.media_type:
         clauses.append("item.media_type = ?")
         parameters.append(query.media_type.value)
+
     if query.parent_id:
-        check_column = (
-            has_column("media_items", "parent_id")
-            if has_column is not None
-            else _table_has_column(connection, "media_items", "parent_id")
-        )
-        if check_column:
+        if col_exists("media_items", "parent_id"):
             clauses.append("item.parent_id = ?")
             parameters.append(query.parent_id)
         else:
-            clauses.append("EXISTS (SELECT 1 FROM media_sources source WHERE source.media_item_id=item.id AND source.parent_id = ?)")
+            clauses.append(
+                "EXISTS (SELECT 1 FROM media_sources source WHERE source.media_item_id=item.id AND source.parent_id = ?)"
+            )
             parameters.append(query.parent_id)
+
     if query.remote_id:
-        clauses.append("EXISTS (SELECT 1 FROM media_sources source WHERE source.media_item_id=item.id AND source.remote_id = ?)")
+        clauses.append(
+            "EXISTS (SELECT 1 FROM media_sources source WHERE source.media_item_id=item.id AND source.remote_id = ?)"
+        )
         parameters.append(query.remote_id)
+
+    if query.parent_or_remote_id:
+        por_parts: list[str] = []
+        por_params: list[object] = []
+        if col_exists("media_items", "parent_id"):
+            por_parts.append("item.parent_id = ?")
+            por_params.append(query.parent_or_remote_id)
+        src_has_remote = col_exists("media_sources", "remote_id")
+        src_has_parent = col_exists("media_sources", "parent_id")
+        if src_has_remote and src_has_parent:
+            por_parts.append(
+                "EXISTS (SELECT 1 FROM media_sources s WHERE s.media_item_id = item.id AND (s.remote_id = ? OR s.parent_id = ?))"
+            )
+            por_params.extend((query.parent_or_remote_id, query.parent_or_remote_id))
+        elif src_has_remote:
+            por_parts.append(
+                "EXISTS (SELECT 1 FROM media_sources s WHERE s.media_item_id = item.id AND s.remote_id = ?)"
+            )
+            por_params.append(query.parent_or_remote_id)
+        elif src_has_parent:
+            por_parts.append(
+                "EXISTS (SELECT 1 FROM media_sources s WHERE s.media_item_id = item.id AND s.parent_id = ?)"
+            )
+            por_params.append(query.parent_or_remote_id)
+        if por_parts:
+            clauses.append("(" + " OR ".join(por_parts) + ")")
+            parameters.extend(por_params)
+
+    gif_sql = (
+        "(LOWER(COALESCE(item.original_filename, '')) LIKE '%.gif' OR LOWER(COALESCE(item.file_path, '')) LIKE '%.gif')"
+        if col_exists("media_items", "original_filename")
+        else "LOWER(COALESCE(item.file_path, '')) LIKE '%.gif'"
+    )
+    has_is_animated_col = col_exists("media_items", "is_animated")
+    animated_sql = (
+        f"(item.is_animated = 1 OR {gif_sql})"
+        if has_is_animated_col
+        else gif_sql
+    )
+
+    if query.is_animated is True:
+        clauses.append(animated_sql)
+    elif query.is_animated is False:
+        if has_is_animated_col:
+            clauses.append(
+                f"(COALESCE(item.is_animated, 0) = 0 AND (item.is_animated IS NOT NULL OR NOT ({gif_sql})))"
+            )
+        else:
+            clauses.append(f"NOT ({gif_sql})")
+
+    def flag_expression(flag_name: str) -> str | None:
+        flag = flag_name.strip().lower()
+        if flag == "parent":
+            parts = []
+            if col_exists("media_items", "parent_id"):
+                parts.append(
+                    "(item.parent_id IS NOT NULL AND TRIM(item.parent_id) <> '')"
+                )
+            if col_exists("media_sources", "parent_id"):
+                parts.append(
+                    "EXISTS (SELECT 1 FROM media_sources s WHERE s.media_item_id = item.id AND s.parent_id IS NOT NULL AND TRIM(s.parent_id) <> '')"
+                )
+            return "(" + " OR ".join(parts) + ")" if parts else "0"
+        if flag == "children":
+            if not col_exists("media_sources", "remote_id"):
+                return "0"
+            child_conds = []
+            if col_exists("media_items", "parent_id"):
+                child_conds.append("child.parent_id = self_s.remote_id")
+            if col_exists("media_sources", "parent_id"):
+                child_conds.append(
+                    "EXISTS (SELECT 1 FROM media_sources child_s WHERE child_s.media_item_id = child.id AND child_s.parent_id = self_s.remote_id)"
+                )
+            if not child_conds:
+                return "0"
+            return (
+                "EXISTS (SELECT 1 FROM media_sources self_s "
+                "WHERE self_s.media_item_id = item.id AND self_s.remote_id IS NOT NULL AND TRIM(self_s.remote_id) <> '' "
+                f"AND EXISTS (SELECT 1 FROM media_items child WHERE child.deleted_at IS NULL AND ({' OR '.join(child_conds)})))"
+            )
+        if flag == "family":
+            if not col_exists("media_items", "family_id"):
+                return "0"
+            return (
+                "(item.family_id IS NOT NULL AND EXISTS ("
+                "SELECT 1 FROM media_items fam WHERE fam.deleted_at IS NULL "
+                "AND fam.family_id = item.family_id AND fam.id <> item.id))"
+            )
+        if flag == "source":
+            parts = ["(item.source_url IS NOT NULL AND TRIM(item.source_url) <> '')"]
+            if col_exists("media_sources", "canonical_url"):
+                parts.append(
+                    "EXISTS (SELECT 1 FROM media_sources s WHERE s.media_item_id = item.id AND s.canonical_url IS NOT NULL AND TRIM(s.canonical_url) <> '')"
+                )
+            return "(" + " OR ".join(parts) + ")"
+        if flag == "edited":
+            parts = []
+            if col_exists("media_items", "derived_from_media_id"):
+                parts.append("item.derived_from_media_id IS NOT NULL")
+            if _table_exists(connection, "media_revisions") and col_exists(
+                "media_items", "active_revision_id"
+            ):
+                rev_conds = []
+                if col_exists("media_revisions", "revision_number"):
+                    rev_conds.append("COALESCE(r.revision_number, 1) > 1")
+                if col_exists("media_revisions", "operation"):
+                    rev_conds.append(
+                        "(r.operation IS NOT NULL AND r.operation <> 'original')"
+                    )
+                if col_exists("media_revisions", "parent_revision_id"):
+                    rev_conds.append("r.parent_revision_id IS NOT NULL")
+                if rev_conds:
+                    parts.append(
+                        f"EXISTS (SELECT 1 FROM media_revisions r WHERE r.id = item.active_revision_id AND ({' OR '.join(rev_conds)}))"
+                    )
+            return "(" + " OR ".join(parts) + ")" if parts else "0"
+        if flag in {"animated", "gif"}:
+            return animated_sql
+        return None
+
+    for flag in query.has_flags:
+        expr = flag_expression(flag)
+        if expr:
+            clauses.append(expr)
+
+    for flag in query.exclude_flags:
+        expr = flag_expression(flag)
+        if expr:
+            clauses.append(f"NOT ({expr})")
+
+    if query.orientation:
+        orient = query.orientation.strip().lower()
+        if orient == "portrait":
+            clauses.append("item.height > item.width")
+        elif orient == "landscape":
+            clauses.append("item.width > item.height")
+        elif orient == "square":
+            clauses.append("item.width = item.height AND item.width IS NOT NULL")
+
+    if query.min_width is not None:
+        clauses.append("item.width >= ?")
+        parameters.append(query.min_width)
+    if query.max_width is not None:
+        clauses.append("item.width <= ?")
+        parameters.append(query.max_width)
+    if query.min_height is not None:
+        clauses.append("item.height >= ?")
+        parameters.append(query.min_height)
+    if query.max_height is not None:
+        clauses.append("item.height <= ?")
+        parameters.append(query.max_height)
+
     if query.text:
         pattern = f"%{query.text}%"
         clauses.append(
