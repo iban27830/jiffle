@@ -35,63 +35,119 @@ from jiffle.infrastructure.database.connection import get_database
 
 imports_blueprint = Blueprint("imports", __name__)
 
+_IMPORT_RESOLVE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="jiffle-import-resolve"
+)
 
-@imports_blueprint.post("/api/v1/import-resolve-jobs")
-def create_import_resolve_job():
-    """Accept a file upload or URL and resolve it through one import workflow."""
-    uploaded = request.files.get("file")
-    settings: Settings = current_app.config["JIFFLE_SETTINGS"]
-    if uploaded is not None:
-        if not uploaded.filename:
-            return _error("import.invalid_request", "A file is required.", 400)
-        settings.resolved_import_staging_path.mkdir(parents=True, exist_ok=True)
-        target = _staged_upload_target(
-            settings.resolved_import_staging_path, uploaded.filename
-        )
-        uploaded.save(target)
-        submitted_input, input_kind = str(target), "file"
-    else:
-        payload = request.get_json(silent=True)
-        raw_url = payload.get("url") if isinstance(payload, dict) else None
-        if not isinstance(raw_url, str) or not raw_url.strip():
-            return _error("import.invalid_request", "A file or URL is required.", 400)
-        try:
-            submitted_input = normalize_source_url(raw_url)
-        except ValueError as error:
-            return _error("import.invalid_source_url", str(error), 400)
-        input_kind = "url"
-    if input_kind == "url":
-        provider = next(
-            (item for item in current_app.config["JIFFLE_SOURCE_PROVIDERS"]
-             if item.can_handle(submitted_input)), None
-        )
-        if provider is not None and getattr(provider, "can_handle_set", lambda _url: False)(submitted_input):
-            try:
-                job_id = create_set_import_job(get_database(), submitted_input, provider)
-            except ActiveSetImportError as error:
-                return jsonify({"error": {"code": "import.set_already_active", "message": "A set import is already running.", "details": {"job_id": error.job_id}}}), 409
-            arguments = (
-                settings.database_path, settings, job_id, submitted_input, provider,
-                current_app.config["JIFFLE_MEDIA_DOWNLOADER"],
-                current_app.config["JIFFLE_SOURCE_PROVIDERS"],
-            )
-            if settings.run_jobs_inline:
-                run_set_import_job(*arguments)
-            else:
-                Thread(target=run_set_import_job, args=arguments, daemon=True).start()
-            return jsonify({"job_id": job_id, "status_url": f"/api/v1/jobs/{job_id}"}), 202
-    connection = get_database()
-    job_id = create_universal_import_job(connection, submitted_input, input_kind)
-    arguments = (
-        settings.database_path, settings, job_id, submitted_input, input_kind,
-        current_app.config["JIFFLE_SOURCE_PROVIDERS"],
-        current_app.config["JIFFLE_MEDIA_DOWNLOADER"],
-    )
+
+def _submit_universal_import_job(settings: Settings, arguments: tuple) -> None:
     if settings.run_jobs_inline:
         run_universal_import_job(*arguments)
     else:
-        Thread(target=run_universal_import_job, args=arguments, daemon=True).start()
-    return jsonify({"job_id": job_id, "status_url": f"/api/v1/jobs/{job_id}"}), 202
+        _IMPORT_RESOLVE_EXECUTOR.submit(run_universal_import_job, *arguments)
+
+
+@imports_blueprint.post("/api/v1/import-resolve-jobs")
+def create_import_resolve_job():
+    """Accept one or more file uploads or URLs and resolve them through the import workflow."""
+    settings: Settings = current_app.config["JIFFLE_SETTINGS"]
+    uploaded_files = [
+        *request.files.getlist("file"),
+        *request.files.getlist("files"),
+    ]
+    inputs: list[tuple[str, str]] = []
+    if uploaded_files:
+        valid_files = [item for item in uploaded_files if item and item.filename]
+        if not valid_files:
+            return _error("import.invalid_request", "A file is required.", 400)
+        settings.resolved_import_staging_path.mkdir(parents=True, exist_ok=True)
+        for uploaded in valid_files:
+            target = _staged_upload_target(
+                settings.resolved_import_staging_path, uploaded.filename
+            )
+            uploaded.save(target)
+            inputs.append((str(target), "file"))
+    else:
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return _error("import.invalid_request", "A file or URL is required.", 400)
+        raw_urls_field = payload.get("urls")
+        if isinstance(raw_urls_field, list):
+            if not raw_urls_field or any(not isinstance(item, str) for item in raw_urls_field):
+                return _error("import.invalid_request", "A file or URL is required.", 400)
+            raw_urls = [item.strip() for item in raw_urls_field if item.strip()]
+        else:
+            raw_url = payload.get("url")
+            if not isinstance(raw_url, str) or not raw_url.strip():
+                return _error("import.invalid_request", "A file or URL is required.", 400)
+            raw_urls = [line.strip() for line in raw_url.splitlines() if line.strip()]
+        if not raw_urls:
+            return _error("import.invalid_request", "A file or URL is required.", 400)
+        for raw_item in raw_urls:
+            try:
+                normalized = normalize_source_url(raw_item)
+            except ValueError as error:
+                return _error("import.invalid_source_url", str(error), 400)
+            inputs.append((normalized, "url"))
+
+    connection = get_database()
+    providers = current_app.config["JIFFLE_SOURCE_PROVIDERS"]
+    downloader = current_app.config["JIFFLE_MEDIA_DOWNLOADER"]
+    job_ids: list[int] = []
+    for submitted_input, input_kind in inputs:
+        if input_kind == "url":
+            provider = next(
+                (item for item in providers if item.can_handle(submitted_input)),
+                None,
+            )
+            if provider is not None and getattr(
+                provider, "can_handle_set", lambda _url: False
+            )(submitted_input):
+                try:
+                    job_id = create_set_import_job(connection, submitted_input, provider)
+                except ActiveSetImportError as error:
+                    return jsonify({
+                        "error": {
+                            "code": "import.set_already_active",
+                            "message": "A set import is already running.",
+                            "details": {"job_id": error.job_id},
+                        }
+                    }), 409
+                arguments = (
+                    settings.database_path,
+                    settings,
+                    job_id,
+                    submitted_input,
+                    provider,
+                    downloader,
+                    providers,
+                )
+                if settings.run_jobs_inline:
+                    run_set_import_job(*arguments)
+                else:
+                    Thread(target=run_set_import_job, args=arguments, daemon=True).start()
+                job_ids.append(job_id)
+                continue
+        job_id = create_universal_import_job(connection, submitted_input, input_kind)
+        arguments = (
+            settings.database_path,
+            settings,
+            job_id,
+            submitted_input,
+            input_kind,
+            providers,
+            downloader,
+        )
+        _submit_universal_import_job(settings, arguments)
+        job_ids.append(job_id)
+
+    first_job_id = job_ids[0]
+    return jsonify({
+        "job_id": first_job_id,
+        "job_ids": job_ids,
+        "status_url": f"/api/v1/jobs/{first_job_id}",
+        "status_urls": [f"/api/v1/jobs/{jid}" for jid in job_ids],
+    }), 202
 
 class _DirectMediaProvider:
     def can_handle(self, url):

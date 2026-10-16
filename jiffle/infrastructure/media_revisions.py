@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 import json
+from pathlib import Path
 import sqlite3
 
 
@@ -23,7 +24,58 @@ def create_original_revision(connection, media_item_id: int, settings=None) -> i
     connection.execute("UPDATE media_items SET active_revision_id=? WHERE id=?", (revision_id, media_item_id))
     from jiffle.features.crop_editor.review import check_new_media
     check_new_media(connection, settings, media_item_id)
+    _enroll_animation_and_trim_review(connection, settings, media_item_id)
     return revision_id
+
+
+def _enroll_animation_and_trim_review(connection, settings, media_item_id: int) -> None:
+    if settings is None:
+        return
+    try:
+        item = connection.execute(
+            "SELECT file_path, media_type, is_animated, derived_from_media_id, trim_review_status "
+            "FROM media_items WHERE id=?",
+            (media_item_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return
+    if item is None:
+        return
+    file_path, media_type, is_animated, derived_from, trim_status = (
+        item[0], item[1], item[2], item[3], item[4],
+    )
+    if media_type == "image" and is_animated is None:
+        from jiffle.features.trim_editor.workflow import (
+            ANIMATED_IMAGE_EXTENSIONS,
+            is_animated_image,
+            media_path,
+        )
+        suffix = Path(str(file_path or "")).suffix.lower()
+        if suffix in ANIMATED_IMAGE_EXTENSIONS:
+            resolved = media_path(settings.media_path, file_path)
+            animated = (
+                1
+                if resolved is not None and resolved.is_file() and is_animated_image(resolved)
+                else 0
+            )
+        else:
+            animated = 0
+        connection.execute(
+            "UPDATE media_items SET is_animated=? WHERE id=?",
+            (animated, media_item_id),
+        )
+        is_animated = animated
+    if (
+        getattr(settings, "trim_review_enabled", False)
+        and trim_status is None
+        and derived_from is None
+        and (media_type == "video" or bool(is_animated))
+    ):
+        connection.execute(
+            "UPDATE media_items SET trim_review_status='pending' "
+            "WHERE id=? AND trim_review_status IS NULL AND derived_from_media_id IS NULL",
+            (media_item_id,),
+        )
 
 
 def active_edit_operations(connection, media_item_id: int) -> tuple[str, ...]:

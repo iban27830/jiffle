@@ -130,6 +130,67 @@ _RETAIN_EXCLUDED_CODES = {
 }
 
 
+def _normalize_tag_token(value: object) -> str:
+    return str(value or "").strip().lower().replace(" ", "_")
+
+
+def filter_imported_tags(
+    connection: sqlite3.Connection,
+    tags,
+    character_tags=(),
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Normalize tags, map aliases, drop blocked tags, and deduplicate."""
+    blocked: set[str] = set()
+    aliases: dict[str, str] = {}
+    try:
+        blocked = {
+            _normalize_tag_token(row[0])
+            for row in connection.execute(
+                "SELECT LOWER(tag) FROM tag_rules WHERE disposition='blocked'"
+            ).fetchall()
+            if _normalize_tag_token(row[0])
+        }
+    except sqlite3.OperationalError:
+        blocked = set()
+    try:
+        for row in connection.execute(
+            "SELECT LOWER(alias) AS alias, LOWER(canonical_tag) AS canonical_tag FROM tag_aliases"
+        ).fetchall():
+            alias_key = _normalize_tag_token(row[0])
+            canonical_val = _normalize_tag_token(row[1])
+            if alias_key and canonical_val:
+                aliases[alias_key] = canonical_val
+    except sqlite3.OperationalError:
+        aliases = {}
+
+    def _process(seq) -> tuple[str, ...]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for raw in seq or ():
+            tag = _normalize_tag_token(raw)
+            if not tag or tag in blocked:
+                continue
+            mapped = aliases.get(tag, tag)
+            if not mapped or mapped in blocked or mapped in seen:
+                continue
+            seen.add(mapped)
+            result.append(mapped)
+        return tuple(result)
+
+    return _process(tags), _process(character_tags)
+
+
+def filter_source_tags(
+    connection: sqlite3.Connection, source: SourceMedia | None
+) -> SourceMedia | None:
+    if source is None:
+        return None
+    tags, character_tags = filter_imported_tags(
+        connection, source.tags, source.character_tags
+    )
+    return replace(source, tags=tags, character_tags=character_tags)
+
+
 def create_universal_import_job(
     connection: sqlite3.Connection, submitted_input: str, input_kind: str
 ) -> int:
@@ -189,9 +250,11 @@ def run_universal_import_job(
     try:
         _running(connection, job_id)
         source_path = Path(submitted_input)
-        original_path: Path
+        original_path: Path | None = None
         metadata_source: SourceMedia | None = None
         file_source: SourceMedia | None = None
+        blocked_source = None
+        is_direct_url = False
         if input_kind == "url":
             normalized_input = normalize_source_url(submitted_input)
             candidate_id = _candidate_id(connection, job_id)
@@ -217,11 +280,12 @@ def run_universal_import_job(
                 submitted_input, providers, details["provider_timings"], details["timing"]["phases_ms"],
                 details["provider_diagnostics"],
             )
+            is_direct_url = source is not None and source.provider == "direct"
             details["provider_errors"] = metadata_errors
             if metadata_errors:
                 _set_search_status(details, _status_from_errors(metadata_errors))
             if source is not None:
-                blocked_source = connection.execute(
+                blocked_source = blocked_source or connection.execute(
                     "SELECT 1 FROM blocked_media_signatures WHERE source_url=?", (source.canonical_url,)
                 ).fetchone()
                 if blocked_source and settings.block_previously_deleted:
@@ -278,8 +342,46 @@ def run_universal_import_job(
                         remote_id=source.remote_id,
                     )
                 details["timing"]["phases_ms"]["source_download"] = _elapsed_ms(source_download_started)
-            if original_path is not None:
+            if original_path is not None and not is_direct_url:
                 temporary.append(original_path)
+                inspection = inspect_media(original_path)
+                digest = _md5(original_path)
+                pending_review = connection.execute(
+                    "SELECT review.id FROM review_items review "
+                    "JOIN import_candidates candidate ON candidate.id=review.import_candidate_id "
+                    "WHERE review.status='pending' AND candidate.content_hash=? LIMIT 1",
+                    (inspection.content_hash,),
+                ).fetchone()
+                if pending_review:
+                    _set_candidate_result(connection, candidate_id, "duplicate", None)
+                    details["resolution_method"] = "pending_review"
+                    _finish(
+                        connection,
+                        job_id,
+                        {
+                            "outcome": "duplicate",
+                            "candidate_id": candidate_id,
+                            "media_item_id": None,
+                            "review_item_id": int(pending_review[0]),
+                        },
+                        details,
+                    )
+                    return
+                blocked_hash = connection.execute(
+                    "SELECT 1 FROM blocked_media_signatures WHERE content_hash IN (?, ?)",
+                    (inspection.content_hash, digest or inspection.content_hash),
+                ).fetchone()
+                if blocked_source or blocked_hash:
+                    if settings.block_previously_deleted:
+                        raise ImportFailure(
+                            "import.previously_deleted",
+                            "This media was previously deleted and is blocked by settings.",
+                        )
+                    _stage_previously_deleted_review(
+                        connection, settings, job_id, candidate_id, original_path,
+                        inspection, source, details,
+                    )
+                    return
                 metadata_source = source
                 file_source = source
                 result = _accept_downloaded(
@@ -294,9 +396,16 @@ def run_universal_import_job(
                 _set_search_status(details, "resolved")
                 _finish(connection, job_id, result, details)
                 return
-            digest = source.content_md5 if source else None
-            source_hint = source
-            metadata_source = source_hint
+            if original_path is not None and is_direct_url:
+                temporary.append(original_path)
+                digest = _md5(original_path)
+                source_hint = None
+                metadata_source = None
+                file_source = source
+            else:
+                digest = source.content_md5 if source else None
+                source_hint = source
+                metadata_source = source_hint
         else:
             if not source_path.is_file():
                 raise ImportFailure("import.file_not_found", "The selected file does not exist.")
@@ -306,9 +415,17 @@ def run_universal_import_job(
             original_path = source_path
 
         if input_kind == "url" and original_path is None:
+            if is_direct_url:
+                failure = _first_download_failure(details.get("provider_errors"))
+                if failure:
+                    raise ImportFailure(*failure)
+                raise ImportFailure("import.download_unavailable", "The media source was unavailable.")
             if not digest:
                 raise ImportFailure("import.source_media_missing", "The source has no downloadable media or file hash.")
-            if connection.execute("SELECT 1 FROM blocked_media_signatures WHERE content_hash=?", (digest,)).fetchone() and settings.block_previously_deleted:
+            blocked_digest = connection.execute(
+                "SELECT 1 FROM blocked_media_signatures WHERE content_hash=?", (digest,)
+            ).fetchone()
+            if (blocked_source or blocked_digest) and settings.block_previously_deleted:
                 raise ImportFailure("import.previously_deleted", "This media was previously deleted and is blocked by settings.")
             exact_started = time.perf_counter()
             exact, errors = _search_exact(
@@ -334,12 +451,70 @@ def run_universal_import_job(
                 for match, downloaded in valid_candidates:
                     try:
                         file_source = _match_to_source(match)
+                        cand_inspection = inspect_media(downloaded)
+                        pending_review = connection.execute(
+                            "SELECT review.id FROM review_items review "
+                            "JOIN import_candidates candidate ON candidate.id=review.import_candidate_id "
+                            "WHERE review.status='pending' AND candidate.content_hash=? LIMIT 1",
+                            (cand_inspection.content_hash,),
+                        ).fetchone()
+                        if pending_review:
+                            _set_candidate_result(connection, candidate_id, "duplicate", None)
+                            details["resolution_method"] = "pending_review"
+                            _finish(
+                                connection,
+                                job_id,
+                                {
+                                    "outcome": "duplicate",
+                                    "candidate_id": candidate_id,
+                                    "media_item_id": None,
+                                    "review_item_id": int(pending_review[0]),
+                                },
+                                details,
+                            )
+                            return
+                        blocked_cand = (
+                            blocked_source
+                            or blocked_digest
+                            or connection.execute(
+                                "SELECT 1 FROM blocked_media_signatures WHERE content_hash IN (?, ?) OR source_url=?",
+                                (
+                                    cand_inspection.content_hash,
+                                    digest or cand_inspection.content_hash,
+                                    match.canonical_url,
+                                ),
+                            ).fetchone()
+                        )
+                        if blocked_cand:
+                            if settings.block_previously_deleted:
+                                raise ImportFailure(
+                                    "import.previously_deleted",
+                                    "This media was previously deleted and is blocked by settings.",
+                                )
+                            _stage_previously_deleted_review(
+                                connection,
+                                settings,
+                                job_id,
+                                candidate_id,
+                                downloaded,
+                                cand_inspection,
+                                metadata_source or file_source,
+                                details,
+                            )
+                            return
                         result = _accept_downloaded(
                             connection, settings, job_id, downloaded, file_source, submitted_input,
                             source_url_override=metadata_source.canonical_url if metadata_source else normalized_input,
                             metadata_source=metadata_source or file_source,
                             file_source=file_source,
                         )
+                    except ImportFailure as error:
+                        if error.code == "import.previously_deleted":
+                            raise
+                        code, message = _download_failure(error, "The exact candidate was unavailable.")
+                        details.setdefault("provider_errors", []).append({"provider": match.provider, "code": code, "message": message, "remote_id": match.remote_id})
+                        _record_provider_diagnostic(details["provider_diagnostics"], "exact_download", match.provider, "unavailable", 0, code, message, remote_id=match.remote_id)
+                        continue
                     except Exception as error:
                         code, message = _download_failure(error, "The exact candidate was unavailable.")
                         details.setdefault("provider_errors", []).append({"provider": match.provider, "code": code, "message": message, "remote_id": match.remote_id})
@@ -403,15 +578,28 @@ def run_universal_import_job(
             return
 
         blocked_hash = connection.execute(
-            "SELECT 1 FROM blocked_media_signatures WHERE content_hash=?", (digest or inspection.content_hash,)
+            "SELECT 1 FROM blocked_media_signatures WHERE content_hash IN (?, ?)",
+            (inspection.content_hash, digest or inspection.content_hash),
         ).fetchone()
-        if blocked_hash and settings.block_previously_deleted:
-            raise ImportFailure("import.previously_deleted", "This media was previously deleted and is blocked by settings.")
+        if blocked_source or blocked_hash:
+            if settings.block_previously_deleted:
+                raise ImportFailure("import.previously_deleted", "This media was previously deleted and is blocked by settings.")
+            _stage_previously_deleted_review(
+                connection,
+                settings,
+                job_id,
+                candidate_id,
+                original_path,
+                inspection,
+                metadata_source or file_source,
+                details,
+            )
+            return
 
         # A local file that is already in the library is answered from the
         # local fingerprints before any provider is contacted: an unreachable
         # provider must not make a known file look like it is still importing.
-        if input_kind != "url":
+        if input_kind != "url" or is_direct_url:
             perceptual_duplicate = find_exact_perceptual_duplicate(
                 connection, settings, original_path, inspection
             )
@@ -450,6 +638,46 @@ def run_universal_import_job(
             if best_metadata is not None:
                 metadata_source = _match_to_source(best_metadata)
         _set_search_status(details, "matched" if exact else _status_from_errors(errors))
+        if is_direct_url and metadata_source is not None:
+            blocked_meta = connection.execute(
+                "SELECT 1 FROM blocked_media_signatures WHERE source_url=?",
+                (metadata_source.canonical_url,),
+            ).fetchone()
+            if blocked_meta:
+                if settings.block_previously_deleted:
+                    raise ImportFailure(
+                        "import.previously_deleted",
+                        "This source was previously deleted and is blocked by settings.",
+                    )
+                _stage_previously_deleted_review(
+                    connection,
+                    settings,
+                    job_id,
+                    candidate_id,
+                    original_path,
+                    inspection,
+                    metadata_source,
+                    details,
+                )
+                return
+            result = _accept_downloaded(
+                connection,
+                settings,
+                job_id,
+                original_path,
+                metadata_source,
+                submitted_input,
+                source_url_override=metadata_source.canonical_url,
+                metadata_source=metadata_source,
+                file_source=file_source or metadata_source,
+            )
+            details.update({
+                "resolution_method": result.get("resolution_method", "exact"),
+                "resolved_source_url": metadata_source.canonical_url,
+            })
+            _set_search_status(details, "resolved")
+            _finish(connection, job_id, result, details)
+            return
         _progress(connection, job_id, 70 if exact else 65, "Checking source files")
         download_started = time.perf_counter()
         valid_candidates, download_errors = _download_exact_candidates(
@@ -462,11 +690,41 @@ def run_universal_import_job(
                 try:
                     temporary.append(downloaded)
                     file_source = _match_to_source(match)
+                    resolved_meta = metadata_source or file_source
+                    blocked_resolved = connection.execute(
+                        "SELECT 1 FROM blocked_media_signatures WHERE source_url IN (?, ?)",
+                        (resolved_meta.canonical_url, file_source.canonical_url),
+                    ).fetchone()
+                    if blocked_resolved:
+                        if settings.block_previously_deleted:
+                            raise ImportFailure(
+                                "import.previously_deleted",
+                                "This source was previously deleted and is blocked by settings.",
+                            )
+                        _stage_previously_deleted_review(
+                            connection,
+                            settings,
+                            job_id,
+                            candidate_id,
+                            downloaded,
+                            inspection,
+                            resolved_meta,
+                            details,
+                        )
+                        return
                     result = _accept_downloaded(
                         connection, settings, job_id, downloaded, file_source, submitted_input,
-                        metadata_source=metadata_source or file_source,
+                        metadata_source=resolved_meta,
                         file_source=file_source,
                     )
+                except ImportFailure as error:
+                    if error.code == "import.previously_deleted":
+                        raise
+                    downloaded.unlink(missing_ok=True)
+                    code, message = _download_failure(error, "The exact candidate was unavailable.")
+                    details.setdefault("provider_errors", []).append({"provider": match.provider, "code": code, "message": message, "remote_id": match.remote_id})
+                    _record_provider_diagnostic(details["provider_diagnostics"], "exact_download", match.provider, "unavailable", 0, code, message, remote_id=match.remote_id)
+                    continue
                 except Exception as error:
                     downloaded.unlink(missing_ok=True)
                     code, message = _download_failure(error, "The exact candidate was unavailable.")
@@ -515,6 +773,7 @@ def run_universal_import_job(
         original_staged = atomic_copy(original_path, settings.resolved_import_staging_path, "candidate")
         candidate_paths: list[tuple[SourceMatch, Path, object]] = []
         staged_committed = False
+        staged_source_metadata = metadata_source or file_source
         try:
             similar = _local_similar(connection, settings, original_path, inspection)
             _record_provider_diagnostic(
@@ -529,12 +788,14 @@ def run_universal_import_job(
             similar = [match for match in _unique_similar(similar) if match.confidence >= MIN_SIMILAR_CONFIDENCE]
             details["similar_candidates_found"] = len(similar)
             for match in similar:
-                media_url = match.direct_media_url or match.preview_url
+                media_url = match.direct_media_url
                 if not media_url:
                     _record_provider_diagnostic(
                         details["provider_diagnostics"], "perceptual_search", match.provider,
-                        "unavailable", 0, "import.candidate_unavailable",
-                        "The similar candidate has no media URL.", remote_id=match.remote_id,
+                        "unavailable", 0, "import.source_link_unresolved",
+                        "A similar source was found, but its post could not be loaded, so "
+                        "only a search preview is available. It is not offered as a file.",
+                        remote_id=match.remote_id,
                     )
                     continue
                 path = settings.resolved_import_staging_path / f"candidate-{uuid4().hex}{_extension(media_url)}"
@@ -559,7 +820,7 @@ def run_universal_import_job(
                     "content_hash=?, width=?, height=?, file_size=?, source_metadata_json=? WHERE id=?",
                     (original_staged, inspection.media_type, inspection.content_hash,
                      inspection.width, inspection.height, inspection.file_size,
-                     _serialize_source(metadata_source) if metadata_source else None, candidate_id),
+                     _serialize_source(staged_source_metadata) if staged_source_metadata else None, candidate_id),
                 )
                 review_cursor = connection.execute(
                     "INSERT INTO review_items (import_candidate_id, reason) VALUES (?, 'source_candidates')",
@@ -591,7 +852,7 @@ def run_universal_import_job(
                 "content_hash=?, width=?, height=?, file_size=?, source_metadata_json=? WHERE id=?",
                 (original_staged, inspection.media_type, inspection.content_hash,
                  inspection.width, inspection.height, inspection.file_size,
-                 _serialize_source(metadata_source) if metadata_source else None, candidate_id),
+                 _serialize_source(staged_source_metadata) if staged_source_metadata else None, candidate_id),
             )
             review_cursor = connection.execute(
                 "INSERT INTO review_items (import_candidate_id, reason) VALUES (?, 'source_required')",
@@ -657,7 +918,7 @@ def run_universal_import_job(
                 row is not None
                 and row["status"] == "failed"
                 and not has_durable_replacement
-                and row["error_code"] in (_RETAIN_EXCLUDED_CODES - {"import.unsupported_media_type"})
+                and row["error_code"] in _RETAIN_EXCLUDED_CODES
             )
             # Keep the uploaded bytes until they are safely stored in the library
             # (accepted/duplicate) or a durable staged copy exists for review.
@@ -1072,6 +1333,8 @@ def _local_similar(connection, settings, original_path, inspection):
     try:
         with Image.open(original_path) as image:
             wanted = imagehash.phash(image)
+        wanted_int = int(str(wanted), 16)
+        hash_bits = wanted.hash.size
     except (OSError, ValueError):
         return []
     rows = connection.execute(
@@ -1085,7 +1348,8 @@ def _local_similar(connection, settings, original_path, inspection):
     results = []
     for row in rows:
         try:
-            confidence = 100.0 * (wanted.hash.size - (wanted - imagehash.hex_to_hash(row["perceptual_hash"]))) / wanted.hash.size
+            distance = (wanted_int ^ int(str(row["perceptual_hash"]), 16)).bit_count()
+            confidence = 100.0 * (hash_bits - distance) / hash_bits
         except (TypeError, ValueError):
             continue
         if confidence < MIN_SIMILAR_CONFIDENCE or not row["provider"] or not row["canonical_url"]:
@@ -1556,12 +1820,188 @@ def _match_to_source(match: SourceMatch) -> SourceMedia:
     )
 
 
+def _stage_previously_deleted_review(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    job_id: int,
+    candidate_id: int,
+    path: Path,
+    inspection,
+    metadata_source: SourceMedia | None,
+    details: dict[str, object],
+) -> None:
+    filtered_source = filter_source_tags(connection, metadata_source)
+    staged_name = atomic_copy(path, settings.resolved_import_staging_path, "candidate")
+    try:
+        connection.execute(
+            "UPDATE import_candidates SET status='review', stored_path=?, media_type=?, "
+            "content_hash=?, width=?, height=?, file_size=?, source_metadata_json=? WHERE id=?",
+            (
+                staged_name,
+                inspection.media_type,
+                inspection.content_hash,
+                inspection.width,
+                inspection.height,
+                inspection.file_size,
+                _serialize_source(filtered_source) if filtered_source else None,
+                candidate_id,
+            ),
+        )
+        review_cursor = connection.execute(
+            "INSERT INTO review_items (import_candidate_id, reason) VALUES (?, 'previously_deleted')",
+            (candidate_id,),
+        )
+        review_id = int(review_cursor.lastrowid)
+        connection.commit()
+    except Exception:
+        (settings.resolved_import_staging_path / staged_name).unlink(missing_ok=True)
+        connection.rollback()
+        raise
+    details["resolution_method"] = "previously_deleted"
+    if filtered_source and filtered_source.canonical_url:
+        details["resolved_source_url"] = filtered_source.canonical_url
+    _finish(
+        connection,
+        job_id,
+        {
+            "outcome": "review",
+            "review_reason": "previously_deleted",
+            "candidate_id": candidate_id,
+            "review_item_id": review_id,
+        },
+        details,
+    )
+
+
+def _merge_duplicate_metadata(
+    connection: sqlite3.Connection,
+    media_id: int,
+    metadata_source: SourceMedia | None,
+    file_source: SourceMedia | None,
+    source_url: str | None,
+) -> None:
+    metadata_source = filter_source_tags(connection, metadata_source)
+    if metadata_source and metadata_source.tags:
+        connection.executemany(
+            "INSERT OR IGNORE INTO media_tags (media_item_id, tag) VALUES (?, ?)",
+            ((media_id, tag) for tag in metadata_source.tags),
+        )
+    if metadata_source and metadata_source.provider != "direct":
+        existing_source = connection.execute(
+            "SELECT canonical_url, direct_media_url, author, domain, parent_id, character_tags_json "
+            "FROM media_sources WHERE media_item_id=?",
+            (media_id,),
+        ).fetchone()
+        if existing_source is None:
+            try:
+                connection.execute(
+                    "INSERT INTO media_sources "
+                    "(media_item_id, canonical_url, direct_media_url, provider, remote_id, author, domain, parent_id, character_tags_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        media_id,
+                        metadata_source.canonical_url,
+                        metadata_source.direct_media_url,
+                        metadata_source.provider,
+                        metadata_source.remote_id,
+                        metadata_source.author,
+                        metadata_source.domain,
+                        metadata_source.parent_id,
+                        json.dumps(list(metadata_source.character_tags)),
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                owner = connection.execute(
+                    "SELECT media_item_id FROM media_sources WHERE canonical_url=?",
+                    (metadata_source.canonical_url,),
+                ).fetchone()
+                if owner is not None and int(owner[0]) != int(media_id):
+                    deleted = connection.execute(
+                        "SELECT deleted_at FROM media_items WHERE id=?", (owner[0],)
+                    ).fetchone()
+                    if deleted is not None and deleted[0] is not None:
+                        connection.execute(
+                            "UPDATE media_sources SET media_item_id=?, direct_media_url=?, provider=?, "
+                            "remote_id=?, author=?, domain=?, parent_id=?, character_tags_json=? "
+                            "WHERE media_item_id=?",
+                            (
+                                media_id,
+                                metadata_source.direct_media_url,
+                                metadata_source.provider,
+                                metadata_source.remote_id,
+                                metadata_source.author,
+                                metadata_source.domain,
+                                metadata_source.parent_id,
+                                json.dumps(list(metadata_source.character_tags)),
+                                owner[0],
+                            ),
+                        )
+        else:
+            existing_chars = list(_decode_json_tags(existing_source["character_tags_json"]))
+            for char_tag in metadata_source.character_tags:
+                if char_tag not in existing_chars:
+                    existing_chars.append(char_tag)
+            connection.execute(
+                "UPDATE media_sources SET "
+                "direct_media_url=COALESCE(NULLIF(TRIM(direct_media_url), ''), ?), "
+                "author=COALESCE(NULLIF(TRIM(author), ''), ?), "
+                "domain=COALESCE(NULLIF(TRIM(domain), ''), ?), "
+                "parent_id=COALESCE(NULLIF(TRIM(parent_id), ''), ?), "
+                "character_tags_json=? "
+                "WHERE media_item_id=?",
+                (
+                    metadata_source.direct_media_url,
+                    metadata_source.author,
+                    metadata_source.domain,
+                    metadata_source.parent_id,
+                    json.dumps(existing_chars),
+                    media_id,
+                ),
+            )
+    item = connection.execute(
+        "SELECT source_url, file_source_url, author, domain, parent_id, character_tags_json "
+        "FROM media_items WHERE id=?",
+        (media_id,),
+    ).fetchone()
+    if item is None:
+        return
+    item_chars = list(_decode_json_tags(item["character_tags_json"]))
+    if metadata_source:
+        for char_tag in metadata_source.character_tags:
+            if char_tag not in item_chars:
+                item_chars.append(char_tag)
+    effective_source_url = (
+        source_url
+        if (metadata_source is None or metadata_source.provider != "direct")
+        else None
+    )
+    connection.execute(
+        "UPDATE media_items SET "
+        "source_url=COALESCE(NULLIF(TRIM(source_url), ''), ?), "
+        "file_source_url=COALESCE(NULLIF(TRIM(file_source_url), ''), ?), "
+        "author=COALESCE(NULLIF(TRIM(author), ''), ?), "
+        "domain=COALESCE(NULLIF(TRIM(domain), ''), ?), "
+        "parent_id=COALESCE(NULLIF(TRIM(parent_id), ''), ?), "
+        "character_tags_json=? "
+        "WHERE id=?",
+        (
+            effective_source_url,
+            file_source.canonical_url if file_source else None,
+            metadata_source.author if metadata_source else None,
+            metadata_source.domain if (metadata_source and metadata_source.provider != "direct") else None,
+            metadata_source.parent_id if metadata_source else None,
+            json.dumps(item_chars),
+            media_id,
+        ),
+    )
+
+
 def _accept_downloaded(
     connection, settings, job_id, path, source, submitted_input,
     source_url_override=None, metadata_source=None, file_source=None,
 ):
-    metadata_source = metadata_source or source
-    file_source = file_source or source
+    metadata_source = filter_source_tags(connection, metadata_source or source)
+    file_source = filter_source_tags(connection, file_source or source)
     source_url = source_url_override or (
         metadata_source.canonical_url if metadata_source else (
             file_source.canonical_url if file_source else None
@@ -1574,25 +2014,17 @@ def _accept_downloaded(
     ).fetchone()
     candidate_id = _candidate_id(connection, job_id)
     if existing:
-        if metadata_source:
-            _store_source(connection, int(existing[0]), metadata_source)
-        if source_url:
-            connection.execute(
-                "UPDATE media_items SET source_url=? WHERE id=?",
-                (source_url, int(existing[0])),
-            )
-        if file_source:
-            connection.execute(
-                "UPDATE media_items SET file_source_url=? WHERE id=?",
-                (file_source.canonical_url, int(existing[0])),
-            )
+        existing_id = int(existing[0])
+        _merge_duplicate_metadata(
+            connection, existing_id, metadata_source, file_source, source_url
+        )
         if metadata_source:
             connection.execute(
                 "UPDATE import_candidates SET source_metadata_json=? WHERE id=?",
                 (_serialize_source(metadata_source), candidate_id),
             )
-        _set_candidate_result(connection, candidate_id, "duplicate", int(existing[0]))
-        return {"outcome": "duplicate", "candidate_id": candidate_id, "media_item_id": int(existing[0])}
+        _set_candidate_result(connection, candidate_id, "duplicate", existing_id)
+        return {"outcome": "duplicate", "candidate_id": candidate_id, "media_item_id": existing_id}
 
     perceptual_duplicate = find_exact_perceptual_duplicate(
         connection, settings, path, inspection
@@ -1654,26 +2086,18 @@ def _accept_downloaded(
             (inspection.content_hash,),
         ).fetchone()
         if existing:
+            existing_id = int(existing[0])
             (settings.media_path / stored).unlink(missing_ok=True)
-            if metadata_source:
-                _store_source(connection, int(existing[0]), metadata_source)
-            if source_url:
-                connection.execute(
-                    "UPDATE media_items SET source_url=? WHERE id=?",
-                    (source_url, int(existing[0])),
-                )
-            if file_source:
-                connection.execute(
-                    "UPDATE media_items SET file_source_url=? WHERE id=?",
-                    (file_source.canonical_url, int(existing[0])),
-                )
+            _merge_duplicate_metadata(
+                connection, existing_id, metadata_source, file_source, source_url
+            )
             if metadata_source:
                 connection.execute(
                     "UPDATE import_candidates SET source_metadata_json=? WHERE id=?",
                     (_serialize_source(metadata_source), candidate_id),
                 )
-            _set_candidate_result(connection, candidate_id, "duplicate", int(existing[0]))
-            return {"outcome": "duplicate", "candidate_id": candidate_id, "media_item_id": int(existing[0])}
+            _set_candidate_result(connection, candidate_id, "duplicate", existing_id)
+            return {"outcome": "duplicate", "candidate_id": candidate_id, "media_item_id": existing_id}
         (settings.media_path / stored).unlink(missing_ok=True)
         raise
     except Exception:
@@ -1683,6 +2107,7 @@ def _accept_downloaded(
 
 
 def _store_source(connection, media_id, source):
+    source = filter_source_tags(connection, source)
     values = (media_id, source.canonical_url, source.direct_media_url, source.provider,
               source.remote_id, source.author, source.domain, source.parent_id,
               json.dumps(list(source.character_tags)))

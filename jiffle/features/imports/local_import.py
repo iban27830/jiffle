@@ -77,16 +77,33 @@ def run_local_import_job(
     finally:
         if command.source_path.parent.resolve() == settings.resolved_import_staging_path.resolve():
             row = connection.execute(
-                "SELECT status, stored_path FROM import_candidates WHERE job_id = ?",
+                "SELECT candidate.status, candidate.stored_path, job.error_code "
+                "FROM import_candidates candidate JOIN background_jobs job ON job.id = candidate.job_id "
+                "WHERE candidate.job_id = ?",
                 (job_id,),
             ).fetchone()
             stored_path = row["stored_path"] if row is not None else None
             has_durable_replacement = bool(stored_path) and stored_path != command.source_path.name
+            is_rejected_upload = (
+                row is not None
+                and row["status"] == "failed"
+                and not has_durable_replacement
+                and command.source_path.name.startswith("upload-")
+                and row["error_code"] in {
+                    "import.previously_deleted",
+                    "import.unsupported_media_type",
+                    "import.invalid_media",
+                    "import.file_not_found",
+                    "import.video_support_unavailable",
+                }
+            )
             # Keep the uploaded bytes on failed imports: only drop the staging
             # copy once the media is stored (accepted/duplicate) or a durable
-            # staged replacement exists for review.
+            # staged replacement exists for review, or the upload was rejected.
             if row and (
-                row["status"] in {"accepted", "duplicate"} or has_durable_replacement
+                row["status"] in {"accepted", "duplicate"}
+                or has_durable_replacement
+                or is_rejected_upload
             ):
                 command.source_path.unlink(missing_ok=True)
         connection.close()

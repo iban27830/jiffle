@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 import time
+from urllib.parse import urljoin
 
 import requests
 
@@ -34,9 +35,11 @@ class RequestsMediaDownloader:
     connect_timeout = 15
     read_timeout = 45
     max_attempts = 3
+    max_redirects = 5
     chunk_size = 64 * 1024
     max_bytes = 512 * 1024 * 1024
     transient_statuses = {408, 429, 500, 502, 503, 504}
+    redirect_statuses = {301, 302, 303, 307, 308}
 
     def download(self, url: str, destination: Path, referer: str | None = None) -> None:
         ensure_public_url(url)
@@ -47,15 +50,45 @@ class RequestsMediaDownloader:
             destination.unlink(missing_ok=True)
             response = None
             try:
-                response = requests.get(
-                    url,
-                    headers=headers,
-                    timeout=(self.connect_timeout, self.read_timeout),
-                    stream=True,
-                )
-                final_url = getattr(response, "url", None)
-                if isinstance(final_url, str) and final_url:
-                    ensure_public_url(final_url)
+                current_url = url
+                for _hop in range(self.max_redirects + 1):
+                    ensure_public_url(current_url)
+                    response = requests.get(
+                        current_url,
+                        headers=headers,
+                        timeout=(self.connect_timeout, self.read_timeout),
+                        stream=True,
+                        allow_redirects=False,
+                    )
+                    for prior in getattr(response, "history", None) or ():
+                        prior_url = getattr(prior, "url", None)
+                        if isinstance(prior_url, str) and prior_url:
+                            ensure_public_url(prior_url)
+                    final_url = getattr(response, "url", None)
+                    if isinstance(final_url, str) and final_url:
+                        ensure_public_url(final_url)
+                    status = getattr(response, "status_code", None)
+                    response_headers = getattr(response, "headers", None) or {}
+                    if status in self.redirect_statuses:
+                        location = response_headers.get("Location") or response_headers.get("location")
+                        close = getattr(response, "close", None)
+                        if callable(close):
+                            close()
+                        response = None
+                        if not isinstance(location, str) or not location.strip():
+                            raise MediaDownloadError(
+                                "import.download_unavailable",
+                                "Redirect response is missing a Location header.",
+                            )
+                        current_url = urljoin(current_url, location.strip())
+                        ensure_public_url(current_url)
+                        continue
+                    break
+                else:
+                    raise MediaDownloadError(
+                        "import.download_unavailable",
+                        "Too many redirects while downloading media.",
+                    )
                 status = getattr(response, "status_code", None)
                 response_headers = getattr(response, "headers", None) or {}
                 content_type = str(response_headers.get("Content-Type", ""))

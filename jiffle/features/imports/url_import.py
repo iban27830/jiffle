@@ -16,6 +16,7 @@ from jiffle.features.imports.local_import import (
 from jiffle.features.imports.history import create_import_history, update_import_history
 from jiffle.features.imports.source_adapters.contracts import MediaDownloader, SourceProvider
 from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
+from jiffle.features.imports.universal_import import filter_source_tags
 from jiffle.infrastructure.database.connection import connect_database
 from jiffle.infrastructure.media_revisions import create_original_revision
 
@@ -47,7 +48,7 @@ def run_url_import_job(
     temporary: Path | None = None
     try:
         _running(connection, job_id)
-        source = provider.fetch(submitted_url)
+        source = filter_source_tags(connection, provider.fetch(submitted_url))
         blocked_source = connection.execute(
             "SELECT 1 FROM blocked_media_signatures WHERE source_url=?",
             (source.canonical_url,),
@@ -158,8 +159,8 @@ def run_url_import_job(
             create_original_revision(connection, media_item_id, settings)
             _attach_source(connection, media_item_id, source)
             connection.executemany(
-                "INSERT INTO media_tags (media_item_id, tag) VALUES (?, ?)",
-                ((media_item_id, tag) for tag in sorted(set(source.tags))),
+                "INSERT OR IGNORE INTO media_tags (media_item_id, tag) VALUES (?, ?)",
+                ((media_item_id, tag) for tag in source.tags),
             )
             connection.execute(
                 "UPDATE url_import_candidates SET canonical_url = ?, provider = ?, "
@@ -194,6 +195,7 @@ def run_url_import_job(
 
 
 def _attach_source(connection, media_item_id, source) -> None:
+    source = filter_source_tags(connection, source)
     try:
         connection.execute(
             "INSERT INTO media_sources "

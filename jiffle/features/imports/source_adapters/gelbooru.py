@@ -23,6 +23,15 @@ class GelbooruSourceProvider:
         return parsed.scheme in {"http", "https"} and parsed.hostname in self.domains
 
     def fetch(self, url):
+        return self._fetch_post(url, allow_missing=False)
+
+    def fetch_metadata(self, url):
+        return self._fetch_post(url, allow_missing=True)
+
+    def metadata_md5(self, url: str) -> str | None:
+        return self.fetch_metadata(url).content_md5
+
+    def _fetch_post(self, url, allow_missing: bool = False):
         parsed = urlparse(url)
         post_id = parse_qs(parsed.query).get("id", [None])[0]
         if not post_id or not str(post_id).isdigit():
@@ -36,7 +45,6 @@ class GelbooruSourceProvider:
             response.raise_for_status()
             payload = response.json()
             post = payload["post"][0] if isinstance(payload, dict) else payload[0]
-            direct_url = post["file_url"]
         except requests.HTTPError as error:
             failure = _http_auth_failure(error)
             if failure:
@@ -44,24 +52,30 @@ class GelbooruSourceProvider:
             raise SourceProviderFailure("import.provider_unavailable", "Gelbooru metadata could not be loaded.") from error
         except (requests.RequestException, KeyError, IndexError, TypeError, ValueError) as error:
             raise SourceProviderFailure("import.provider_unavailable", "Gelbooru metadata could not be loaded.") from error
+        if not isinstance(post, dict):
+            raise SourceProviderFailure("import.provider_unavailable", "Gelbooru metadata could not be loaded.")
+        direct_url = post.get("file_url")
+        if not isinstance(direct_url, str) or not direct_url:
+            direct_url = None
+        if not direct_url and not allow_missing:
+            raise SourceProviderFailure("import.source_media_missing", "The source has no downloadable media.")
         raw_parent_id = post.get("parent_id")
         parent_id = str(raw_parent_id) if raw_parent_id not in (None, "", 0, "0") else None
         raw_characters = post.get("character") or post.get("tag_string_character") or ""
         character_tags = tuple(str(raw_characters).split()) if isinstance(raw_characters, str) else tuple(str(value) for value in raw_characters)
+        extension = (PurePosixPath(urlparse(direct_url).path).suffix.lower() if direct_url else "") or ".jpg"
         return SourceMedia(
-            canonical_url=url, direct_media_url=direct_url, provider=self.provider_name,
+            canonical_url=f"https://{domain}/index.php?page=post&s=view&id={post_id}",
+            direct_media_url=direct_url, provider=self.provider_name,
             remote_id=str(post_id), author=post.get("owner") or None, domain=domain,
             tags=add_platform_tags(
                 tuple(str(post.get("tags", "")).split()),
                 self.provider_name, domain, post.get("source"),
             ),
-            file_extension=PurePosixPath(urlparse(direct_url).path).suffix or ".jpg",
+            file_extension=extension,
             character_tags=character_tags, parent_id=parent_id,
             content_md5=_valid_md5(post.get("hash") or post.get("md5")),
         )
-
-    def fetch_metadata(self, url):
-        return self.fetch(url)
 
     def search_by_md5(self, digest: str) -> list[dict[str, object]]:
         digest = _valid_md5(digest)

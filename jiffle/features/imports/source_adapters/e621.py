@@ -61,7 +61,7 @@ class E621SourceProvider:
         return parsed.scheme in {"http", "https"} and parsed.hostname in self.domains
 
     def can_handle_set(self, url: str) -> bool:
-        return self.can_handle(url) and parse_set_url(url) is not None
+        return self.can_handle(url) and _parse_collection_url(url) is not None
 
     def fetch(self, url):
         parsed = urlparse(url)
@@ -200,12 +200,16 @@ class E621SourceProvider:
         )
 
     def fetch_set(self, url: str) -> SourceSet:
-        parsed = parse_set_url(url)
+        parsed = _parse_collection_url(url)
         if parsed is None:
-            raise SourceProviderFailure("import.invalid_source_url", "The URL is not an e621 post set URL.")
-        domain, set_id = parsed
-        metadata_payload = self._get_json(f"https://{domain}/post_sets/{set_id}.json", context="set")
-        metadata = metadata_payload.get("post_set", metadata_payload) if isinstance(metadata_payload, dict) else {}
+            raise SourceProviderFailure("import.invalid_source_url", "The URL is not an e621 post set or pool URL.")
+        domain, kind, set_id = parsed
+        is_pool = kind == "pools"
+        metadata_payload = self._get_json(f"https://{domain}/{kind}/{set_id}.json", context="set")
+        if isinstance(metadata_payload, dict):
+            metadata = metadata_payload.get("pool" if is_pool else "post_set", metadata_payload)
+        else:
+            metadata = {}
         if not isinstance(metadata, dict):
             raise SourceProviderFailure("import.e621_set_invalid", "e621 returned invalid set metadata.")
         raw_ids = metadata.get("post_ids") or []
@@ -214,15 +218,22 @@ class E621SourceProvider:
         post_ids = tuple(str(value) for value in raw_ids if str(value).isdigit())
         if not post_ids:
             raise SourceProviderFailure("import.e621_set_empty", "The e621 post set is empty.")
-        shortname = str(metadata.get("shortname") or metadata.get("short_name") or metadata.get("name") or set_id)
-        name = str(metadata.get("name") or shortname)
+        raw_name = str(metadata.get("name") or "")
+        if is_pool:
+            shortname = raw_name or f"pool_{set_id}"
+            name = raw_name.replace("_", " ").strip() or shortname
+            search_tags = f"pool:{set_id} status:any"
+        else:
+            shortname = str(metadata.get("shortname") or metadata.get("short_name") or raw_name or set_id)
+            name = str(raw_name or shortname)
+            search_tags = f"set:{shortname} status:any"
 
         posts_by_id: dict[str, dict] = {}
         page = 1
         while len(posts_by_id) < len(set(post_ids)):
             payload = self._get_json(
                 f"https://{domain}/posts.json",
-                params={"tags": f"set:{shortname}", "limit": self.page_limit, "page": page},
+                params={"tags": search_tags, "limit": self.page_limit, "page": page},
                 context="set_posts",
             )
             raw_posts = payload.get("posts", []) if isinstance(payload, dict) else payload
@@ -267,7 +278,7 @@ class E621SourceProvider:
             except (KeyError, TypeError, ValueError):
                 issues.append(SetPostIssue(post_id, canonical, "import.source_media_missing", "The post has no downloadable media."))
         return SourceSet(
-            canonical_url=f"https://{domain}/post_sets/{set_id}", provider=self.provider_name,
+            canonical_url=f"https://{domain}/{kind}/{set_id}", provider=self.provider_name,
             remote_id=set_id, name=name, shortname=shortname, post_ids=post_ids,
             posts=tuple(posts), issues=tuple(issues),
         )
@@ -407,15 +418,20 @@ def _sleep_backoff(response, attempt: int) -> None:
     time.sleep(min(delay, MAX_RETRY_AFTER_SECONDS))
 
 
-def parse_set_url(url: str) -> tuple[str, str] | None:
+def _parse_collection_url(url: str) -> tuple[str, str, str] | None:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or parsed.hostname not in E621SourceProvider.domains:
         return None
     parts = [part for part in parsed.path.split("/") if part]
-    if len(parts) != 2 or parts[0] != "post_sets":
+    if len(parts) != 2 or parts[0] not in {"post_sets", "pools"}:
         return None
     set_id = parts[1][:-5] if parts[1].endswith(".json") else parts[1]
-    return (parsed.hostname, set_id) if set_id.isdigit() else None
+    return (parsed.hostname, parts[0], set_id) if set_id.isdigit() else None
+
+
+def parse_set_url(url: str) -> tuple[str, str] | None:
+    parsed = _parse_collection_url(url)
+    return (parsed[0], parsed[2]) if parsed is not None else None
 
 
 def _post_id(path: str) -> int | None:

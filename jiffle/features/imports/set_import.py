@@ -85,10 +85,11 @@ def run_set_import_job(
                 results[index] = {"post_id": post_id, "issue": issue_by_id[post_id]}
                 continue
             if post_id not in source_by_id:
+                base_origin = source_set.canonical_url.split("/post_sets/")[0].split("/pools/")[0]
                 issue = {
                     "remote_id": post_id,
                     "post_id": post_id,
-                    "url": f"{source_set.canonical_url.split('/post_sets/')[0]}/posts/{post_id}",
+                    "url": f"{base_origin}/posts/{post_id}",
                     "code": "import.source_post_unavailable",
                     "message": "The post was not returned by the source set.",
                 }

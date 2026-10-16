@@ -33,6 +33,8 @@ from jiffle.features.imports.universal_import import (
     _reverse_similar,
     _safe_error_message,
     _select_metadata_source,
+    filter_imported_tags,
+    filter_source_tags,
     resolve_exact_downloads,
 )
 from jiffle.infrastructure.database.connection import connect_database
@@ -65,12 +67,16 @@ def accept_review_item(
     file_source: SourceMedia | None | object = _UNSET,
 ) -> ReviewAcceptance:
     row = _pending_review(connection, review_id)
-    source = source or _candidate_source(row["source_metadata_json"])
+    source = filter_source_tags(
+        connection, source or _candidate_source(row["source_metadata_json"])
+    )
     if file_source is _UNSET:
         # By default the metadata source is also where the bytes come from.
         # Passing an explicit ``None`` records a source without a file source,
         # for example when the user's own upload supplied the bytes.
         file_source = source
+    elif file_source is not None:
+        file_source = filter_source_tags(connection, file_source)
     staged = _staged_path(settings, row["stored_path"])
     if not staged.is_file():
         raise ReviewFailure("review.file_missing", "The staged file is unavailable.")
@@ -179,9 +185,16 @@ def accept_source_candidate(
     selected_path = _staged_path(settings, row["stored_path"])
     if not selected_path.is_file():
         raise ReviewFailure("review.file_missing", "The source candidate is unavailable.")
-    file_source = _candidate_source(row["source_metadata_json"])
-    candidate_metadata = _candidate_source(row["candidate_source_metadata_json"])
-    source = candidate_metadata or file_source
+    file_source = filter_source_tags(
+        connection, _candidate_source(row["source_metadata_json"])
+    )
+    candidate_metadata = filter_source_tags(
+        connection, _candidate_source(row["candidate_source_metadata_json"])
+    )
+    if candidate_metadata is not None and candidate_metadata.provider != "direct":
+        source = candidate_metadata
+    else:
+        source = file_source or candidate_metadata
     source_existing = connection.execute(
         "SELECT id FROM media_items WHERE content_hash=? AND deleted_at IS NULL",
         (row["content_hash"],),
@@ -335,8 +348,31 @@ def run_manual_source_job(
             "started_at=CURRENT_TIMESTAMP WHERE id=?", (job_id,)
         )
         connection.commit()
-        source = provider.fetch(source_url)
-        acceptance = accept_review_item(connection, settings, review_id, source, source)
+        row = _pending_review(connection, review_id)
+        staged = _staged_path(settings, row["stored_path"])
+        candidate_source = _candidate_source(row["source_metadata_json"])
+        try:
+            source = provider.fetch(source_url)
+        except SourceProviderFailure as error:
+            if error.code != "import.source_media_missing" or not staged.is_file():
+                raise
+            fetch_metadata = getattr(provider, "fetch_metadata", None)
+            if not callable(fetch_metadata):
+                raise
+            source = fetch_metadata(source_url)
+        file_source = (
+            source
+            if (
+                source is not None
+                and source.direct_media_url
+                and candidate_source is not None
+                and candidate_source.canonical_url == source.canonical_url
+            )
+            else None
+        )
+        acceptance = accept_review_item(
+            connection, settings, review_id, source, file_source
+        )
         result = json.dumps({
             "outcome": "accepted", "review_item_id": review_id,
             "media_item_id": acceptance.media_item_id,
@@ -780,6 +816,7 @@ def _merge_source_into_existing(
     second source URL cannot be recorded because ``media_sources.canonical_url``
     is unique; the existing row is kept in that case.
     """
+    source = filter_source_tags(connection, source)
     if source is not None and source.tags:
         _store_tags(connection, media_item_id, source.tags)
     item = connection.execute(
@@ -940,6 +977,7 @@ def _complete_review(
 
 
 def _store_source(connection, media_item_id, source):
+    source = filter_source_tags(connection, source)
     values = (
         media_item_id, source.canonical_url, source.direct_media_url,
         source.provider, source.remote_id, source.author, source.domain,
@@ -994,9 +1032,10 @@ def _store_source(connection, media_item_id, source):
 
 
 def _store_tags(connection, media_item_id, tags):
+    filtered_tags, _ = filter_imported_tags(connection, tags)
     connection.executemany(
         "INSERT OR IGNORE INTO media_tags (media_item_id, tag) VALUES (?, ?)",
-        ((media_item_id, tag) for tag in sorted(set(tags))),
+        ((media_item_id, tag) for tag in filtered_tags),
     )
 
 
@@ -1148,6 +1187,7 @@ def accept_metadata_suggestion(connection: sqlite3.Connection, suggestion_id: in
     media = connection.execute("SELECT id FROM media_items WHERE id=? AND deleted_at IS NULL", (row["media_item_id"],)).fetchone()
     if media is None:
         raise ReviewFailure("metadata.media_not_found", "Media item was not found.")
+    source = filter_source_tags(connection, source)
     _store_source(connection, int(row["media_item_id"]), source)
     _store_tags(connection, int(row["media_item_id"]), source.tags)
     connection.execute(

@@ -27,6 +27,15 @@ class TbibSourceProvider:
         )
 
     def fetch(self, url: str) -> SourceMedia:
+        return self._fetch_post(url, allow_missing=False)
+
+    def fetch_metadata(self, url: str) -> SourceMedia:
+        return self._fetch_post(url, allow_missing=True)
+
+    def metadata_md5(self, url: str) -> str | None:
+        return self.fetch_metadata(url).content_md5
+
+    def _fetch_post(self, url: str, allow_missing: bool = False) -> SourceMedia:
         parsed = urlparse(url)
         post_id = _post_id(parsed)
         if post_id is None:
@@ -36,11 +45,15 @@ class TbibSourceProvider:
         domain = parsed.hostname or "tbib.org"
         post = self._get_post(domain, post_id)
         try:
-            directory = str(post["directory"])
-            filename = str(post["image"])
-            if not directory or not filename:
+            directory = str(post.get("directory") or "").strip()
+            filename = str(post.get("image") or "").strip()
+            direct_url = (
+                f"https://{domain}/images/{directory}/{filename}"
+                if directory and filename
+                else None
+            )
+            if not direct_url and not allow_missing:
                 raise ValueError("media path missing")
-            direct_url = f"https://{domain}/images/{directory}/{filename}"
             raw_parent_id = post.get("parent_id")
             parent_id = (
                 str(raw_parent_id)
@@ -57,7 +70,9 @@ class TbibSourceProvider:
                 tuple(str(post.get("tags", "")).split()),
                 self.provider_name, domain, post.get("source"),
             )
-            extension = PurePosixPath(urlparse(direct_url).path).suffix.lower() or ".jpg"
+            extension = (
+                PurePosixPath(urlparse(direct_url).path).suffix.lower() if direct_url else ""
+            ) or ".jpg"
             return SourceMedia(
                 canonical_url=_canonical_url(domain, post_id),
                 direct_media_url=direct_url,
@@ -69,15 +84,12 @@ class TbibSourceProvider:
                 file_extension=extension,
                 character_tags=character_tags,
                 parent_id=parent_id,
-                content_md5=_md5(post.get("hash")),
+                content_md5=_md5(post.get("hash") or post.get("md5")),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise SourceProviderFailure(
                 "import.source_media_missing", "The source has no downloadable media."
             ) from error
-
-    def fetch_metadata(self, url: str) -> SourceMedia:
-        return self.fetch(url)
 
     def search_by_md5(self, digest: str) -> list[dict[str, object]]:
         digest = _validate_md5(digest)

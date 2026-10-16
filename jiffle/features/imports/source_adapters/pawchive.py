@@ -19,11 +19,11 @@ empty and ``supports_reverse_search`` is ``False``.
 
 from pathlib import PurePosixPath
 import time
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import requests
 
-from jiffle.features.imports.source_adapters.contracts import SourceMedia
+from jiffle.features.imports.source_adapters.contracts import SetPostIssue, SourceMedia, SourceSet
 from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
 
 
@@ -59,7 +59,96 @@ class PawchiveSourceProvider:
             and _post_target(parsed) is not None
         )
 
-    def fetch(self, url: str) -> SourceMedia:
+    def fetch(self, url: str, matched_sha256: str | None = None) -> SourceMedia:
+        parsed = urlparse(url)
+        target = _post_target(parsed)
+        if target is None:
+            raise SourceProviderFailure(
+                "import.invalid_source_url", "The URL is not a Pawchive post URL."
+            )
+        service, creator_id, post_id = target
+        query = parse_qs(parsed.query)
+        wanted_hash = _valid_sha256(
+            matched_sha256
+            or (query.get("sha256") or query.get("hash") or [None])[0]
+            or parsed.fragment
+        )
+        kind = "server" if service == "discord" else "user"
+        payload = self._get_json(
+            f"{API_BASE}/{service}/{kind}/{creator_id}/post/{post_id}"
+        )
+        if not isinstance(payload, dict) or not _text(payload.get("id")):
+            raise SourceProviderFailure(
+                "import.source_post_not_found", "The Pawchive post was not found."
+            )
+        return self._post_to_media(
+            payload,
+            service=service,
+            creator_id=creator_id,
+            post_id=post_id,
+            matched_sha256=wanted_hash,
+        )
+
+    def fetch_metadata(self, url: str, matched_sha256: str | None = None) -> SourceMedia:
+        return self.fetch(url, matched_sha256=matched_sha256)
+
+    def _post_to_media(
+        self,
+        payload: dict,
+        service: str | None = None,
+        creator_id: str | None = None,
+        post_id: str | None = None,
+        matched_sha256: str | None = None,
+        author: str | None = None,
+    ) -> SourceMedia:
+        resolved_service = _text(service or payload.get("service")) or "patreon"
+        resolved_creator = _text(
+            creator_id or payload.get("user") or payload.get("server")
+        )
+        resolved_post_id = _text(post_id or payload.get("id"))
+        wanted_hash = _valid_sha256(matched_sha256)
+        entry = (
+            _entry_for_hash(payload, wanted_hash)
+            if wanted_hash
+            else None
+        ) or _first_downloadable(payload)
+        if entry is None:
+            raise SourceProviderFailure(
+                "import.source_media_missing",
+                "The source has no downloadable media.",
+            )
+        direct_url = _media_url(entry)
+        if not direct_url:
+            raise SourceProviderFailure(
+                "import.source_media_missing",
+                "The source has no downloadable media.",
+            )
+        resolved_author = (
+            author
+            if author is not None
+            else (
+                self._creator_name(resolved_service, resolved_creator)
+                if resolved_creator
+                else None
+            )
+        )
+        channel_id = None
+        if resolved_service == "discord" and "/channel/" in resolved_creator:
+            resolved_creator, channel_id = resolved_creator.split("/channel/", 1)
+        return SourceMedia(
+            canonical_url=_canonical_url(
+                resolved_service, resolved_creator, resolved_post_id, channel_id
+            ),
+            direct_media_url=direct_url,
+            provider=self.provider_name,
+            remote_id=str(resolved_post_id),
+            author=resolved_author,
+            domain=SITE_HOST,
+            tags=(),
+            file_extension=PurePosixPath(urlparse(direct_url).path).suffix.lower() or ".jpg",
+        )
+
+    def fetch_set(self, url: str) -> SourceSet:
         parsed = urlparse(url)
         target = _post_target(parsed)
         if target is None:
@@ -75,31 +164,78 @@ class PawchiveSourceProvider:
             raise SourceProviderFailure(
                 "import.source_post_not_found", "The Pawchive post was not found."
             )
-        entry = _first_downloadable(payload)
-        if entry is None:
+        author = self._creator_name(service, creator_id)
+        channel_id = None
+        base_creator = creator_id
+        if service == "discord" and "/channel/" in creator_id:
+            base_creator, channel_id = creator_id.split("/channel/", 1)
+        canonical_base = _canonical_url(service, base_creator, post_id, channel_id)
+        downloadable = [
+            entry
+            for entry in _entries(payload)
+            if _is_downloadable(entry)
+        ]
+        media_entries = [
+            entry for entry in downloadable if _extension(entry) in MEDIA_EXTENSIONS
+        ] or downloadable
+        if not media_entries:
             raise SourceProviderFailure(
                 "import.source_media_missing",
                 "The source has no downloadable media.",
             )
-        direct_url = _media_url(entry)
-        if not direct_url:
-            raise SourceProviderFailure(
-                "import.source_media_missing",
-                "The source has no downloadable media.",
+        posts: list[SourceMedia] = []
+        post_ids: list[str] = []
+        issues: list[SetPostIssue] = []
+        for index, entry in enumerate(media_entries, start=1):
+            item_id = str(post_id) if len(media_entries) == 1 else f"{post_id}:{index}"
+            post_ids.append(item_id)
+            direct_url = _media_url(entry)
+            entry_hash = _path_hash(entry)
+            item_url = (
+                canonical_base
+                if len(media_entries) == 1
+                else (
+                    f"{canonical_base}?sha256={entry_hash}"
+                    if entry_hash
+                    else f"{canonical_base}#attachment-{index}"
+                )
             )
-        return SourceMedia(
-            canonical_url=_canonical_url(service, creator_id, post_id),
-            direct_media_url=direct_url,
+            if not direct_url:
+                issues.append(
+                    SetPostIssue(
+                        item_id,
+                        item_url,
+                        "import.source_media_missing",
+                        "The attachment has no downloadable media.",
+                    )
+                )
+                continue
+            posts.append(
+                SourceMedia(
+                    canonical_url=item_url,
+                    direct_media_url=direct_url,
+                    provider=self.provider_name,
+                    remote_id=item_id,
+                    author=author,
+                    domain=SITE_HOST,
+                    tags=(),
+                    file_extension=PurePosixPath(urlparse(direct_url).path).suffix.lower() or ".jpg",
+                )
+            )
+        title = _text(payload.get("title")) or f"Post {post_id}"
+        return SourceSet(
+            canonical_url=canonical_base,
             provider=self.provider_name,
             remote_id=str(post_id),
-            author=self._creator_name(service, creator_id),
-            domain=SITE_HOST,
-            tags=(),
-            file_extension=PurePosixPath(urlparse(direct_url).path).suffix.lower() or ".jpg",
+            name=title,
+            shortname=str(post_id),
+            post_ids=tuple(post_ids),
+            posts=tuple(posts),
+            issues=tuple(issues),
         )
 
-    def fetch_metadata(self, url: str) -> SourceMedia:
-        return self.fetch(url)
+    def search_by_sha256(self, digest: str) -> list[dict[str, object]]:
+        return self.search_by_md5(digest)
 
     def search_by_md5(self, digest: str) -> list[dict[str, object]]:
         """Look a file up by its SHA-256 (the argument is not an MD5)."""

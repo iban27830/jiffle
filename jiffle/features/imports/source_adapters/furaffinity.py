@@ -1,3 +1,4 @@
+import html
 from pathlib import Path
 import re
 from urllib.parse import unquote, urlparse
@@ -18,6 +19,12 @@ class FurAffinitySourceProvider:
     def __init__(self, cookie_a=None, cookie_b=None):
         self.cookie_a = cookie_a
         self.cookie_b = cookie_b
+        self._cookie_a = cookie_a
+        self._cookie_b = cookie_b
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.cookie_a and self.cookie_b)
 
     @property
     def cookies(self):
@@ -28,7 +35,7 @@ class FurAffinitySourceProvider:
         return parsed.scheme in {"http", "https"} and parsed.hostname in self.domains
 
     def fetch(self, url):
-        match = re.search(r"/view/(\d+)", urlparse(url).path)
+        match = re.search(r"/(?:view|full)/(\d+)", urlparse(url).path)
         if not match:
             raise SourceProviderFailure("import.invalid_source_url", "The URL is not a FurAffinity submission URL.")
         if not self.cookies:
@@ -36,7 +43,10 @@ class FurAffinitySourceProvider:
         try:
             response = requests.get(url, cookies=self.cookies, headers={"User-Agent": "Mozilla/5.0 Jiffle/2.0"}, timeout=15)
             response.raise_for_status()
-            direct = re.search(r'href="(//(?:d\.furaffinity\.net|d\.facdn\.net)/art/[^"]+)"', response.text)
+            direct = re.search(
+                r'href="((?:https?:)?//(?:d\.furaffinity\.net|d\.facdn\.net)/[^"]+)"',
+                response.text,
+            )
             if not direct:
                 raise ValueError("media link missing")
         except requests.HTTPError as error:
@@ -48,7 +58,8 @@ class FurAffinitySourceProvider:
             ) from error
         except (requests.RequestException, ValueError) as error:
             raise SourceProviderFailure("import.provider_unavailable", "FurAffinity submission could not be loaded.") from error
-        direct_url = "https:" + direct.group(1)
+        raw_direct = html.unescape(direct.group(1))
+        direct_url = "https:" + raw_direct if raw_direct.startswith("//") else raw_direct
         # The page title is "<Artwork> by <artist> -- Fur Affinity [dot] net".
         # A greedy prefix keeps a title that itself contains " by " intact.
         title = re.search(
@@ -60,10 +71,11 @@ class FurAffinitySourceProvider:
         # sometimes literal), not as a path segment.
         tags = tuple(
             dict.fromkeys(
-                unquote(value)
+                html.unescape(unquote(value)).strip()
                 for value in re.findall(
-                    r"/search/@keywords(?:%20|\s+|/)([^/\"'?&<>\s]+)", response.text
+                    r"/search/@keywords(?:%20|\s+|/)([^/\"'?<>\s]+)", response.text
                 )
+                if html.unescape(unquote(value)).strip()
             )
         )
         tags = add_platform_tags(tags, self.provider_name, "furaffinity.net")
@@ -75,7 +87,7 @@ class FurAffinitySourceProvider:
             canonical_url=f"https://www.furaffinity.net/view/{match.group(1)}/",
             direct_media_url=direct_url, provider=self.provider_name,
             remote_id=match.group(1),
-            author=title.group("author").strip() if title else None,
+            author=html.unescape(title.group("author")).strip() if title else None,
             domain="furaffinity.net", tags=tags,
             file_extension=file_extension,
         )

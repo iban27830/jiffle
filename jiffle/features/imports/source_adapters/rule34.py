@@ -45,6 +45,15 @@ class Rule34SourceProvider:
         )
 
     def fetch(self, url: str) -> SourceMedia:
+        return self._fetch_post(url, allow_missing=False)
+
+    def fetch_metadata(self, url: str) -> SourceMedia:
+        return self._fetch_post(url, allow_missing=True)
+
+    def metadata_md5(self, url: str) -> str | None:
+        return self.fetch_metadata(url).content_md5
+
+    def _fetch_post(self, url: str, allow_missing: bool = False) -> SourceMedia:
         parsed = urlparse(url)
         post_id = _post_id(parse_qs(parsed.query))
         if post_id is None:
@@ -59,10 +68,7 @@ class Rule34SourceProvider:
             raise SourceProviderFailure(
                 "import.source_post_not_found", "The Rule34 post was not found."
             )
-        return _source_from_post(post, post_id)
-
-    def fetch_metadata(self, url: str) -> SourceMedia:
-        return self.fetch(url)
+        return _source_from_post(post, post_id, allow_missing=allow_missing)
 
     def search_by_md5(self, digest: str) -> list[dict[str, object]]:
         digest = _valid_md5(digest)
@@ -180,10 +186,12 @@ def _int_or_none(value: object) -> int | None:
         return None
 
 
-def _source_from_post(post: dict[str, object], fallback_id: str) -> SourceMedia:
+def _source_from_post(
+    post: dict[str, object], fallback_id: str, allow_missing: bool = False
+) -> SourceMedia:
     post_id = str(post.get("id") or fallback_id)
     direct_url = _media_url(post)
-    if not direct_url:
+    if not direct_url and not allow_missing:
         raise SourceProviderFailure(
             "import.source_media_missing", "The source has no downloadable media."
         )
@@ -193,6 +201,9 @@ def _source_from_post(post: dict[str, object], fallback_id: str) -> SourceMedia:
         DOMAIN,
         post.get("source"),
     )
+    extension = (
+        PurePosixPath(urlparse(direct_url).path).suffix.lower() if direct_url else ""
+    ) or ".jpg"
     return SourceMedia(
         canonical_url=_canonical_url(post_id),
         direct_media_url=direct_url,
@@ -201,7 +212,7 @@ def _source_from_post(post: dict[str, object], fallback_id: str) -> SourceMedia:
         author=str(post.get("owner") or "") or None,
         domain=DOMAIN,
         tags=tags,
-        file_extension=PurePosixPath(urlparse(direct_url).path).suffix.lower() or ".jpg",
+        file_extension=extension,
         parent_id=_parent_id(post),
         content_md5=_valid_md5(post.get("hash") or post.get("md5")),
     )
