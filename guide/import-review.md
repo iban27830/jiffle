@@ -7,11 +7,11 @@
 Open **Import**, then do one of the following:
 
 - Drop one or more images or videos, or use **Choose file** to select multiple files at once.
-- Paste (`Ctrl+V`) an image, video, or link anywhere on the Import screen.
-- Paste a post link or direct media URL and select **Resolve and import** or press **Enter**.
-- Paste a supported e621/e926 post-set URL to import its posts.
+- Paste (`Ctrl+V`) an image, video, or one or more links anywhere on the Import screen.
+- Paste one or more post links or direct media URLs (separated by newlines) and select **Resolve and import** or press **Enter**.
+- Paste a supported e621/e926 post-set or pool URL, a Danbooru pool URL, or a multi-attachment Pawchive post URL to import its posts.
 
-Pasting a URL alone does not submit it. After a local upload has been received, Jiffle keeps its own staged copy while resolving it; wait for the upload to finish before removing your original download.
+Pasting a URL alone does not submit it. After a local upload has been received, Jiffle keeps its own staged copy while resolving it; wait for the upload to finish before removing your original download. Direct media or CDN links are automatically checked against configured sources by hash and reverse search before falling back to Review. Blocked tags and tag aliases from **Settings → Tag rules** are applied automatically when importing or accepting sources.
 
 Supported source adapters include Danbooru, e621/e926, Gelbooru, Rule34.xxx, FurAffinity, TBIB, and Pawchive. Some need credentials in **Settings → Sources**. A source that is not configured is skipped rather than blocking all other sources.
 

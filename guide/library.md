@@ -10,11 +10,17 @@ Open **Library** and enter a query. Examples:
 |---|---|
 | `portrait blue_eyes` | Items with both tags |
 | `portrait -comic` | Portraits without the comic tag |
-| `author:artist_name` | Items attributed to an author |
-| `id:123` | One exact library item |
-| `parent:123` | Find a parent post in the library by its source post ID |
+| `author:artist_name` / `-author:artist_name` | Include or exclude items attributed to an author |
+| `source:e621` / `domain:e621.net` | Filter by source provider or domain (`-source:` / `-domain:` to exclude) |
+| `id:123` / `-id:123` | Include or exclude an exact library item ID |
+| `parent:123` | Find a parent post and its child posts by source post ID |
+| `type:image`, `type:video`, `type:animated` | Filter by media type or animated GIF/WebP |
+| `has:parent`, `has:children`, `has:family`, `has:source`, `is:edited`, `is:animated` | Filter by relationship or revision state (`-has:` / `-is:` to exclude) |
+| `orientation:portrait` (`landscape`, `square`) | Filter by aspect orientation |
+| `width:>=1920` `height:>=1080` | Filter by pixel dimensions (`>`, `>=`, `<`, `<=`, `=`) |
+| `text:keyword` | Match author, domain, source URL, or tag text |
 
-Tag aliases apply to searches and collection rules. Tag suggestions appear as you type in the search bar (including `-tag` exclusions), and the clear button resets the query. Select a displayed tag or author to adjust the query. Clicking an author keeps your existing search terms. Use the media-type filter to separate images and videos; library cards also show **Video** and **GIF** badges.
+Tag aliases apply to searches and collection rules. Suggestions appear at the cursor position as you type in the search bar (including `-tag` exclusions, tag aliases, substring matches, and `author:`, `source:`, or `domain:` prefixes), and the clear button resets the query. Select a displayed tag or author to adjust the query. Clicking an author keeps your existing search terms. Use the media-type filter to separate images, videos, and animated GIFs, and use the sort menu (**Newest first**, **Oldest first**, **Highest resolution**, **Largest file**, **Least used in collections**, **Most used in collections**, or **Random**) to reorder results; library cards also show **Video** and **GIF** badges.
 
 ## Inspect an item
 
