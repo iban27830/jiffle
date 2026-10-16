@@ -45,7 +45,7 @@ Reverse-image searches send a small preview to the configured search services; a
 
 A source selection can merge into an existing library item rather than creating a second copy. A likely duplicate may need a separate choice; read the comparison before accepting. In **Duplicates** (with the unresolved count shown in the sidebar), each pair shows resolution and file-size badges (**Higher resolution**, **Larger file**), and clicking a thumbnail opens it full size.
 
-**Run the source search again** (or **Search again** when candidates were already found) rechecks one card. Tick several cards and use **Recheck selected** to queue them, or **Reject selected** to discard them in bulk. This is useful after adding credentials or when a source was temporarily unavailable. The log button shows the original import search and later rechecks, grouped by stage. **Select all on screen** only selects the current page.
+**Run the source search again** (or **Search again** when candidates were already found) rechecks one card. Tick several cards and use **Recheck selected** to queue them, or **Reject selected** to discard them in bulk. This is useful after adding credentials or when a source was temporarily unavailable. The log button shows the original import search and later rechecks, grouped by stage, including clickable links when a reverse-search service matched an external page whose media file could not be downloaded automatically. **Select all on screen** only selects the current page.
 
 Metadata refreshes appear separately as **Metadata update** suggestions. Select **Apply metadata** to accept the new information; **Ignore** dismisses the suggestion without replacing the file.
 

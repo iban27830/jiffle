@@ -36,6 +36,7 @@ Configure the accounts you use, then select **Test** beside each source:
 - e621/e926: username and API key.
 - Gelbooru and Rule34.xxx: User ID and API key.
 - FurAffinity: cookies `a` and `b` from an active browser session.
+- SauceNAO: optional API key for higher reverse-search rate limits and structured JSON lookups.
 
 For Gelbooru/Rule34, you can paste the account's `&api_key=…&user_id=…` line into either field; Jiffle separates the pair when saving. A missing half of a credential pair is reported rather than silently treated as a working account.
 
