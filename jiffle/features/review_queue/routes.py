@@ -602,7 +602,7 @@ def _import_search_attempt_from_row(reason, result_json, created_at):
     else:
         outcome = "no_source"
     attempt_details = {}
-    for key in ("provider_diagnostics", "provider_errors"):
+    for key in ("provider_diagnostics", "provider_errors", "search_signature"):
         value = details.get(key)
         if value:
             attempt_details[key] = value

@@ -92,6 +92,12 @@ def update_settings():
         clear_runtime_cache()
     if not current_app.config["JIFFLE_CUSTOM_SOURCE_PROVIDERS"]:
         current_app.config["JIFFLE_SOURCE_PROVIDERS"] = build_source_providers(updated)
+    from jiffle.features.imports.universal_import import sync_search_signature
+    signature, signature_changed = sync_search_signature(
+        updated, current_app.config["JIFFLE_SOURCE_PROVIDERS"]
+    )
+    current_app.config["JIFFLE_SEARCH_SIGNATURE"] = signature
+    current_app.config["JIFFLE_SEARCH_SIGNATURE_CHANGED"] = signature_changed
     return jsonify(_public_settings(updated))
 
 

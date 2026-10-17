@@ -195,6 +195,7 @@ function diagnosticCapabilities(diagnostics) {
   const authProviders = new Set();
   const limitedProviders = new Set();
   const errorProviders = new Set();
+  const okProviders = new Set();
   let checked = 0;
   const checkedStatuses = new Set(['matched','no_result','not_configured','authorization_error','network_error','timeout','unavailable','skipped']);
   list.forEach(item => {
@@ -202,16 +203,18 @@ function diagnosticCapabilities(diagnostics) {
     const status = String(item.status || '');
     const code = String(item.code || '');
     if (checkedStatuses.has(status)) checked += 1;
+    if (status === 'matched' || status === 'no_result') okProviders.add(name);
     const authRelated = status === 'authorization_error' || status === 'not_configured'
       || /auth|credential|access_denied/i.test(code);
     if (authRelated) authProviders.add(name);
-    else if (status === 'no_result' && AUTH_CAPABLE_PROVIDERS.has(name)) limitedProviders.add(name);
+    else if (status === 'no_result' && item.anonymous && AUTH_CAPABLE_PROVIDERS.has(name)) limitedProviders.add(name);
     if (ERROR_DIAGNOSTIC_STATUSES.has(status)
+      || status === 'authorization_error'
       || /candidate_unavailable|hash_mismatch|source_link_unresolved/i.test(code)) {
       errorProviders.add(name);
     }
   });
-  return {authProviders, limitedProviders, errorProviders, checked};
+  return {authProviders, limitedProviders, errorProviders, okProviders, checked};
 }
 function sourceBadge(tone, icon, text, title) {
   return `<span class="source-badge source-badge-${tone}" title="${esc(title)}"><i data-lucide="${icon}"></i>${text ? `<span>${esc(text)}</span>` : ''}</span>`;
@@ -223,6 +226,24 @@ function providerLabel(providers) {
   const names = [...providers];
   const shown = names.slice(0, 3).join(', ');
   return names.length > 3 ? `${shown} +${names.length - 3}` : shown;
+}
+function reviewCardVerdictBadge({found = false, count = 0, diagnostics = [], outcome = ''} = {}) {
+  if (found) {
+    return sourceBadge('found', 'check-circle', count ? String(count) : '',
+      count ? `Source found: ${count} candidate${count === 1 ? '' : 's'} to confirm` : 'Source found');
+  }
+  const caps = diagnosticCapabilities(diagnostics);
+  if (caps.errorProviders.size || outcome === 'unavailable') {
+    const label = caps.errorProviders.size
+      ? `Search incomplete (${[...caps.errorProviders].join(', ')}) — recheck to retry remaining sources.`
+      : 'Search could not be completed — recheck to retry.';
+    return sourceBadge('error', 'triangle-alert', '', label);
+  }
+  if (outcome === 'no_source' || caps.checked || caps.okProviders.size) {
+    return sourceBadge('none', 'search-x', '',
+      'No source found: every configured source was checked.');
+  }
+  return '';
 }
 function sourceVerdictBadges({found = false, count = 0, diagnostics = [], outcome = ''} = {}) {
   const caps = diagnosticCapabilities(diagnostics);
@@ -242,8 +263,8 @@ function sourceVerdictBadges({found = false, count = 0, diagnostics = [], outcom
     badges.push(sourceBadge('error', 'triangle-alert', providerLabel(caps.errorProviders),
       `Source error while checking: ${[...caps.errorProviders].join(', ')}. Open the search log for details.`));
   }
-  const clean = !found && !caps.authProviders.size && !caps.limitedProviders.size && !caps.errorProviders.size;
-  if (clean && (outcome === 'no_source' || caps.checked)) {
+  const clean = !found && !caps.errorProviders.size;
+  if (clean && (outcome === 'no_source' || caps.okProviders.size || (!caps.authProviders.size && !caps.limitedProviders.size && caps.checked))) {
     badges.push(sourceBadge('none', 'search-x', '',
       'No source found: every configured source was checked.'));
   }
@@ -255,10 +276,7 @@ function sourceOutcomeLabel(outcome, diagnostics) {
   if (outcome === 'candidates') return 'Source candidates found';
   if (outcome === 'unavailable') return 'Search could not be completed';
   const errors = caps.errorProviders.size > 0;
-  if (caps.authProviders.size) {
-    return errors ? 'Not found · sign-in needed · source errors' : 'Not found · sign-in needed';
-  }
-  if (errors) return 'Checked, but a source did not answer';
+  if (errors) return `Checked, but ${providerLabel(caps.errorProviders)} did not finish`;
   if (caps.limitedProviders.size) return 'Not found anonymously';
   return 'No source found · every source checked';
 }
@@ -323,8 +341,10 @@ function diagnosticResultCount(item) {
   return ` · ${count} result${count === 1 ? '' : 's'}${hint}`;
 }
 function diagnosticRowHtml(row) {
-  const status = diagnosticStatusLabels[row.status] || row.status || 'unknown';
-  const count = diagnosticResultCount(row);
+  const status = row.already_checked && row.status === 'no_result'
+    ? 'no result (already checked)'
+    : (diagnosticStatusLabels[row.status] || row.status || 'unknown');
+  const count = row.already_checked ? '' : diagnosticResultCount(row);
   const remote = row.remote_id ? ` · #${esc(row.remote_id)}` : '';
   const confidence = row.confidence != null ? ` · ${Math.round(Number(row.confidence))}%` : '';
   const author = row.author ? ` · by ${esc(row.author)}` : '';
@@ -1093,9 +1113,12 @@ function reviewCardHtml(item) {
   // because a source may have appeared since.
   const rechecked = searched && search.origin !== 'import';
   const diagnostics = (search.last_details || {}).provider_diagnostics || [];
-  const verdictBadges = searched
-    ? `<span class="review-card-badges" title="${esc(reviewSearchTitle(search))}">${sourceVerdictBadges({found, count:candidateCount, diagnostics, outcome:search.last_outcome})}</span>`
-    : (found ? `<span class="review-card-badges">${sourceVerdictBadges({found, count:candidateCount})}</span>` : '');
+  const cardBadge = searched
+    ? reviewCardVerdictBadge({found, count:candidateCount, diagnostics, outcome:search.last_outcome})
+    : (found ? reviewCardVerdictBadge({found, count:candidateCount}) : '');
+  const verdictBadges = cardBadge
+    ? `<span class="review-card-badges" title="${esc(reviewSearchTitle(search))}">${cardBadge}</span>`
+    : '';
   const recheckTitle = found
     ? 'Search again - a new source may have appeared since'
     : 'Run the source search again';
@@ -1598,6 +1621,11 @@ function rememberLocalSearches(ids, result) {
       count: Number(previous.count || 0) + 1,
       last_outcome: entry.status || 'unavailable',
       last_message: entry.message || null,
+      last_details: {
+        provider_diagnostics: entry.provider_diagnostics || [],
+        provider_errors: entry.provider_errors || [],
+        candidate_count: entry.candidate_count || 0,
+      },
       last_at: new Date().toISOString(),
     });
   });

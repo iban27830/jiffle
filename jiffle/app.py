@@ -38,6 +38,11 @@ def create_app(
     app.config["JIFFLE_MEDIA_DOWNLOADER"] = (
         media_downloader if media_downloader is not None else RequestsMediaDownloader()
     )
+    signature, signature_changed = universal_import.sync_search_signature(
+        resolved_settings, app.config["JIFFLE_SOURCE_PROVIDERS"]
+    )
+    app.config["JIFFLE_SEARCH_SIGNATURE"] = signature
+    app.config["JIFFLE_SEARCH_SIGNATURE_CHANGED"] = signature_changed
     app.teardown_appcontext(close_database)
     app.register_blueprint(health_blueprint)
     app.register_blueprint(library_blueprint)

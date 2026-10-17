@@ -62,6 +62,144 @@ PROVIDER_COOLDOWN_SECONDS = 300.0
 _provider_cooldowns: dict[str, float] = {}
 _provider_cooldowns_lock = Lock()
 
+_CODE_SEARCH_SIGNATURE: str | None = None
+_CODE_SIGNATURE_LOCK = Lock()
+
+_SEARCH_SETTINGS_FIELDS = (
+    "danbooru_login",
+    "danbooru_api_key",
+    "e621_login",
+    "e621_api_key",
+    "gelbooru_user_id",
+    "gelbooru_api_key",
+    "rule34_user_id",
+    "rule34_api_key",
+    "furaffinity_cookie_a",
+    "furaffinity_cookie_b",
+    "saucenao_api_key",
+)
+
+
+def _code_search_signature() -> str:
+    """Return a fast digest of the source-lookup code files, computed once per process."""
+    global _CODE_SEARCH_SIGNATURE
+    if _CODE_SEARCH_SIGNATURE is not None:
+        return _CODE_SEARCH_SIGNATURE
+    with _CODE_SIGNATURE_LOCK:
+        if _CODE_SEARCH_SIGNATURE is not None:
+            return _CODE_SEARCH_SIGNATURE
+        imports_dir = Path(__file__).resolve().parent
+        adapters_dir = imports_dir / "source_adapters"
+        review_workflow = imports_dir.parent / "review_queue" / "workflow.py"
+        files: list[Path] = []
+        if adapters_dir.is_dir():
+            files.extend(sorted(adapters_dir.glob("*.py")))
+        for extra in (
+            imports_dir / "universal_import.py",
+            imports_dir / "url_normalization.py",
+            review_workflow,
+        ):
+            if extra.is_file():
+                files.append(extra)
+        hasher = hashlib.blake2b(digest_size=8)
+        for path in files:
+            try:
+                hasher.update(path.name.encode("utf-8"))
+                hasher.update(b"\0")
+                hasher.update(path.read_bytes())
+                hasher.update(b"\0")
+            except OSError:
+                continue
+        _CODE_SEARCH_SIGNATURE = hasher.hexdigest()
+        return _CODE_SEARCH_SIGNATURE
+
+
+def _provider_signature_token(provider: object) -> dict[str, object]:
+    name = (
+        getattr(provider, "provider_name", None)
+        or provider.__class__.__name__.lower()
+    )
+    configured = getattr(provider, "is_configured", True)
+    if callable(configured):
+        try:
+            configured = bool(configured())
+        except Exception:
+            configured = False
+    token: dict[str, object] = {
+        "name": str(name),
+        "class": f"{provider.__class__.__module__}.{provider.__class__.__qualname__}",
+        "configured": bool(configured),
+        "supports_reverse": bool(getattr(provider, "supports_reverse_search", True)),
+        "reverse_available": bool(_reverse_provider_available(provider)),
+    }
+    for attr in ("login", "api_key", "user_id", "cookie_a", "cookie_b", "hash_algorithm"):
+        val = getattr(provider, attr, None)
+        if val not in (None, ""):
+            token[attr] = str(val)
+    for test_attr in ("exact", "similar"):
+        if hasattr(provider, test_attr):
+            token[test_attr] = repr(getattr(provider, test_attr))
+    return token
+
+
+def _settings_search_signature(
+    settings: Settings | None = None,
+    providers=(),
+) -> str:
+    payload = {
+        "settings": {
+            field: (getattr(settings, field, None) or "")
+            for field in _SEARCH_SETTINGS_FIELDS
+        }
+        if settings is not None
+        else {},
+        "providers": [
+            _provider_signature_token(provider)
+            for provider in (providers or ())
+            if provider is not None
+        ],
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.blake2b(encoded, digest_size=8).hexdigest()
+
+
+def current_search_signature(
+    settings: Settings | None = None,
+    providers=(),
+) -> str:
+    """Return a compact ``<code_hash>:<settings_hash>`` signature for source searches."""
+    return f"{_code_search_signature()}:{_settings_search_signature(settings, providers)}"
+
+
+def sync_search_signature(
+    settings: Settings | None = None,
+    providers=(),
+) -> tuple[str, bool]:
+    """Compare the current search signature against the persisted marker file.
+
+    Returns ``(signature, changed)``.
+    """
+    current = current_search_signature(settings, providers)
+    if settings is None or getattr(settings, "database_path", None) is None:
+        return current, False
+    if not getattr(settings, "initialize_database", True):
+        return current, False
+    marker = Path(settings.database_path).parent / ".search-signature"
+    previous = None
+    try:
+        if marker.is_file():
+            previous = marker.read_text(encoding="utf-8").strip()
+    except OSError:
+        previous = None
+    changed = previous != current
+    if changed:
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(current, encoding="utf-8")
+        except OSError:
+            pass
+    return current, changed
+
 
 def _provider_on_cooldown(name: str) -> bool:
     with _provider_cooldowns_lock:
@@ -284,6 +422,7 @@ def run_universal_import_job(
         "search_state": "no_result",
         "search_outcome": "no_result",
         "source_download_failed": False,
+        "search_signature": current_search_signature(settings, providers),
         "timing": {"duration_ms": 0, "phases_ms": {}},
     }
     started_at = time.perf_counter()
@@ -1094,7 +1233,9 @@ def _search_exact(
     diagnostics=None,
     on_progress=None,
     sha256_digest: str | None = None,
+    skip_providers=None,
 ):
+    skip_set = {str(item).strip().lower() for item in (skip_providers or ()) if item}
     ordered = list(providers)
     if source_hint:
         ordered.sort(key=lambda p: 0 if getattr(p, "provider_name", "") == source_hint.provider else 1)
@@ -1125,7 +1266,9 @@ def _search_exact(
     active = []
     for position, (_index, provider, _digest) in enumerate(searchable):
         name = getattr(provider, "provider_name", "unknown")
-        if _provider_on_cooldown(name):
+        if str(name).strip().lower() in skip_set:
+            results.append((position, [], [], 0, "already_checked"))
+        elif _provider_on_cooldown(name):
             results.append((
                 position,
                 [],
@@ -1196,6 +1339,17 @@ def _search_exact(
         if diagnostics is not None:
             provider = searchable[_index][1]
             name = getattr(provider, "provider_name", "unknown")
+            if status == "already_checked":
+                _record_provider_diagnostic(
+                    diagnostics,
+                    "exact_search",
+                    name,
+                    "no_result",
+                    0,
+                    duration_ms=0,
+                    already_checked=True,
+                )
+                continue
             if status == "ok":
                 _clear_provider_cooldown(name)
             error = provider_errors[0] if provider_errors else None
@@ -1275,6 +1429,7 @@ def resolve_exact_downloads(
     settings,
     diagnostics=None,
     original_name: str | None = None,
+    skip_providers=None,
 ):
     """Find exact copies of a local file and download the bytes that verify.
 
@@ -1284,11 +1439,18 @@ def resolve_exact_downloads(
     ``errors`` summarises provider and download failures.  Callers own the
     returned paths and must remove them.
     """
+    skip_set = {str(item).strip().lower() for item in (skip_providers or ()) if item}
     digest = _md5(path)
     sha256_digest = _sha256(path)
     verify_digest = digest
     matches, search_errors = _search_exact(
-        providers, digest, None, None, diagnostics, sha256_digest=sha256_digest
+        providers,
+        digest,
+        None,
+        None,
+        diagnostics,
+        sha256_digest=sha256_digest,
+        skip_providers=skip_set,
     )
     if not matches:
         hint_md5, hint_sha256 = _filename_hash_hints(original_name, Path(path).name)
@@ -1297,8 +1459,13 @@ def resolve_exact_downloads(
             hint_sha256 if (hint_sha256 and hint_sha256 != sha256_digest) else None
         )
         if query_md5 or query_sha256:
+            remaining_providers = [
+                provider
+                for provider in (providers or ())
+                if str(getattr(provider, "provider_name", "unknown")).strip().lower() not in skip_set
+            ]
             hint_matches, hint_errors = _search_exact(
-                providers,
+                remaining_providers,
                 query_md5 or "",
                 None,
                 None,
@@ -1341,6 +1508,7 @@ def _record_provider_diagnostic(
     source_url: str | None = None,
     author: str | None = None,
     confidence: float | None = None,
+    already_checked: bool = False,
 ) -> None:
     """Append a safe, UI-friendly result for one provider and resolution stage."""
     if target is None:
@@ -1351,6 +1519,8 @@ def _record_provider_diagnostic(
         "status": status,
         "candidate_count": max(0, int(candidate_count or 0)),
     }
+    if already_checked:
+        item["already_checked"] = True
     if code:
         item["code"] = str(code)
         item["error_code"] = str(code)
@@ -1500,6 +1670,7 @@ def _reverse_similar(
     providers,
     diagnostics=None,
     settings: Settings | None = None,
+    skip_providers=None,
 ):
     """Run every available reverse search and return confirmable candidates.
 
@@ -1508,6 +1679,7 @@ def _reverse_similar(
     through the matching provider first, so the candidate carries real tags and
     the original file instead of only a similarity thumbnail.
     """
+    skip_set = {str(item).strip().lower() for item in (skip_providers or ()) if item}
     if reverse_preview_bytes(image_path) is None:
         # A file that is neither an image nor a decodable video has nothing to
         # upload.  Report that once instead of letting every provider claim a
@@ -1543,6 +1715,18 @@ def _reverse_similar(
                     diagnostics, "perceptual_search", name, "not_supported", 0,
                     "import.reverse_search_unsupported",
                     f"{name} has no reverse-image search.",
+                )
+            continue
+        if str(name).strip().lower() in skip_set:
+            if diagnostics is not None:
+                _record_provider_diagnostic(
+                    diagnostics,
+                    "perceptual_search",
+                    name,
+                    "no_result",
+                    0,
+                    duration_ms=0,
+                    already_checked=True,
                 )
             continue
         if not _reverse_provider_available(provider):

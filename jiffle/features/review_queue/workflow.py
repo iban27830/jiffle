@@ -33,6 +33,7 @@ from jiffle.features.imports.universal_import import (
     _reverse_similar,
     _safe_error_message,
     _select_metadata_source,
+    current_search_signature,
     filter_imported_tags,
     filter_source_tags,
     resolve_exact_downloads,
@@ -518,6 +519,124 @@ def run_review_reimport_job(
         connection.close()
 
 
+def _attempt_exhausted_providers(
+    diagnostics: object,
+) -> tuple[set[str], set[str]]:
+    """Return ``(exact_providers, perceptual_providers)`` that finished with 0 results."""
+    if not isinstance(diagnostics, list):
+        return set(), set()
+    exact_by_provider: dict[str, list[dict]] = {}
+    exact_download_failed: set[str] = set()
+    perceptual_by_provider: dict[str, list[dict]] = {}
+    for entry in diagnostics:
+        if not isinstance(entry, dict):
+            continue
+        stage = str(entry.get("stage") or "")
+        provider = str(entry.get("provider") or "").strip().lower()
+        if not provider or provider == "unknown":
+            continue
+        if stage == "exact_search":
+            exact_by_provider.setdefault(provider, []).append(entry)
+        elif stage == "exact_download":
+            if str(entry.get("status") or "") != "matched":
+                exact_download_failed.add(provider)
+        elif stage == "perceptual_search":
+            perceptual_by_provider.setdefault(provider, []).append(entry)
+
+    exhausted_exact: set[str] = set()
+    for provider, entries in exact_by_provider.items():
+        if provider in exact_download_failed:
+            continue
+        if entries and all(
+            str(item.get("status") or "") == "no_result"
+            and int(item.get("candidate_count") or 0) == 0
+            and not item.get("code")
+            for item in entries
+        ):
+            exhausted_exact.add(provider)
+
+    exhausted_perceptual: set[str] = set()
+    for provider, entries in perceptual_by_provider.items():
+        if not entries:
+            continue
+        all_clean_zero = True
+        for item in entries:
+            status = str(item.get("status") or "")
+            cand_count = int(item.get("candidate_count") or 0)
+            above = int(item.get("above_threshold") or 0)
+            if status in {"no_result", "not_supported"} and cand_count == 0:
+                continue
+            if (
+                status == "matched"
+                and cand_count == 0
+                and above == 0
+                and not item.get("code")
+            ):
+                continue
+            all_clean_zero = False
+            break
+        if all_clean_zero:
+            exhausted_perceptual.add(provider)
+
+    return exhausted_exact, exhausted_perceptual
+
+
+def _exhausted_providers_for_review(
+    connection: sqlite3.Connection,
+    review_id: int,
+    current_signature: str,
+) -> tuple[set[str], set[str]]:
+    """Collect providers that already returned 0 results under ``current_signature``."""
+    exhausted_exact: set[str] = set()
+    exhausted_perceptual: set[str] = set()
+
+    import_row = connection.execute(
+        "SELECT job.result_json FROM review_items review "
+        "JOIN import_candidates candidate ON candidate.id=review.import_candidate_id "
+        "JOIN background_jobs job ON job.id=candidate.job_id "
+        "WHERE review.id=?",
+        (review_id,),
+    ).fetchone()
+    if import_row is not None and import_row["result_json"]:
+        try:
+            payload = json.loads(import_row["result_json"] or "{}")
+        except (TypeError, ValueError):
+            payload = {}
+        resolution = payload.get("resolution") if isinstance(payload, dict) else None
+        if (
+            isinstance(resolution, dict)
+            and resolution.get("search_signature") == current_signature
+        ):
+            exact, perceptual = _attempt_exhausted_providers(
+                resolution.get("provider_diagnostics")
+            )
+            exhausted_exact |= exact
+            exhausted_perceptual |= perceptual
+
+    rows = connection.execute(
+        "SELECT details_json FROM review_search_attempts "
+        "WHERE review_item_id=? ORDER BY id ASC",
+        (review_id,),
+    ).fetchall()
+    for row in rows:
+        try:
+            details = json.loads(row["details_json"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        if (
+            not isinstance(details, dict)
+            or details.get("search_signature") != current_signature
+        ):
+            continue
+        exact, perceptual = _attempt_exhausted_providers(
+            details.get("provider_diagnostics")
+        )
+        exhausted_exact |= exact
+        exhausted_perceptual |= perceptual
+
+    return exhausted_exact, exhausted_perceptual
+
+
 def _reimport_review_item(
     connection: sqlite3.Connection,
     settings: Settings,
@@ -529,6 +648,10 @@ def _reimport_review_item(
     staged = _staged_path(settings, row["stored_path"])
     if not staged.is_file():
         raise ReviewFailure("review.file_missing", "The staged file is unavailable.")
+    signature = current_search_signature(settings, providers)
+    exhausted_exact, exhausted_perceptual = _exhausted_providers_for_review(
+        connection, review_id, signature
+    )
     diagnostics: list[dict[str, object]] = []
     matches, verified, errors = resolve_exact_downloads(
         staged,
@@ -537,6 +660,7 @@ def _reimport_review_item(
         settings,
         diagnostics,
         original_name=row["original_name"],
+        skip_providers=exhausted_exact,
     )
     try:
         if verified:
@@ -559,12 +683,17 @@ def _reimport_review_item(
                 "provider": source.provider,
                 "file_provider": file_source.provider,
                 "source_url": source.canonical_url,
+                "search_signature": signature,
             }
         if not matches:
             # No byte-identical copy exists, so look for an approximate match
             # and offer it for confirmation instead of giving up silently.
             similar = _reverse_similar(
-                staged, providers, diagnostics, settings=settings
+                staged,
+                providers,
+                diagnostics,
+                settings=settings,
+                skip_providers=exhausted_perceptual,
             )
             stored_candidates = _stage_reverse_candidates(
                 connection, settings, review_id, similar, downloader, diagnostics
@@ -588,12 +717,14 @@ def _reimport_review_item(
                     "status": "candidates",
                     "candidate_count": pending_candidates or stored_candidates,
                     "provider_diagnostics": diagnostics,
+                    "search_signature": signature,
                 }
             return {
                 "review_item_id": review_id,
                 "status": "no_source",
                 "provider_errors": errors,
                 "provider_diagnostics": diagnostics,
+                "search_signature": signature,
             }
         # The providers know the exact source but no copy is downloadable.
         # The user's own staged file already has the right bytes, so keep it
@@ -605,6 +736,7 @@ def _reimport_review_item(
                 "status": "no_source",
                 "provider_errors": errors,
                 "provider_diagnostics": diagnostics,
+                "search_signature": signature,
             }
         source = _match_to_source(metadata_match)
         acceptance = accept_review_item(
@@ -619,6 +751,7 @@ def _reimport_review_item(
             "provider": source.provider,
             "metadata_only": True,
             "source_url": source.canonical_url,
+            "search_signature": signature,
         }
     finally:
         for _match, path in verified:
@@ -1107,6 +1240,7 @@ def _record_review_search_attempt(connection, review_id, result) -> None:
         for key in (
             "candidate_count", "provider", "file_provider", "source_url",
             "metadata_only", "provider_errors", "provider_diagnostics",
+            "search_signature",
         )
         if result.get(key) is not None
     }
