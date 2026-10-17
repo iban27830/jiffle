@@ -542,6 +542,10 @@ def merge_exhausted_diagnostics(
         stage = str(entry.get("stage") or "")
         provider = str(entry.get("provider") or "").strip().lower()
         status = str(entry.get("status") or "")
+        code = str(entry.get("code") or "")
+        if code == "import.source_link_unresolved":
+            merged.append(dict(entry))
+            continue
         is_exhausted = (
             (stage == "exact_search" and provider in exhausted_exact)
             or (stage == "perceptual_search" and provider in exhausted_perceptual)
@@ -628,18 +632,28 @@ def _attempt_exhausted_providers(
     for provider, entries in perceptual_by_provider.items():
         if not entries:
             continue
+        unresolved_count = sum(
+            1
+            for item in entries
+            if str(item.get("code") or "") == "import.source_link_unresolved"
+        )
         all_clean_zero = True
         for item in entries:
             status = str(item.get("status") or "")
+            code = str(item.get("code") or "")
             cand_count = int(item.get("candidate_count") or 0)
             above = int(item.get("above_threshold") or 0)
             if status in {"no_result", "not_supported"} and cand_count == 0:
                 continue
+            if code == "import.source_link_unresolved" and cand_count == 0:
+                continue
             if (
                 status == "matched"
-                and cand_count == 0
-                and above == 0
-                and not item.get("code")
+                and not code
+                and (
+                    (cand_count == 0 and above == 0)
+                    or (unresolved_count > 0 and cand_count <= unresolved_count)
+                )
             ):
                 continue
             all_clean_zero = False

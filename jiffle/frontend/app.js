@@ -208,9 +208,12 @@ function diagnosticCapabilities(diagnostics) {
       || /auth|credential|access_denied/i.test(code);
     if (authRelated) authProviders.add(name);
     else if (status === 'no_result' && item.anonymous && AUTH_CAPABLE_PROVIDERS.has(name)) limitedProviders.add(name);
-    if (ERROR_DIAGNOSTIC_STATUSES.has(status)
+    const isUnresolvedLink = code === 'import.source_link_unresolved';
+    if (!isUnresolvedLink && (
+      ERROR_DIAGNOSTIC_STATUSES.has(status)
       || status === 'authorization_error'
-      || /candidate_unavailable|hash_mismatch|source_link_unresolved/i.test(code)) {
+      || /candidate_unavailable|hash_mismatch/i.test(code)
+    )) {
       errorProviders.add(name);
     }
   });
