@@ -111,6 +111,8 @@ def create_app(
                 "WHERE status IN ('pending', 'running')"
             )
             connection.commit()
+            from jiffle.features.review_queue.workflow import backfill_missing_search_signatures
+            backfill_missing_search_signatures(connection, signature)
         if not resolved_settings.run_jobs_inline:
             from jiffle.features.crop_editor.review import resume_pending_checks
             resume_pending_checks(resolved_settings.database_path, resolved_settings)

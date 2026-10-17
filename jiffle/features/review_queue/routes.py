@@ -8,12 +8,15 @@ from jiffle.configuration.settings import Settings
 from jiffle.features.imports.url_normalization import normalize_source_url
 from jiffle.features.library.domain import MediaItem, MediaType
 from jiffle.features.library.thumbnail_cache import ensure_thumbnail
+from jiffle.features.imports.universal_import import current_search_signature
 from jiffle.features.review_queue.workflow import (
     ReviewFailure,
+    _attempt_exhausted_providers,
     accept_review_item,
     accept_source_candidate,
     create_review_reimport_job,
     create_manual_source_job,
+    merge_exhausted_diagnostics,
     reject_review_item,
     run_manual_source_job,
     run_review_reimport_job,
@@ -481,14 +484,46 @@ def _review_search_summaries(review_ids):
         unique_ids,
     ).fetchall()
     summaries = {}
+    current_sig = current_app.config.get("JIFFLE_SEARCH_SIGNATURE") or current_search_signature(
+        current_app.config.get("JIFFLE_SETTINGS"),
+        current_app.config.get("JIFFLE_SOURCE_PROVIDERS"),
+    )
+    exhausted_by_review: dict[int, tuple[set[str], set[str]]] = {}
+    for review_id, attempt in _import_search_attempts(unique_ids).items():
+        att_details = attempt.get("details") or {}
+        if att_details.get("search_signature") == current_sig:
+            ex_e, ex_p = _attempt_exhausted_providers(att_details.get("provider_diagnostics"))
+            exhausted_by_review[review_id] = (set(ex_e), set(ex_p))
+        summaries[review_id] = {
+            "count": 1,
+            "last_outcome": attempt["outcome"],
+            "last_code": attempt["code"],
+            "last_message": attempt["message"],
+            "last_details": att_details,
+            "last_at": attempt["created_at"],
+            "origin": "import",
+        }
     for row in rows:
         review_id = int(row["review_item_id"])
-        summary = summaries.setdefault(review_id, {"count": 0})
+        summary = summaries.get(review_id)
+        if summary is None or summary.get("origin") == "import":
+            summary = {"count": 0}
+            summaries[review_id] = summary
         summary["count"] += 1
         try:
             details = json.loads(row["details_json"] or "{}")
         except (TypeError, ValueError):
             details = {}
+        if isinstance(details, dict) and details.get("search_signature") == current_sig:
+            ex_e, ex_p = _attempt_exhausted_providers(details.get("provider_diagnostics"))
+            prev_e, prev_p = exhausted_by_review.setdefault(review_id, (set(), set()))
+            prev_e |= ex_e
+            prev_p |= ex_p
+            if isinstance(details.get("provider_diagnostics"), list):
+                details = dict(details)
+                details["provider_diagnostics"] = merge_exhausted_diagnostics(
+                    details["provider_diagnostics"], prev_e, prev_p
+                )
         # Rows are ordered by id, so the last write is the latest attempt.
         summary.update({
             "last_outcome": row["outcome"],
@@ -498,19 +533,6 @@ def _review_search_summaries(review_ids):
             "last_at": row["created_at"],
             "origin": "review",
         })
-    # Cards with no recorded recheck still carry the provider search the import
-    # ran, so surface it instead of showing an empty "not searched" state.
-    missing = [review_id for review_id in unique_ids if review_id not in summaries]
-    for review_id, attempt in _import_search_attempts(missing).items():
-        summaries[review_id] = {
-            "count": 1,
-            "last_outcome": attempt["outcome"],
-            "last_code": attempt["code"],
-            "last_message": attempt["message"],
-            "last_details": attempt["details"],
-            "last_at": attempt["created_at"],
-            "origin": "import",
-        }
     return summaries
 
 

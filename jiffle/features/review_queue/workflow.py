@@ -519,6 +519,75 @@ def run_review_reimport_job(
         connection.close()
 
 
+_RETRYABLE_DIAGNOSTIC_STATUSES = {
+    "timeout",
+    "network_error",
+    "skipped",
+    "unavailable",
+}
+
+
+def merge_exhausted_diagnostics(
+    diagnostics: object,
+    exhausted_exact: set[str],
+    exhausted_perceptual: set[str],
+) -> list[dict[str, object]]:
+    """Replace transient provider errors with ``no_result`` when an earlier attempt with the same signature already exhausted that provider."""
+    if not isinstance(diagnostics, list):
+        return []
+    merged: list[dict[str, object]] = []
+    for entry in diagnostics:
+        if not isinstance(entry, dict):
+            continue
+        stage = str(entry.get("stage") or "")
+        provider = str(entry.get("provider") or "").strip().lower()
+        status = str(entry.get("status") or "")
+        is_exhausted = (
+            (stage == "exact_search" and provider in exhausted_exact)
+            or (stage == "perceptual_search" and provider in exhausted_perceptual)
+        )
+        if is_exhausted and status in _RETRYABLE_DIAGNOSTIC_STATUSES:
+            merged.append({
+                "stage": stage,
+                "provider": entry.get("provider") or provider,
+                "status": "no_result",
+                "candidate_count": 0,
+                "already_checked": True,
+            })
+        else:
+            merged.append(dict(entry))
+    return merged
+
+
+def backfill_missing_search_signatures(
+    connection: sqlite3.Connection,
+    signature: str,
+) -> None:
+    """Stamp legacy search attempts that predate ``search_signature`` with the initial signature."""
+    rows = connection.execute(
+        "SELECT id, details_json FROM review_search_attempts "
+        "WHERE details_json NOT LIKE '%\"search_signature\"%'"
+    ).fetchall()
+    if not rows:
+        return
+    updates: list[tuple[str, int]] = []
+    for row in rows:
+        try:
+            details = json.loads(row["details_json"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(details, dict) or "search_signature" in details:
+            continue
+        details["search_signature"] = signature
+        updates.append((json.dumps(details), int(row["id"])))
+    if updates:
+        connection.executemany(
+            "UPDATE review_search_attempts SET details_json=? WHERE id=?",
+            updates,
+        )
+        connection.commit()
+
+
 def _attempt_exhausted_providers(
     diagnostics: object,
 ) -> tuple[set[str], set[str]]:
