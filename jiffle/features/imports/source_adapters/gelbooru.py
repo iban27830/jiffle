@@ -43,10 +43,10 @@ class GelbooruSourceProvider:
         try:
             response = requests.get(f"https://{domain}/index.php", params=params, headers={"User-Agent": "Jiffle/2.0"}, timeout=15)
             response.raise_for_status()
-            payload = response.json()
-            post = payload["post"][0] if isinstance(payload, dict) else payload[0]
+            payload = _json_payload(response)
+            post = _first_post(payload)
         except requests.HTTPError as error:
-            failure = _http_auth_failure(error)
+            failure = _http_auth_failure(error, bool(self.user_id and self.api_key))
             if failure:
                 raise failure from error
             raise SourceProviderFailure("import.provider_unavailable", "Gelbooru metadata could not be loaded.") from error
@@ -95,9 +95,9 @@ class GelbooruSourceProvider:
                 timeout=15,
             )
             response.raise_for_status()
-            payload = response.json()
+            payload = _json_payload(response)
         except requests.HTTPError as error:
-            failure = _http_auth_failure(error)
+            failure = _http_auth_failure(error, bool(self.user_id and self.api_key))
             if failure:
                 raise failure from error
             raise SourceProviderFailure(
@@ -107,9 +107,8 @@ class GelbooruSourceProvider:
             raise SourceProviderFailure(
                 "import.provider_unavailable", "Gelbooru search could not be loaded."
             ) from error
-        posts = payload if isinstance(payload, list) else [payload]
         matches: list[dict[str, object]] = []
-        for post in posts:
+        for post in _posts(payload):
             if not isinstance(post, dict) or not str(post.get("id", "")).isdigit():
                 continue
             post_id = str(post["id"])
@@ -123,7 +122,7 @@ class GelbooruSourceProvider:
                 if isinstance(raw_characters, str)
                 else [str(value) for value in raw_characters]
             )
-            matches.append({
+            match: dict[str, object] = {
                 "provider": self.provider_name,
                 "domain": domain,
                 "remote_id": post_id,
@@ -140,10 +139,14 @@ class GelbooruSourceProvider:
                 "character_tags": character_tags,
                 "parent_id": parent_id,
                 "content_md5": _valid_md5(post.get("hash") or post.get("md5")),
-                "width": post.get("width"),
-                "height": post.get("height"),
+                "width": _int_or_none(post.get("width")),
+                "height": _int_or_none(post.get("height")),
                 "deleted": bool(str(post.get("status", "")).lower() == "deleted"),
-            })
+            }
+            preview = post.get("preview_url")
+            if isinstance(preview, str) and preview:
+                match["preview_url"] = preview
+            matches.append(match)
         return matches
 
     def search_similar(self, image_path):
@@ -157,17 +160,54 @@ class GelbooruSourceProvider:
         response.raise_for_status()
 
 
+def _json_payload(response) -> object:
+    text = getattr(response, "text", None)
+    if isinstance(text, str) and not text.strip():
+        return []
+    return response.json()
+
+
+def _posts(payload: object) -> list[dict[str, object]]:
+    """Return post dicts from the Gelbooru DAPI JSON shape (list or {"post": [...]})."""
+    if isinstance(payload, list):
+        return [post for post in payload if isinstance(post, dict)]
+    if isinstance(payload, dict):
+        posts = payload.get("post")
+        if isinstance(posts, list):
+            return [post for post in posts if isinstance(post, dict)]
+        if isinstance(posts, dict):
+            return [posts]
+        if str(payload.get("id", "")).isdigit():
+            return [payload]
+    return []
+
+
+def _first_post(payload: object) -> dict[str, object] | None:
+    posts = _posts(payload)
+    return posts[0] if posts else None
+
+
+def _int_or_none(value: object) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _valid_md5(value: str | None) -> str | None:
     value = str(value or "").strip().lower()
     return value if len(value) == 32 and all(c in "0123456789abcdef" for c in value) else None
 
 
-def _http_auth_failure(error):
+def _http_auth_failure(error, has_credentials: bool = True):
     status = getattr(getattr(error, "response", None), "status_code", None)
     if status == 401:
-        return SourceProviderFailure(
-            "import.provider_auth_required", "Gelbooru credentials were rejected."
+        message = (
+            "Gelbooru credentials were rejected."
+            if has_credentials
+            else "Gelbooru requires a User ID and API key. Add them in Settings \u2192 Sources."
         )
+        return SourceProviderFailure("import.provider_auth_required", message)
     if status == 403:
         return SourceProviderFailure(
             "import.provider_access_denied", "Gelbooru denied access to this resource."

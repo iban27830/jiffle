@@ -802,13 +802,18 @@ def run_universal_import_job(
             ),
             sha256_digest=inspection.content_hash,
         )
-        if not exact and input_kind == "file":
-            cand_row = connection.execute(
-                "SELECT original_name FROM import_candidates WHERE id=?",
-                (candidate_id,),
-            ).fetchone()
-            orig_name = cand_row["original_name"] if cand_row else source_path.name
-            hint_md5, hint_sha256 = _filename_hash_hints(orig_name, source_path.name)
+        if not exact and (input_kind == "file" or is_direct_url):
+            if input_kind == "file":
+                cand_row = connection.execute(
+                    "SELECT original_name FROM import_candidates WHERE id=?",
+                    (candidate_id,),
+                ).fetchone()
+                orig_name = cand_row["original_name"] if cand_row else source_path.name
+                fallback_name = source_path.name
+            else:
+                orig_name = Path(urlsplit(submitted_input).path).name
+                fallback_name = original_path.name if original_path is not None else ""
+            hint_md5, hint_sha256 = _filename_hash_hints(orig_name, fallback_name)
             query_md5 = hint_md5 if (hint_md5 and hint_md5 != digest) else None
             query_sha256 = (
                 hint_sha256
@@ -837,7 +842,7 @@ def run_universal_import_job(
             if best_metadata is not None:
                 metadata_source = _match_to_source(best_metadata)
         _set_search_status(details, "matched" if exact else _status_from_errors(errors))
-        if is_direct_url and metadata_source is not None:
+        if is_direct_url and metadata_source is not None and exact_verify_digest == digest:
             blocked_meta = (
                 blocked_source
                 or blocked_hash

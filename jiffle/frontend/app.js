@@ -6,7 +6,7 @@ const waitForJob = (idOrUrl, onProgress) => pollJob(
 );
 
 import {parseLibrarySearch, withAuthorFilter, toggleSearchTerm} from './library_search.js';
-import {droppedUrl} from './import_drop.js';
+import {droppedUrl, transferFilenameHint} from './import_drop.js';
 import {drawCompositionPreview, drawForegroundPreview} from './background_preview.js';
 import {formatDateTime, formatDuration} from './time.js';
 import {segmentsPayload, validateSegment, describeSegment, segmentDurationMs, parseTimecode, formatTimecode} from './trim.js';
@@ -984,12 +984,16 @@ async function showImport() {
     toast(`Import: ${job.result?.outcome || 'failed'}`);
     return [job];
   };
-  const submitFiles = async files => {
+  const submitFiles = async (files, dataTransfer = null) => {
     const valid = [...(files || [])].filter(Boolean);
     if (!valid.length) return;
     try {
       const body = new FormData();
-      valid.forEach(file => body.append('file', file));
+      valid.forEach(file => {
+        const hintedName = valid.length === 1 ? transferFilenameHint(dataTransfer, file.name) : (file.name || '');
+        if (hintedName && hintedName !== file.name) body.append('file', file, hintedName);
+        else body.append('file', file);
+      });
       const res = await api('/api/v1/import-resolve-jobs', {method:'POST', body});
       await awaitImportJobs(res);
       refreshCounts();
@@ -1019,11 +1023,11 @@ async function showImport() {
   };
   drop.ondragover = event => { event.preventDefault(); drop.classList.add('dragging'); };
   drop.ondragleave = () => drop.classList.remove('dragging');
-  drop.ondrop = async event => { event.preventDefault(); drop.classList.remove('dragging'); const files=[...(event.dataTransfer?.files || [])]; if (files.length) await submitFiles(files); else submitUrl(droppedUrl(event.dataTransfer)); };
+  drop.ondrop = async event => { event.preventDefault(); drop.classList.remove('dragging'); const files=[...(event.dataTransfer?.files || [])]; if (files.length) await submitFiles(files, event.dataTransfer); else submitUrl(droppedUrl(event.dataTransfer)); };
   const handlePaste = event => {
     if (event.defaultPrevented || currentView !== 'import') return;
     const files = [...(event.clipboardData?.files || [])].filter(item => item.type?.startsWith('image/') || item.type?.startsWith('video/'));
-    if (files.length) { event.preventDefault(); submitFiles(files); return; }
+    if (files.length) { event.preventDefault(); submitFiles(files, event.clipboardData); return; }
     const rawText = event.clipboardData?.getData('text/plain')?.trim() || '';
     const multiUrls = rawText.split(/\r?\n/).map(line => line.trim()).filter(line => /^https?:\/\//i.test(line));
     if (event.target === document.querySelector('#pasteImport')) {
