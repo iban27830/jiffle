@@ -74,9 +74,20 @@ def delete_media(media_id: int):
     try:
         if has_source_file and target is not None:
             shutil.move(str(source), str(target))
-        for source_url in (row["source_url"], row["file_source_url"] if "file_source_url" in row.keys() else None):
-            if not source_url:
-                continue
+        source_urls = [
+            row["source_url"],
+            row["file_source_url"] if "file_source_url" in row.keys() else None,
+        ]
+        if _has_table(connection, "media_sources"):
+            source_urls.extend(
+                src_row[0]
+                for src_row in connection.execute(
+                    "SELECT canonical_url FROM media_sources WHERE media_item_id = ?",
+                    (media_id,),
+                ).fetchall()
+                if src_row[0]
+            )
+        for source_url in dict.fromkeys(url for url in source_urls if url):
             connection.execute(
                 "INSERT OR IGNORE INTO blocked_media_signatures "
                 "(source_url, reason) VALUES (?, 'deleted')", (source_url,)
@@ -90,6 +101,16 @@ def delete_media(media_id: int):
             connection.execute(
                 "INSERT OR IGNORE INTO blocked_media_signatures "
                 "(content_hash, reason) VALUES (?, 'deleted')", (content_hash,)
+            )
+        if _has_table(connection, "media_sources"):
+            connection.execute(
+                "DELETE FROM media_sources WHERE media_item_id = ?",
+                (media_id,),
+            )
+        if _has_table(connection, "media_fingerprints"):
+            connection.execute(
+                "DELETE FROM media_fingerprints WHERE media_item_id = ?",
+                (media_id,),
             )
         if _has_table(connection, "duplicate_matches"):
             connection.execute(

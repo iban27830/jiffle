@@ -84,7 +84,9 @@ def accept_review_item(
 
     if source:
         existing_source = connection.execute(
-            "SELECT media_item_id FROM media_sources WHERE canonical_url = ?",
+            "SELECT source.media_item_id FROM media_sources source "
+            "JOIN media_items item ON item.id = source.media_item_id "
+            "WHERE source.canonical_url = ? AND item.deleted_at IS NULL",
             (source.canonical_url,),
         ).fetchone()
         if existing_source:
@@ -95,6 +97,7 @@ def accept_review_item(
             _complete_review(
                 connection, review_id, row["candidate_id"], media_item_id,
                 source, file_source, outcome="merged", duplicate_of=media_item_id,
+                content_hashes=(row["content_hash"],),
             )
             staged.unlink(missing_ok=True)
             _cleanup_source_candidates(connection, settings, review_id)
@@ -110,6 +113,7 @@ def accept_review_item(
         _complete_review(
             connection, review_id, row["candidate_id"], media_item_id,
             source, file_source, outcome="merged", duplicate_of=media_item_id,
+            content_hashes=(row["content_hash"],),
         )
         staged.unlink(missing_ok=True)
         _cleanup_source_candidates(connection, settings, review_id)
@@ -150,6 +154,7 @@ def accept_review_item(
         _complete_review(
             connection, review_id, row["candidate_id"], media_item_id,
             source, file_source, outcome=outcome, duplicate_of=duplicate_of,
+            content_hashes=(row["content_hash"],),
         )
     except Exception:
         (settings.media_path / stored_path).unlink(missing_ok=True)
@@ -268,6 +273,14 @@ def accept_source_candidate(
     connection.execute(
         "UPDATE import_source_candidates SET status=CASE WHEN id=? THEN 'selected' ELSE 'rejected' END, resolved_at=CURRENT_TIMESTAMP WHERE review_item_id=?",
         (candidate_id, review_id),
+    )
+    _unblock_accepted_signatures(
+        connection,
+        (row["content_hash"], row["input_hash"]),
+        (
+            source.canonical_url if source else None,
+            file_source.canonical_url if file_source else None,
+        ),
     )
     _history(connection, "review.accepted", review_id, {
         "media_item_id": media_item_id,
@@ -1132,9 +1145,31 @@ def _merge_media_sources(
                 ),
             )
         except sqlite3.IntegrityError:
-            # The URL already belongs to another (possibly deleted) item; the
-            # stored metadata is a bonus, not a reason to fail the acceptance.
-            pass
+            owner = connection.execute(
+                "SELECT media_item_id FROM media_sources WHERE canonical_url=?",
+                (source.canonical_url,),
+            ).fetchone()
+            if owner is not None and int(owner[0]) != int(media_item_id):
+                deleted = connection.execute(
+                    "SELECT deleted_at FROM media_items WHERE id=?", (owner[0],)
+                ).fetchone()
+                if deleted is not None and deleted[0] is not None:
+                    connection.execute(
+                        "UPDATE media_sources SET media_item_id=?, direct_media_url=?, provider=?, "
+                        "remote_id=?, author=?, domain=?, parent_id=?, character_tags_json=? "
+                        "WHERE media_item_id=?",
+                        (
+                            media_item_id,
+                            source.direct_media_url,
+                            source.provider,
+                            source.remote_id,
+                            source.author,
+                            source.domain,
+                            source.parent_id,
+                            json.dumps(list(source.character_tags)),
+                            owner[0],
+                        ),
+                    )
         return
     updates: dict[str, object] = {}
     if not existing["direct_media_url"] and source.direct_media_url:
@@ -1207,6 +1242,7 @@ def _complete_review(
     *,
     outcome="created",
     duplicate_of=None,
+    content_hashes=(),
 ):
     connection.execute(
         "UPDATE import_candidates SET status='accepted', media_item_id=? WHERE id=?",
@@ -1220,6 +1256,14 @@ def _complete_review(
         "UPDATE import_source_candidates SET status='rejected', resolved_at=CURRENT_TIMESTAMP WHERE review_item_id=?",
         (review_id,),
     )
+    _unblock_accepted_signatures(
+        connection,
+        content_hashes,
+        (
+            source.canonical_url if source else None,
+            file_source.canonical_url if file_source else None,
+        ),
+    )
     _history(connection, "review.accepted", review_id, {
         "media_item_id": media_item_id,
         "source_url": source.canonical_url if source else None,
@@ -1232,6 +1276,20 @@ def _complete_review(
     connection.commit()
 
 
+def _unblock_accepted_signatures(connection, content_hashes=(), source_urls=()) -> None:
+    """Clear deleted-media blocks once a staged item is explicitly accepted in Review."""
+    for content_hash in dict.fromkeys(h for h in (content_hashes or ()) if h):
+        connection.execute(
+            "DELETE FROM blocked_media_signatures WHERE content_hash=?",
+            (content_hash,),
+        )
+    for source_url in dict.fromkeys(u for u in (source_urls or ()) if u):
+        connection.execute(
+            "DELETE FROM blocked_media_signatures WHERE source_url=?",
+            (source_url,),
+        )
+
+
 def _store_source(connection, media_item_id, source):
     source = filter_source_tags(connection, source)
     values = (
@@ -1239,18 +1297,18 @@ def _store_source(connection, media_item_id, source):
         source.provider, source.remote_id, source.author, source.domain,
         source.parent_id, json.dumps(list(source.character_tags)),
     )
+    sql = (
+        "INSERT INTO media_sources "
+        "(media_item_id, canonical_url, direct_media_url, provider, remote_id, author, domain, parent_id, character_tags_json) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(media_item_id) DO UPDATE SET "
+        "canonical_url=excluded.canonical_url, direct_media_url=excluded.direct_media_url, "
+        "provider=excluded.provider, remote_id=excluded.remote_id, "
+        "author=excluded.author, domain=excluded.domain, parent_id=excluded.parent_id, "
+        "character_tags_json=excluded.character_tags_json"
+    )
     try:
-        connection.execute(
-            "INSERT INTO media_sources "
-            "(media_item_id, canonical_url, direct_media_url, provider, remote_id, author, domain, parent_id, character_tags_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(media_item_id) DO UPDATE SET "
-            "canonical_url=excluded.canonical_url, direct_media_url=excluded.direct_media_url, "
-            "provider=excluded.provider, remote_id=excluded.remote_id, "
-            "author=excluded.author, domain=excluded.domain, parent_id=excluded.parent_id, "
-            "character_tags_json=excluded.character_tags_json",
-            values,
-        )
+        connection.execute(sql, values)
     except sqlite3.IntegrityError:
         owner = connection.execute(
             "SELECT media_item_id FROM media_sources WHERE canonical_url=?",
@@ -1263,20 +1321,11 @@ def _store_source(connection, media_item_id, source):
         ).fetchone()
         if deleted is None or deleted[0] is None:
             raise
-        target = connection.execute(
-            "SELECT 1 FROM media_sources WHERE media_item_id=?", (media_item_id,)
-        ).fetchone()
-        if target:
-            raise
         connection.execute(
-            "UPDATE media_sources SET media_item_id=? WHERE media_item_id=?",
-            (media_item_id, owner[0]),
+            "DELETE FROM media_sources WHERE media_item_id=?",
+            (owner[0],),
         )
-        connection.execute(
-            "UPDATE media_sources SET direct_media_url=?, provider=?, remote_id=?, author=?, domain=?, parent_id=?, character_tags_json=? WHERE media_item_id=?",
-            (source.direct_media_url, source.provider, source.remote_id, source.author,
-             source.domain, source.parent_id, json.dumps(list(source.character_tags)), media_item_id),
-        )
+        connection.execute(sql, values)
     connection.execute(
         "UPDATE media_items SET source_url=?, author=?, domain=? WHERE id=?",
         (source.canonical_url, source.author, source.domain, media_item_id),

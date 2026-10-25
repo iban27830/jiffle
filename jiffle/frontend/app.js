@@ -1099,7 +1099,6 @@ function reviewCardHtml(item) {
   }
   const selected = reviewSelection.has(item.id) ? ' checked' : '';
   const candidateCount = (item.source_candidates || []).length;
-  const found = candidateCount > 0;
   const accepting = reviewAccepting.has(Number(item.id));
   // The server keeps the searched state; the local map covers a search that
   // just finished while an older backend has not been restarted yet.
@@ -1107,6 +1106,7 @@ function reviewCardHtml(item) {
     ? item.search
     : (reviewLocalSearches.get(Number(item.id)) || {});
   const searched = Number(search.count || 0) > 0;
+  const found = candidateCount > 0 || search.last_outcome === 'accepted';
   // Every card is searched once by its import, so the badges always describe
   // that search. Only a manual recheck gets the extra "rechecked" outline, so
   // the marker still means "a search was run again after the import". The

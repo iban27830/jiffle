@@ -616,6 +616,8 @@ def _import_search_attempt_from_row(reason, result_json, created_at):
     candidate_count = int(payload.get("source_candidates") or 0)
     if reason == "source_candidates" or candidate_count:
         outcome = "candidates"
+    elif status == "resolved" or details.get("resolved_source_url"):
+        outcome = "accepted"
     elif resolution_error:
         # Only a search that could not run at all is "unavailable"; a completed
         # search that merely hit a provider error stays "no_source" so the

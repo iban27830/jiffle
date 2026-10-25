@@ -557,6 +557,7 @@ def run_universal_import_job(
                             "import.previously_deleted",
                             "This media was previously deleted and is blocked by settings.",
                         )
+                    _set_search_status(details, "resolved")
                     _stage_previously_deleted_review(
                         connection, settings, job_id, candidate_id, original_path,
                         inspection, source, details,
@@ -671,6 +672,8 @@ def run_universal_import_job(
                                     "import.previously_deleted",
                                     "This media was previously deleted and is blocked by settings.",
                                 )
+                            details["resolved_source_url"] = match.canonical_url
+                            _set_search_status(details, "resolved")
                             _stage_previously_deleted_review(
                                 connection,
                                 settings,
@@ -761,25 +764,13 @@ def run_universal_import_job(
             "SELECT 1 FROM blocked_media_signatures WHERE content_hash IN (?, ?)",
             (inspection.content_hash, digest or inspection.content_hash),
         ).fetchone()
-        if blocked_source or blocked_hash:
-            if settings.block_previously_deleted:
-                raise ImportFailure("import.previously_deleted", "This media was previously deleted and is blocked by settings.")
-            _stage_previously_deleted_review(
-                connection,
-                settings,
-                job_id,
-                candidate_id,
-                original_path,
-                inspection,
-                metadata_source or file_source,
-                details,
-            )
-            return
+        if (blocked_source or blocked_hash) and settings.block_previously_deleted:
+            raise ImportFailure("import.previously_deleted", "This media was previously deleted and is blocked by settings.")
 
         # A local file that is already in the library is answered from the
         # local fingerprints before any provider is contacted: an unreachable
         # provider must not make a known file look like it is still importing.
-        if input_kind != "url" or is_direct_url:
+        if not (blocked_source or blocked_hash) and (input_kind != "url" or is_direct_url):
             perceptual_duplicate = find_exact_perceptual_duplicate(
                 connection, settings, original_path, inspection
             )
@@ -847,16 +838,21 @@ def run_universal_import_job(
                 metadata_source = _match_to_source(best_metadata)
         _set_search_status(details, "matched" if exact else _status_from_errors(errors))
         if is_direct_url and metadata_source is not None:
-            blocked_meta = connection.execute(
-                "SELECT 1 FROM blocked_media_signatures WHERE source_url=?",
-                (metadata_source.canonical_url,),
-            ).fetchone()
+            blocked_meta = (
+                blocked_source
+                or blocked_hash
+                or connection.execute(
+                    "SELECT 1 FROM blocked_media_signatures WHERE source_url=?",
+                    (metadata_source.canonical_url,),
+                ).fetchone()
+            )
             if blocked_meta:
                 if settings.block_previously_deleted:
                     raise ImportFailure(
                         "import.previously_deleted",
                         "This source was previously deleted and is blocked by settings.",
                     )
+                _set_search_status(details, "resolved")
                 _stage_previously_deleted_review(
                     connection,
                     settings,
@@ -899,23 +895,30 @@ def run_universal_import_job(
                     temporary.append(downloaded)
                     file_source = _match_to_source(match)
                     resolved_meta = metadata_source or file_source
-                    blocked_resolved = connection.execute(
-                        "SELECT 1 FROM blocked_media_signatures WHERE source_url IN (?, ?)",
-                        (resolved_meta.canonical_url, file_source.canonical_url),
-                    ).fetchone()
+                    cand_inspection = inspect_media(downloaded)
+                    blocked_resolved = (
+                        blocked_source
+                        or blocked_hash
+                        or connection.execute(
+                            "SELECT 1 FROM blocked_media_signatures WHERE source_url IN (?, ?) OR content_hash=?",
+                            (resolved_meta.canonical_url, file_source.canonical_url, cand_inspection.content_hash),
+                        ).fetchone()
+                    )
                     if blocked_resolved:
                         if settings.block_previously_deleted:
                             raise ImportFailure(
                                 "import.previously_deleted",
                                 "This source was previously deleted and is blocked by settings.",
                             )
+                        details["resolved_source_url"] = match.canonical_url
+                        _set_search_status(details, "resolved")
                         _stage_previously_deleted_review(
                             connection,
                             settings,
                             job_id,
                             candidate_id,
                             downloaded,
-                            inspection,
+                            cand_inspection,
                             resolved_meta,
                             details,
                         )
@@ -957,6 +960,19 @@ def run_universal_import_job(
             _set_search_status(details, "candidate_download_failed")
         elif details.get("search_status") not in {"network_error", "authorization_error"}:
             _set_search_status(details, _status_from_errors(errors))
+
+        if blocked_source or blocked_hash:
+            _stage_previously_deleted_review(
+                connection,
+                settings,
+                job_id,
+                candidate_id,
+                original_path,
+                inspection,
+                metadata_source or file_source,
+                details,
+            )
+            return
 
         perceptual_duplicate = find_exact_perceptual_duplicate(
             connection, settings, original_path, inspection
@@ -2594,12 +2610,12 @@ def _store_source(connection, media_id, source):
     values = (media_id, source.canonical_url, source.direct_media_url, source.provider,
               source.remote_id, source.author, source.domain, source.parent_id,
               json.dumps(list(source.character_tags)))
+    sql = (
+        "INSERT INTO media_sources (media_item_id, canonical_url, direct_media_url, provider, remote_id, author, domain, parent_id, character_tags_json) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(media_item_id) DO UPDATE SET canonical_url=excluded.canonical_url, direct_media_url=excluded.direct_media_url, provider=excluded.provider, remote_id=excluded.remote_id, author=excluded.author, domain=excluded.domain, parent_id=excluded.parent_id, character_tags_json=excluded.character_tags_json"
+    )
     try:
-        connection.execute(
-            "INSERT INTO media_sources (media_item_id, canonical_url, direct_media_url, provider, remote_id, author, domain, parent_id, character_tags_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(media_item_id) DO UPDATE SET canonical_url=excluded.canonical_url, direct_media_url=excluded.direct_media_url, provider=excluded.provider, remote_id=excluded.remote_id, author=excluded.author, domain=excluded.domain, parent_id=excluded.parent_id, character_tags_json=excluded.character_tags_json",
-            values,
-        )
+        connection.execute(sql, values)
     except sqlite3.IntegrityError:
         owner = connection.execute(
             "SELECT media_item_id FROM media_sources WHERE canonical_url=?",
@@ -2612,20 +2628,11 @@ def _store_source(connection, media_id, source):
         ).fetchone()
         if deleted is None or deleted[0] is None:
             raise
-        target = connection.execute(
-            "SELECT 1 FROM media_sources WHERE media_item_id=?", (media_id,)
-        ).fetchone()
-        if target:
-            raise
         connection.execute(
-            "UPDATE media_sources SET media_item_id=? WHERE media_item_id=?",
-            (media_id, owner[0]),
+            "DELETE FROM media_sources WHERE media_item_id=?",
+            (owner[0],),
         )
-        connection.execute(
-            "UPDATE media_sources SET direct_media_url=?, provider=?, remote_id=?, author=?, domain=?, parent_id=?, character_tags_json=? WHERE media_item_id=?",
-            (source.direct_media_url, source.provider, source.remote_id, source.author,
-             source.domain, source.parent_id, json.dumps(list(source.character_tags)), media_id),
-        )
+        connection.execute(sql, values)
     connection.execute(
         "UPDATE media_items SET source_url=?, author=?, domain=?, parent_id=?, character_tags_json=? WHERE id=?",
         (source.canonical_url, source.author, source.domain, source.parent_id,

@@ -91,12 +91,33 @@ def resolve_match(
             ).fetchall()
             if row[0]
         )
-        for source_url in (remove["source_url"], remove["file_source_url"] if "file_source_url" in remove.keys() else None):
-            if source_url and source_url not in kept_urls:
+        remove_urls = [
+            remove["source_url"],
+            remove["file_source_url"] if "file_source_url" in remove.keys() else None,
+            *(
+                row[0]
+                for row in connection.execute(
+                    "SELECT canonical_url FROM media_sources WHERE media_item_id=?",
+                    (remove_id,),
+                ).fetchall()
+                if row[0]
+            ),
+        ]
+        for source_url in dict.fromkeys(url for url in remove_urls if url):
+            if source_url not in kept_urls:
                 connection.execute(
                     "INSERT OR IGNORE INTO blocked_media_signatures (source_url, reason) VALUES (?, 'deleted')",
                     (source_url,),
                 )
+        connection.execute(
+            "DELETE FROM media_sources WHERE media_item_id=?",
+            (remove_id,),
+        )
+        if _has_table(connection, "media_fingerprints"):
+            connection.execute(
+                "DELETE FROM media_fingerprints WHERE media_item_id=?",
+                (remove_id,),
+            )
         if _has_table(connection, "collection_items"):
             connection.execute(
                 "DELETE FROM collection_items WHERE media_item_id=?",
