@@ -231,22 +231,22 @@ function providerLabel(providers) {
   return names.length > 3 ? `${shown} +${names.length - 3}` : shown;
 }
 function reviewCardVerdictBadge({found = false, count = 0, diagnostics = [], outcome = ''} = {}) {
-  if (found) {
-    return sourceBadge('found', 'check-circle', count ? String(count) : '',
-      count ? `Source found: ${count} candidate${count === 1 ? '' : 's'} to confirm` : 'Source found');
-  }
   const caps = diagnosticCapabilities(diagnostics);
+  const badges = [];
+  if (found) {
+    badges.push(sourceBadge('found', 'check-circle', count ? String(count) : '',
+      count ? `Source found: ${count} candidate${count === 1 ? '' : 's'} to confirm` : 'Source found'));
+  }
   if (caps.errorProviders.size || outcome === 'unavailable') {
     const label = caps.errorProviders.size
       ? `Search incomplete (${[...caps.errorProviders].join(', ')}) — recheck to retry remaining sources.`
       : 'Search could not be completed — recheck to retry.';
-    return sourceBadge('error', 'triangle-alert', '', label);
+    badges.push(sourceBadge('error', 'triangle-alert', '', label));
+  } else if (!found && (outcome === 'no_source' || caps.checked || caps.okProviders.size)) {
+    badges.push(sourceBadge('none', 'search-x', '',
+      'No source found: every configured source was checked.'));
   }
-  if (outcome === 'no_source' || caps.checked || caps.okProviders.size) {
-    return sourceBadge('none', 'search-x', '',
-      'No source found: every configured source was checked.');
-  }
-  return '';
+  return badges.join('');
 }
 function sourceVerdictBadges({found = false, count = 0, diagnostics = [], outcome = ''} = {}) {
   const caps = diagnosticCapabilities(diagnostics);
@@ -276,7 +276,11 @@ function sourceVerdictBadges({found = false, count = 0, diagnostics = [], outcom
 function sourceOutcomeLabel(outcome, diagnostics) {
   const caps = diagnosticCapabilities(diagnostics);
   if (outcome === 'accepted') return 'Source found and verified';
-  if (outcome === 'candidates') return 'Source candidates found';
+  if (outcome === 'candidates') {
+    return caps.errorProviders.size
+      ? `Source candidates found · ${providerLabel(caps.errorProviders)} did not finish`
+      : 'Source candidates found';
+  }
   if (outcome === 'unavailable') return 'Search could not be completed';
   const errors = caps.errorProviders.size > 0;
   if (errors) return `Checked, but ${providerLabel(caps.errorProviders)} did not finish`;
@@ -1077,7 +1081,7 @@ function reviewSearchLabel(search) {
   return Number(search.count) > 1 ? `${label} ×${Number(search.count)}` : label;
 }
 function reviewSearchTitle(search) {
-  const diagnostics = (search.last_details || {}).provider_diagnostics || [];
+  const diagnostics = historyDiagnostics(search.last_details || {});
   const parts = [sourceOutcomeLabel(search.last_outcome, diagnostics)];
   if (search.last_message) parts.push(search.last_message);
   if (search.last_at) parts.push(formatDateTime(search.last_at));
@@ -1119,7 +1123,7 @@ function reviewCardHtml(item) {
   // understood without opening the log. The recheck button stays enabled
   // because a source may have appeared since.
   const rechecked = searched && search.origin !== 'import';
-  const diagnostics = (search.last_details || {}).provider_diagnostics || [];
+  const diagnostics = historyDiagnostics(search.last_details || {});
   const cardBadge = searched
     ? reviewCardVerdictBadge({found, count:candidateCount, diagnostics, outcome:search.last_outcome})
     : (found ? reviewCardVerdictBadge({found, count:candidateCount}) : '');

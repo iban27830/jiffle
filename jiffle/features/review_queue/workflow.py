@@ -812,6 +812,7 @@ def _reimport_review_item(
                     "review_item_id": review_id,
                     "status": "candidates",
                     "candidate_count": pending_candidates or stored_candidates,
+                    "provider_errors": errors,
                     "provider_diagnostics": diagnostics,
                     "search_signature": signature,
                 }
