@@ -279,22 +279,34 @@ def _parse_yandex_html(raw_html: str) -> list[dict[str, object]]:
     candidate_urls: list[tuple[str, float, str | None]] = []
 
     other_sizes = _extract_json_block(unescaped, '"cbirOtherSizes":')
-    if isinstance(other_sizes, dict):
-        items = other_sizes.get("items")
-        if isinstance(items, dict):
-            for group_name, confidence in (
-                ("large_dups", 95.0),
-                ("medium_dups", 92.0),
-                ("small_dups", 90.0),
-            ):
-                dups = items.get(group_name)
-                if isinstance(dups, list):
-                    for dup in dups:
-                        if not isinstance(dup, dict):
-                            continue
-                        url = _clean_url(dup.get("url") or "")
-                        if _is_actionable_url(url):
-                            candidate_urls.append((url, confidence, None))
+    has_other_sizes_block = isinstance(other_sizes, dict) and isinstance(
+        other_sizes.get("items"), dict
+    )
+    dup_attr_ids: set[str] = set()
+    if has_other_sizes_block:
+        items = other_sizes["items"]
+        total_dups = 0
+        for group_name, confidence in (
+            ("large_dups", 95.0),
+            ("medium_dups", 92.0),
+            ("small_dups", 90.0),
+        ):
+            dups = items.get(group_name)
+            if isinstance(dups, list):
+                total_dups += len(dups)
+                for dup in dups:
+                    if not isinstance(dup, dict):
+                        continue
+                    url = _clean_url(dup.get("url") or "")
+                    attr_match = re.search(r"-(\d+)\.[a-zA-Z0-9]+$", url)
+                    if attr_match:
+                        dup_attr_ids.add(attr_match.group(1))
+                    if _is_actionable_url(url):
+                        candidate_urls.append((url, confidence, None))
+        if total_dups == 0:
+            # Yandex explicitly reported zero exact/other-size duplicates;
+            # cbirSites in this case only lists visually similar pages.
+            return []
 
     for block_marker in ('"cbirSites":', '"cbirSitesList":'):
         sites_block = _extract_json_block(unescaped, block_marker)
@@ -313,6 +325,10 @@ def _parse_yandex_html(raw_html: str) -> list[dict[str, object]]:
                 if isinstance(orig_img, dict)
                 else ""
             )
+            if dup_attr_ids and orig_url:
+                orig_attr = re.search(r"-(\d+)\.[a-zA-Z0-9]+$", orig_url)
+                if orig_attr and orig_attr.group(1) not in dup_attr_ids:
+                    continue
             thumb = site.get("thumb")
             thumb_url = (
                 _clean_url(thumb.get("url") or "")

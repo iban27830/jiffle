@@ -52,8 +52,12 @@ class FurAffinitySourceProvider:
             response = requests.get(url, cookies=self.cookies, headers={"User-Agent": "Mozilla/5.0 Jiffle/2.0"}, timeout=15)
             response.raise_for_status()
             direct = re.search(
-                r'href="((?:https?:)?//(?:d\.furaffinity\.net|d\.facdn\.net)/[^"]+)"',
+                r'href="((?:https?:)?//(?:d\.furaffinity\.net|d\.facdn\.net)/art/[^"]+)"',
                 response.text,
+            ) or re.search(
+                r'href="((?:https?:)?//(?:d\.furaffinity\.net|d\.facdn\.net)/(?!media/static/)[^"]+\.(?:jpg|jpeg|png|gif|webp|mp4|webm|swf))"',
+                response.text,
+                re.IGNORECASE,
             )
             if not direct:
                 raise ValueError("media link missing")
