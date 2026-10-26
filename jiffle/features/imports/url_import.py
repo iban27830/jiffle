@@ -16,7 +16,10 @@ from jiffle.features.imports.local_import import (
 from jiffle.features.imports.history import create_import_history, update_import_history
 from jiffle.features.imports.source_adapters.contracts import MediaDownloader, SourceProvider
 from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
-from jiffle.features.imports.universal_import import filter_source_tags
+from jiffle.features.imports.universal_import import (
+    _allows_transcoded_source_media,
+    filter_source_tags,
+)
 from jiffle.infrastructure.database.connection import connect_database
 from jiffle.infrastructure.media_revisions import create_original_revision
 
@@ -73,7 +76,13 @@ def run_url_import_job(
             f"download-{uuid4().hex}{source.file_extension}"
         )
         downloader.download(source.direct_media_url, temporary, source.canonical_url)
-        if source.content_md5 and _md5(temporary) != source.content_md5:
+        if (
+            source.content_md5
+            and _md5(temporary) != source.content_md5
+            and not _allows_transcoded_source_media(
+                source.provider, source.direct_media_url, temporary
+            )
+        ):
             temporary.unlink(missing_ok=True)
             raise ImportFailure(
                 "import.candidate_hash_mismatch",

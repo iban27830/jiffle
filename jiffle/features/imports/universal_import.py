@@ -271,6 +271,26 @@ _RETAIN_EXCLUDED_CODES = {
     "import.video_support_unavailable",
 }
 
+# Rule34 and Gelbooru record the uploaded file's MD5 in ``hash``/``md5`` and
+# then re-encode or remux video posts to MP4 on their CDN, so the served video
+# bytes never match ``content_md5``.
+_TRANSCODED_VIDEO_PROVIDERS = {"rule34", "gelbooru"}
+
+
+def _allows_transcoded_source_media(
+    provider: str | None, media_url: str | None, path: Path
+) -> bool:
+    """True when a provider re-encodes videos after recording the upload MD5."""
+    if str(provider or "").strip().lower() not in _TRANSCODED_VIDEO_PROVIDERS:
+        return False
+    ext = _extension(media_url or path.name)
+    if ext not in {".mp4", ".webm"} and path.suffix.lower() not in {".mp4", ".webm"}:
+        return False
+    try:
+        return inspect_media(path).media_type == "video"
+    except Exception:
+        return False
+
 
 def _normalize_tag_token(value: object) -> str:
     return str(value or "").strip().lower().replace(" ", "_")
@@ -483,7 +503,13 @@ def run_universal_import_job(
                 source_download_started = time.perf_counter()
                 try:
                     downloader.download(source.direct_media_url, original_path, source.canonical_url)
-                    if source.content_md5 and _md5(original_path) != source.content_md5:
+                    if (
+                        source.content_md5
+                        and _md5(original_path) != source.content_md5
+                        and not _allows_transcoded_source_media(
+                            source.provider, source.direct_media_url, original_path
+                        )
+                    ):
                         original_path.unlink(missing_ok=True)
                         original_path = None
                         details["source_download_failed"] = True
@@ -547,9 +573,14 @@ def run_universal_import_job(
                         details,
                     )
                     return
+                source_md5 = (
+                    (source.content_md5 if source else None)
+                    or digest
+                    or inspection.content_hash
+                )
                 blocked_hash = connection.execute(
-                    "SELECT 1 FROM blocked_media_signatures WHERE content_hash IN (?, ?)",
-                    (inspection.content_hash, digest or inspection.content_hash),
+                    "SELECT 1 FROM blocked_media_signatures WHERE content_hash IN (?, ?, ?)",
+                    (inspection.content_hash, digest or inspection.content_hash, source_md5),
                 ).fetchone()
                 if blocked_source or blocked_hash:
                     if settings.block_previously_deleted:
@@ -585,7 +616,12 @@ def run_universal_import_job(
                 file_source = source
             else:
                 digest = source.content_md5 if source else None
-                source_hint = source
+                if not digest and is_direct_url:
+                    hint_md5, _ = _filename_hash_hints(
+                        Path(urlsplit(submitted_input).path).name
+                    )
+                    digest = hint_md5
+                source_hint = source if not is_direct_url else None
                 metadata_source = source_hint
         else:
             if not source_path.is_file():
@@ -596,7 +632,7 @@ def run_universal_import_job(
             original_path = source_path
 
         if input_kind == "url" and original_path is None:
-            if is_direct_url:
+            if is_direct_url and not digest:
                 failure = _first_download_failure(details.get("provider_errors"))
                 if failure:
                     raise ImportFailure(*failure)
@@ -900,7 +936,17 @@ def run_universal_import_job(
                     temporary.append(downloaded)
                     file_source = _match_to_source(match)
                     resolved_meta = metadata_source or file_source
-                    cand_inspection = inspect_media(downloaded)
+                    accepted_path = (
+                        original_path
+                        if (
+                            input_kind == "file"
+                            and original_path is not None
+                            and exact_verify_digest == digest
+                            and _md5(downloaded) != digest
+                        )
+                        else downloaded
+                    )
+                    cand_inspection = inspect_media(accepted_path)
                     blocked_resolved = (
                         blocked_source
                         or blocked_hash
@@ -922,14 +968,14 @@ def run_universal_import_job(
                             settings,
                             job_id,
                             candidate_id,
-                            downloaded,
+                            accepted_path,
                             cand_inspection,
                             resolved_meta,
                             details,
                         )
                         return
                     result = _accept_downloaded(
-                        connection, settings, job_id, downloaded, file_source, submitted_input,
+                        connection, settings, job_id, accepted_path, file_source, submitted_input,
                         metadata_source=resolved_meta,
                         file_source=file_source,
                     )
@@ -1406,26 +1452,29 @@ def _download_exact_candidates(exact, digest, settings, downloader, diagnostics=
             error = {"provider": match.provider, "code": "import.candidate_unavailable", "message": "The exact candidate has no media URL.", "remote_id": match.remote_id}
             if diagnostics is not None:
                 _record_provider_diagnostic(diagnostics, "exact_download", match.provider, "unavailable", 0, error["code"], error["message"], remote_id=match.remote_id)
-            return index, match, None, error
+            return index, match, None, error, False
         downloaded = settings.resolved_import_staging_path / f"resolve-{uuid4().hex}{_extension(media_url)}"
         try:
             downloader.download(media_url, downloaded, match.canonical_url)
-            if _md5(downloaded) != digest:
+            exact_hash_match = _md5(downloaded) == digest
+            if not exact_hash_match and not _allows_transcoded_source_media(
+                match.provider, media_url, downloaded
+            ):
                 downloaded.unlink(missing_ok=True)
                 error = {"provider": match.provider, "code": "import.candidate_hash_mismatch", "message": "The downloaded candidate did not match the source hash.", "remote_id": match.remote_id}
                 if diagnostics is not None:
                     _record_provider_diagnostic(diagnostics, "exact_download", match.provider, "unavailable", 0, error["code"], error["message"], remote_id=match.remote_id)
-                return index, match, None, error
+                return index, match, None, error, False
             if diagnostics is not None:
                 _record_provider_diagnostic(diagnostics, "exact_download", match.provider, "matched", 1, remote_id=match.remote_id)
-            return index, match, downloaded, None
+            return index, match, downloaded, None, exact_hash_match
         except Exception as error:
             downloaded.unlink(missing_ok=True)
             code, message = _download_failure(error, "The exact candidate was unavailable.")
             item = {"provider": match.provider, "code": code, "message": message, "remote_id": match.remote_id}
             if diagnostics is not None:
                 _record_provider_diagnostic(diagnostics, "exact_download", match.provider, "unavailable", 0, code, message, remote_id=match.remote_id)
-            return index, match, None, item
+            return index, match, None, item, False
 
     valid = []
     errors = []
@@ -1435,7 +1484,9 @@ def _download_exact_candidates(exact, digest, settings, downloader, diagnostics=
     with ThreadPoolExecutor(max_workers=min(4, len(candidates)), thread_name_prefix="jiffle-exact") as executor:
         futures = [executor.submit(download_one, index, match) for index, match in candidates]
         results = [future.result() for future in as_completed(futures)]
-    for index, match, downloaded, error in sorted(results, key=lambda item: item[0]):
+    for index, match, downloaded, error, _exact_hash_match in sorted(
+        results, key=lambda item: (0 if item[4] else 1, item[0])
+    ):
         if downloaded is not None:
             valid.append((match, downloaded))
         elif error:

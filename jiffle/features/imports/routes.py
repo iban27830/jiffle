@@ -16,6 +16,8 @@ from jiffle.features.imports.implicit_tags import (
 from jiffle.features.imports.local_import import create_local_import_job, run_local_import_job
 from jiffle.features.imports.url_import import create_url_import_job, run_url_import_job
 from jiffle.features.imports.universal_import import (
+    _filename_hash_hints,
+    _provider_needs_configuration,
     create_universal_import_job,
     run_universal_import_job,
 )
@@ -310,40 +312,58 @@ def search_sources():
     providers = current_app.config["JIFFLE_SOURCE_PROVIDERS"]
     matches: list[dict[str, object]] = []
     errors: list[dict[str, str]] = []
-    searchable = []
-    for provider in providers:
-        if not callable(getattr(provider, "search_by_md5", None)):
-            continue
-        algorithm = str(getattr(provider, "hash_algorithm", "md5") or "md5").strip().lower()
-        provider_digest = sha256_digest if algorithm == "sha256" else digest
-        if provider_digest:
-            searchable.append((provider, provider_digest))
 
-    def lookup(provider, provider_digest):
-        return provider, provider.search_by_md5(provider_digest)
+    def _run_lookup_pass(pass_md5: str | None, pass_sha256: str | None) -> list[dict[str, object]]:
+        searchable = []
+        for provider in providers:
+            if not callable(getattr(provider, "search_by_md5", None)):
+                continue
+            if _provider_needs_configuration(provider):
+                continue
+            algorithm = str(getattr(provider, "hash_algorithm", "md5") or "md5").strip().lower()
+            provider_digest = pass_sha256 if algorithm == "sha256" else pass_md5
+            if provider_digest:
+                searchable.append((provider, provider_digest))
+        if not searchable:
+            return []
 
-    with ThreadPoolExecutor(max_workers=max(1, len(searchable))) as executor:
-        futures = {
-            executor.submit(lookup, provider, provider_digest): provider
-            for provider, provider_digest in searchable
-        }
-        for future in as_completed(futures):
-            provider = futures[future]
-            try:
-                _, provider_matches = future.result()
-                matches.extend(provider_matches or [])
-            except SourceProviderFailure as error:
-                errors.append({
-                    "provider": getattr(provider, "provider_name", "unknown"),
-                    "code": error.code,
-                    "message": error.message,
-                })
-            except Exception:
-                errors.append({
-                    "provider": getattr(provider, "provider_name", "unknown"),
-                    "code": "import.source_search_failed",
-                    "message": "The source search failed.",
-                })
+        def lookup(provider, provider_digest):
+            return provider, provider.search_by_md5(provider_digest)
+
+        pass_matches: list[dict[str, object]] = []
+        with ThreadPoolExecutor(max_workers=max(1, len(searchable))) as executor:
+            futures = {
+                executor.submit(lookup, provider, provider_digest): provider
+                for provider, provider_digest in searchable
+            }
+            for future in as_completed(futures):
+                provider = futures[future]
+                try:
+                    _, provider_matches = future.result()
+                    pass_matches.extend(provider_matches or [])
+                except SourceProviderFailure as error:
+                    errors.append({
+                        "provider": getattr(provider, "provider_name", "unknown"),
+                        "code": error.code,
+                        "message": error.message,
+                    })
+                except Exception:
+                    errors.append({
+                        "provider": getattr(provider, "provider_name", "unknown"),
+                        "code": "import.source_search_failed",
+                        "message": "The source search failed.",
+                    })
+        return pass_matches
+
+    matches.extend(_run_lookup_pass(digest, sha256_digest))
+    if not matches and uploaded is not None and uploaded.filename:
+        hint_md5, hint_sha256 = _filename_hash_hints(uploaded.filename)
+        query_md5 = hint_md5 if (hint_md5 and hint_md5 != digest) else None
+        query_sha256 = (
+            hint_sha256 if (hint_sha256 and hint_sha256 != sha256_digest) else None
+        )
+        if query_md5 or query_sha256:
+            matches.extend(_run_lookup_pass(query_md5, query_sha256))
 
     unique: dict[tuple[str, str], dict[str, object]] = {}
     for match in matches:
