@@ -7,6 +7,9 @@ import requests
 
 from jiffle.features.imports.source_adapters.contracts import SourceMedia
 from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
+from jiffle.features.imports.source_adapters.fuzzysearch import (
+    fetch_furaffinity_file_from_fuzzysearch,
+)
 from jiffle.features.imports.source_adapters.platform_tags import add_platform_tags
 
 
@@ -14,6 +17,7 @@ class FurAffinitySourceProvider:
     provider_name = "furaffinity"
     supports_reverse_search = False
     credentials_improve_results = True
+    can_fetch_without_configuration = True
     domains = {"furaffinity.net", "www.furaffinity.net"}
 
     def __init__(self, cookie_a=None, cookie_b=None):
@@ -38,7 +42,11 @@ class FurAffinitySourceProvider:
         match = re.search(r"/(?:view|full)/(\d+)", urlparse(url).path)
         if not match:
             raise SourceProviderFailure("import.invalid_source_url", "The URL is not a FurAffinity submission URL.")
+        submission_id = match.group(1)
         if not self.cookies:
+            fallback = fetch_furaffinity_file_from_fuzzysearch(submission_id)
+            if fallback is not None:
+                return fallback
             raise SourceProviderFailure("import.provider_auth_required", "FurAffinity cookies are not configured.")
         try:
             response = requests.get(url, cookies=self.cookies, headers={"User-Agent": "Mozilla/5.0 Jiffle/2.0"}, timeout=15)
@@ -50,6 +58,9 @@ class FurAffinitySourceProvider:
             if not direct:
                 raise ValueError("media link missing")
         except requests.HTTPError as error:
+            fallback = fetch_furaffinity_file_from_fuzzysearch(submission_id)
+            if fallback is not None:
+                return fallback
             failure = _http_auth_failure(error)
             if failure:
                 raise failure from error
@@ -57,6 +68,9 @@ class FurAffinitySourceProvider:
                 "import.provider_unavailable", "FurAffinity submission could not be loaded."
             ) from error
         except (requests.RequestException, ValueError) as error:
+            fallback = fetch_furaffinity_file_from_fuzzysearch(submission_id)
+            if fallback is not None:
+                return fallback
             raise SourceProviderFailure("import.provider_unavailable", "FurAffinity submission could not be loaded.") from error
         raw_direct = html.unescape(direct.group(1))
         direct_url = "https:" + raw_direct if raw_direct.startswith("//") else raw_direct

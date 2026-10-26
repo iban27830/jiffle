@@ -1,12 +1,15 @@
 from jiffle.configuration.settings import Settings
+from jiffle.features.imports.source_adapters.bluesky import BlueskySourceProvider
 from jiffle.features.imports.source_adapters.danbooru import DanbooruSourceProvider
 from jiffle.features.imports.source_adapters.e621 import E621SourceProvider
 from jiffle.features.imports.source_adapters.furaffinity import FurAffinitySourceProvider
 from jiffle.features.imports.source_adapters.gelbooru import GelbooruSourceProvider
+from jiffle.features.imports.source_adapters.joyreactor import JoyReactorSourceProvider
 from jiffle.features.imports.source_adapters.pawchive import PawchiveSourceProvider
 from jiffle.features.imports.source_adapters.rule34 import Rule34SourceProvider
 from jiffle.features.imports.source_adapters.saucenao import SaucenaoReverseSearch
 from jiffle.features.imports.source_adapters.tbib import TbibSourceProvider
+from jiffle.features.imports.source_adapters.twitter import TwitterSourceProvider
 
 
 def build_source_providers(settings: Settings):
@@ -16,6 +19,9 @@ def build_source_providers(settings: Settings):
         GelbooruSourceProvider(settings.gelbooru_user_id, settings.gelbooru_api_key),
         Rule34SourceProvider(settings.rule34_user_id, settings.rule34_api_key),
         FurAffinitySourceProvider(settings.furaffinity_cookie_a, settings.furaffinity_cookie_b),
+        TwitterSourceProvider(),
+        BlueskySourceProvider(),
+        JoyReactorSourceProvider(),
         TbibSourceProvider(),
         PawchiveSourceProvider(),
     )

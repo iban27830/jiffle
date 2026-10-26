@@ -15,7 +15,7 @@ Pasting a URL alone does not submit it. After a local upload has been received, 
 
 To place an imported batch onto a personal shelf right away, tick **Add to shelf** on the Import screen. Choose an existing shelf (or use **Open selected shelf in Library** to inspect it first), or enter a name, pick a color, and select **+** to create a new shelf on the spot. Files accepted immediately, files later accepted from **Review**, and files that were already in the library under another shelf all receive the selected shelf.
 
-Supported source adapters include Danbooru, e621/e926, Gelbooru, Rule34.xxx, FurAffinity, TBIB, and Pawchive. Some need credentials in **Settings → Sources**. A source that is not configured is skipped rather than blocking all other sources.
+Supported source adapters include Danbooru, e621/e926, Gelbooru, Rule34.xxx, FurAffinity, Twitter/X, Bluesky, JoyReactor, TBIB, and Pawchive, alongside reverse-image search via IQDB, SauceNAO, Fluffle, FuzzySearch, and Yandex. Some need credentials in **Settings → Sources**. A source that is not configured is skipped rather than blocking all other sources.
 
 ## Read Import history
 

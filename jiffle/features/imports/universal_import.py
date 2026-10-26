@@ -1782,6 +1782,9 @@ def _reverse_similar(
     for provider in list(providers) + [
         _iqdb_reverse_search(),
         _saucenao_reverse_search(settings),
+        _fluffle_reverse_search(),
+        _fuzzysearch_reverse_search(settings),
+        _yandex_reverse_search(),
     ]:
         if provider is None or not callable(getattr(provider, "search_similar", None)):
             continue
@@ -1947,6 +1950,30 @@ def _saucenao_reverse_search(settings: Settings | None = None):
         return None
 
 
+def _fluffle_reverse_search():
+    try:
+        from jiffle.features.imports.source_adapters.fluffle import FluffleReverseSearchProvider
+        return FluffleReverseSearchProvider()
+    except Exception:
+        return None
+
+
+def _fuzzysearch_reverse_search(_settings: Settings | None = None):
+    try:
+        from jiffle.features.imports.source_adapters.fuzzysearch import FuzzySearchReverseSearchProvider
+        return FuzzySearchReverseSearchProvider()
+    except Exception:
+        return None
+
+
+def _yandex_reverse_search():
+    try:
+        from jiffle.features.imports.source_adapters.yandex import YandexReverseSearchProvider
+        return YandexReverseSearchProvider()
+    except Exception:
+        return None
+
+
 def _reverse_min_confidence_by_name(provider_name: str, providers) -> float:
     for provider in providers or ():
         if getattr(provider, "provider_name", None) == provider_name:
@@ -2091,7 +2118,10 @@ def _reverse_candidate_from_url(url: str, providers):
         except Exception:
             continue
         provider_name = getattr(provider, "provider_name", "unknown")
-        if _provider_on_cooldown(provider_name) or _provider_needs_configuration(provider):
+        if _provider_on_cooldown(provider_name) or (
+            _provider_needs_configuration(provider)
+            and not getattr(provider, "can_fetch_without_configuration", False)
+        ):
             return None
         digest = _reverse_md5(url)
         if digest:
@@ -2153,6 +2183,9 @@ def _resolve_reverse_candidate(raw, providers):
         return raw
     confidence = _reverse_confidence(raw)
     preview = raw.get("preview_url") if isinstance(raw, dict) else getattr(raw, "preview_url", None)
+    raw_author = raw.get("author") if isinstance(raw, dict) else getattr(raw, "author", None)
+    raw_tags = tuple(raw.get("tags") or ()) if isinstance(raw, dict) else tuple(getattr(raw, "tags", ()) or ())
+    raw_direct = raw.get("direct_media_url") if isinstance(raw, dict) else getattr(raw, "direct_media_url", None)
     fallback = None
     for url in _reverse_links(raw):
         resolved = _reverse_candidate_from_url(url, providers)
@@ -2160,6 +2193,9 @@ def _resolve_reverse_candidate(raw, providers):
             continue
         candidate = replace(
             resolved,
+            author=resolved.author or raw_author,
+            tags=resolved.tags or raw_tags,
+            direct_media_url=resolved.direct_media_url or raw_direct,
             match_method="perceptual",
             confidence=confidence if confidence is not None else resolved.confidence,
             preview_url=resolved.preview_url or preview,
@@ -2867,5 +2903,15 @@ def _finalize_timing(details):
 
 
 def _extension(url):
-    suffix = Path(urlsplit(str(url)).path).suffix.lower()
+    parsed = urlsplit(str(url))
+    path = parsed.path or ""
+    suffix = Path(path).suffix.lower()
+    if not suffix and "@" in path:
+        tail = path.rsplit("@", 1)[-1].lower()
+        if tail in {"jpg", "jpeg", "png", "gif", "webp", "mp4", "webm"}:
+            suffix = ".jpg" if tail == "jpeg" else f".{tail}"
+    if not suffix and parsed.query:
+        fmt = (parse_qs(parsed.query).get("format") or [""])[0].strip().lower().lstrip(".")
+        if fmt in {"jpg", "jpeg", "png", "gif", "webp", "mp4", "webm"}:
+            suffix = ".jpg" if fmt == "jpeg" else f".{fmt}"
     return suffix or ".jpg"
