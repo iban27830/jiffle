@@ -393,6 +393,7 @@ def create_universal_import_job(
     input_kind: str,
     original_name: str | None = None,
     shelf_ids: object = (),
+    commit: bool = True,
 ) -> int:
     cursor = connection.execute(
         "INSERT INTO background_jobs (job_type, status) VALUES ('import_resolve', 'pending')"
@@ -425,7 +426,8 @@ def create_universal_import_job(
         if shelves_summary:
             history_payload["shelves"] = shelves_summary
     create_import_history(connection, job_id, history_payload)
-    connection.commit()
+    if commit:
+        connection.commit()
     return job_id
 
 

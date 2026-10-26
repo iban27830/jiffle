@@ -70,11 +70,13 @@ def main() -> None:
     port = int(os.environ.get("PORT", "5001"))
 
     from jiffle import create_app
+    import socketserver
 
+    socketserver.TCPServer.request_queue_size = 128
     app = create_app()
 
     print(f"Open Jiffle in your browser on port {port}.")
-    app.run(host=host, port=port, debug=False)
+    app.run(host=host, port=port, debug=False, threaded=True)
 
 
 if __name__ == "__main__":

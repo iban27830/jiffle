@@ -109,6 +109,7 @@ def create_import_resolve_job():
     providers = current_app.config["JIFFLE_SOURCE_PROVIDERS"]
     downloader = current_app.config["JIFFLE_MEDIA_DOWNLOADER"]
     job_ids: list[int] = []
+    pending_universal_args: list[tuple] = []
     for submitted_input, input_kind, original_name in inputs:
         if input_kind == "url":
             provider = next(
@@ -118,6 +119,11 @@ def create_import_resolve_job():
             if provider is not None and getattr(
                 provider, "can_handle_set", lambda _url: False
             )(submitted_input):
+                if pending_universal_args:
+                    connection.commit()
+                    for args in pending_universal_args:
+                        _submit_universal_import_job(settings, args)
+                    pending_universal_args.clear()
                 try:
                     job_id = create_set_import_job(
                         connection, submitted_input, provider, shelf_ids=shelf_ids
@@ -151,6 +157,7 @@ def create_import_resolve_job():
             input_kind,
             original_name=original_name,
             shelf_ids=shelf_ids,
+            commit=False,
         )
         arguments = (
             settings.database_path,
@@ -161,8 +168,13 @@ def create_import_resolve_job():
             providers,
             downloader,
         )
-        _submit_universal_import_job(settings, arguments)
+        pending_universal_args.append(arguments)
         job_ids.append(job_id)
+
+    if pending_universal_args:
+        connection.commit()
+        for arguments in pending_universal_args:
+            _submit_universal_import_job(settings, arguments)
 
     first_job_id = job_ids[0]
     return jsonify({
@@ -405,17 +417,8 @@ def search_sources():
     })
 
 
-@imports_blueprint.get("/api/v1/jobs/<int:job_id>")
-def get_job(job_id: int):
-    row = get_database().execute(
-        "SELECT b.*, s.processed AS set_processed, s.total AS set_total, "
-        "s.cancel_requested AS set_cancel_requested, s.name AS set_name, s.shortname AS set_shortname, "
-        "s.set_id AS set_id, s.provider AS set_provider, s.submitted_url AS set_url "
-        "FROM background_jobs b LEFT JOIN source_set_imports s ON s.job_id=b.id WHERE b.id = ?", (job_id,)
-    ).fetchone()
-    if row is None:
-        return _error("jobs.not_found", "Background job was not found.", 404)
-    payload = {
+def _serialize_job_row(row) -> dict[str, object]:
+    payload: dict[str, object] = {
         "id": row["id"],
         "type": row["job_type"],
         "status": row["status"],
@@ -442,7 +445,45 @@ def get_job(job_id: int):
                 "url": row["set_url"],
             },
         })
-    return jsonify(payload)
+    return payload
+
+
+@imports_blueprint.get("/api/v1/jobs")
+def get_jobs_batch():
+    raw_ids = request.args.get("ids") or ""
+    job_ids: list[int] = []
+    for part in raw_ids.split(","):
+        part = part.strip()
+        if part.isdigit():
+            jid = int(part)
+            if jid > 0 and jid not in job_ids:
+                job_ids.append(jid)
+    if not job_ids:
+        return jsonify({"items": []})
+    job_ids = job_ids[:250]
+    placeholders = ",".join("?" for _ in job_ids)
+    rows = get_database().execute(
+        "SELECT b.*, s.processed AS set_processed, s.total AS set_total, "
+        "s.cancel_requested AS set_cancel_requested, s.name AS set_name, s.shortname AS set_shortname, "
+        "s.set_id AS set_id, s.provider AS set_provider, s.submitted_url AS set_url "
+        f"FROM background_jobs b LEFT JOIN source_set_imports s ON s.job_id=b.id WHERE b.id IN ({placeholders})",
+        job_ids,
+    ).fetchall()
+    by_id = {int(row["id"]): _serialize_job_row(row) for row in rows}
+    return jsonify({"items": [by_id[jid] for jid in job_ids if jid in by_id]})
+
+
+@imports_blueprint.get("/api/v1/jobs/<int:job_id>")
+def get_job(job_id: int):
+    row = get_database().execute(
+        "SELECT b.*, s.processed AS set_processed, s.total AS set_total, "
+        "s.cancel_requested AS set_cancel_requested, s.name AS set_name, s.shortname AS set_shortname, "
+        "s.set_id AS set_id, s.provider AS set_provider, s.submitted_url AS set_url "
+        "FROM background_jobs b LEFT JOIN source_set_imports s ON s.job_id=b.id WHERE b.id = ?", (job_id,)
+    ).fetchone()
+    if row is None:
+        return _error("jobs.not_found", "Background job was not found.", 404)
+    return jsonify(_serialize_job_row(row))
 
 
 @imports_blueprint.post("/api/v1/set-import-jobs/<int:job_id>/cancel")

@@ -1852,18 +1852,24 @@ async function showImport() {
     const valid = [...(files || [])].filter(Boolean);
     if (!valid.length) return;
     try {
-      const form = new FormData();
-      valid.forEach(file => {
-        const hintedName = valid.length === 1 ? transferFilenameHint(dataTransfer, file.name) : (file.name || '');
-        if (hintedName && hintedName !== file.name) form.append('file', file, hintedName);
-        else form.append('file', file);
-      });
       const shelfId = await resolveImportShelfId();
-      if (shelfId) form.append('shelf_ids', shelfId);
-      const res = await api('/api/v1/import-resolve-jobs', {method:'POST', body: form});
-      const jobs = await awaitImportJobs(res);
+      const allJobs = [];
+      const chunkSize = 20;
+      for (let offset = 0; offset < valid.length; offset += chunkSize) {
+        const chunk = valid.slice(offset, offset + chunkSize);
+        const form = new FormData();
+        chunk.forEach(file => {
+          const hintedName = valid.length === 1 ? transferFilenameHint(dataTransfer, file.name) : (file.name || '');
+          if (hintedName && hintedName !== file.name) form.append('file', file, hintedName);
+          else form.append('file', file);
+        });
+        if (shelfId) form.append('shelf_ids', shelfId);
+        const res = await api('/api/v1/import-resolve-jobs', {method:'POST', body: form});
+        const jobs = await awaitImportJobs(res);
+        allJobs.push(...jobs);
+      }
       if (shelfId) {
-        const mediaIds = jobs.map(j => Number(j?.result?.media_item_id || j?.result?.duplicate_of || 0)).filter(id => id > 0);
+        const mediaIds = allJobs.map(j => Number(j?.result?.media_item_id || j?.result?.duplicate_of || 0)).filter(id => id > 0);
         if (mediaIds.length) {
           await api('/api/v1/shelves/items', {method: 'POST', body: JSON.stringify({media_ids: mediaIds, shelf_ids: [Number(shelfId)], action: 'add'})}).catch(() => {});
         }
