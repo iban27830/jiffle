@@ -3359,7 +3359,7 @@ async function showCollectionBuilder() {
   let preview=draft.preview;
   let rejectedIds=[...(draft.rejectedIds||[])];
   let operation=0;
-  workspace.innerHTML = `<div class="page collection-builder"><section class="panel"><div class="panel-head"><i data-lucide="wand-sparkles"></i>Selection rules</div><div class="panel-body builder-fields"><div class="form-row"><label>Preset</label><select id="builderPreset" class="control"><option value="">No preset</option>${presets.items.map(item => `<option value="${item.id}">${esc(item.name)}</option>`).join('')}</select></div><div class="form-row"><label>Preset name</label><input id="builderPresetName" class="control" maxlength="120" placeholder="Name for a new preset"></div><div class="form-row"><label>Collection name</label><input id="builderName" class="control" maxlength="120"></div><div class="form-row"><label>Count</label><input id="builderCount" class="control" type="number" min="1" max="1000" value="10"></div><div class="form-row builder-search"><label>Search</label><div class="search-wrap"><div id="builderQueryBackdrop" class="search-backdrop" aria-hidden="true"></div><input id="builderQuery" class="control search has-backdrop" placeholder="portrait blue_eyes -comic author:artist shelf:pinup" autocomplete="off" spellcheck="false"><div id="builderQuerySuggest" class="tag-suggest" hidden></div></div><div id="builderShelfPills" class="builder-shelf-pills" title="Click to include shelf in collection query (Shift+click to exclude)" hidden></div></div><div class="builder-actions"><button id="savePreset" class="btn"><i data-lucide="bookmark-plus"></i>Save preset</button><button id="deletePreset" class="icon-btn danger" title="Delete selected preset"><i data-lucide="trash-2"></i></button><button id="generateCollection" class="btn primary"><i data-lucide="shuffle"></i>Generate</button></div></div></section><div id="builderSummary" class="builder-summary"></div><div id="builderPreview" class="collection-preview-grid"><div class="empty">Enter tags and generate a selection</div></div><div class="builder-savebar"><button id="cancelBuilder" class="btn"><i data-lucide="chevron-left"></i>Collections</button><span id="builderStatus">No collection generated yet</span><button id="commitCollection" class="btn primary" disabled><i data-lucide="save"></i>Save collection</button></div></div>`;
+  workspace.innerHTML = `<div class="page collection-builder"><section class="panel"><div class="panel-head"><i data-lucide="wand-sparkles"></i>Selection rules</div><div class="panel-body builder-fields"><div class="form-row"><label>Preset</label><select id="builderPreset" class="control"><option value="">No preset</option>${presets.items.map(item => `<option value="${item.id}">${esc(item.name)}</option>`).join('')}</select></div><div class="form-row"><label>Preset name</label><input id="builderPresetName" class="control" maxlength="120" placeholder="Name for a new preset"></div><div class="form-row"><label>Collection name</label><input id="builderName" class="control" maxlength="120"></div><div class="form-row"><label>Count</label><input id="builderCount" class="control" type="number" min="1" max="1000" value="10"></div><div class="form-row builder-search"><label>Search</label><div class="search-wrap has-leading-single"><button id="builderMediaTypeBtn" type="button" class="search-inline-btn" title="Media type: All media"><i data-lucide="layers"></i></button><div id="builderMediaTypeMenu" class="search-popover-menu media-type-popover" hidden>${MEDIA_TYPE_MODES.map(mode => `<button type="button" class="search-popover-item" data-media-type-value="${mode.value}"><span class="popover-item-label"><i data-lucide="${mode.icon}"></i><span>${esc(mode.label)}</span></span></button>`).join('')}</div><div id="builderQueryBackdrop" class="search-backdrop" aria-hidden="true"></div><input id="builderQuery" class="control search has-backdrop" placeholder="portrait blue_eyes -comic author:artist shelf:pinup" autocomplete="off" spellcheck="false"><div id="builderQuerySuggest" class="tag-suggest" hidden></div></div></div><div class="builder-actions"><button id="savePreset" class="btn"><i data-lucide="bookmark-plus"></i>Save preset</button><button id="deletePreset" class="icon-btn danger" title="Delete selected preset"><i data-lucide="trash-2"></i></button><button id="generateCollection" class="btn primary"><i data-lucide="shuffle"></i>Generate</button></div></div></section><div id="builderSummary" class="builder-summary"></div><div id="builderPreview" class="collection-preview-grid"><div class="empty">Enter tags and generate a selection</div></div><div class="builder-savebar"><button id="cancelBuilder" class="btn"><i data-lucide="chevron-left"></i>Collections</button><span id="builderStatus">No collection generated yet</span><button id="commitCollection" class="btn primary" disabled><i data-lucide="save"></i>Save collection</button></div></div>`;
   const root=document.querySelector('.collection-builder');
   const input=id=>root.querySelector(`#${id}`);
   input('builderName').value=draft.name||'';
@@ -3389,58 +3389,26 @@ async function showCollectionBuilder() {
     else if(currentView==='collections'&&viewState('collections').screen==='builder')showCollectionBuilder();
     return true;
   };
-  const renderBuilderShelfPills=()=>{
+  const syncBuilderMediaTypeBtn=()=>{
+    const btn=input('builderMediaTypeBtn');
+    const menu=input('builderMediaTypeMenu');
+    if(!btn)return;
     const parsed=parseLibrarySearch(input('builderQuery').value);
-    const pillsNode=input('builderShelfPills');
-    if(!pillsNode)return;
-    if(!shelvesCatalog.length){
-      pillsNode.hidden=true;
-      pillsNode.innerHTML='';
-    }else{
-      pillsNode.hidden=false;
-      pillsNode.innerHTML=`<span class="builder-shelf-label" title="Click to include shelf in collection query (Shift+click to exclude)">Shelves:</span>`+shelvesCatalog.map(s=>{
-        const token=shelfToken(s);
-        const tokenLower=token.toLowerCase();
-        const nameLower=String(s.name||'').toLowerCase();
-        const included=parsed.shelves.some(val=>val.toLowerCase()===tokenLower||val.toLowerCase()===nameLower);
-        const excluded=parsed.excludedShelves.some(val=>val.toLowerCase()===tokenLower||val.toLowerCase()===nameLower);
-        const state=included?' included':excluded?' excluded':'';
-        return `<button type="button" class="shelf-pill${state}" data-builder-shelf="${esc(token)}" style="--shelf-color:${esc(s.color)}" title="${esc(`Click to include shelf:${token} in collection query (Shift+click to exclude)`)}"><span class="shelf-dot-inline" style="--shelf-color:${esc(s.color)}"></span><span>${esc(s.name)}</span><small>${Number(s.item_count||0)}</small><span role="button" tabindex="0" class="shelf-pill-delete" data-delete-shelf-id="${s.id}" data-delete-shelf-name="${esc(s.name)}" title="Delete shelf everywhere"><i data-lucide="x"></i></span></button>`;
-      }).join('');
-      pillsNode.querySelectorAll('[data-builder-shelf]').forEach(btn=>{
-        btn.onclick=event=>{
-          if(event.target.closest('.shelf-pill-delete'))return;
-          const token=btn.dataset.builderShelf;
-          const term=event.shiftKey?`-shelf:${token}`:`shelf:${token}`;
-          input('builderQuery').value=toggleSearchTerm(input('builderQuery').value.trim(),term);
-          input('builderQuery').classList.remove('invalid');
-          saveDraft();renderPreview();
-        };
-      });
-      pillsNode.querySelectorAll('.shelf-pill-delete').forEach(delBtn=>{
-        delBtn.onclick=event=>{
-          event.preventDefault();
-          event.stopPropagation();
-          confirmAndDeleteShelf(Number(delBtn.dataset.deleteShelfId), delBtn.dataset.deleteShelfName, ()=>{
-            renderBuilderShelfPills();
-          });
-        };
-        delBtn.onkeydown=event=>{
-          if(event.key==='Enter'||event.key===' '){
-            event.preventDefault();
-            event.stopPropagation();
-            confirmAndDeleteShelf(Number(delBtn.dataset.deleteShelfId), delBtn.dataset.deleteShelfName, ()=>{
-              renderBuilderShelfPills();
-            });
-          }
-        };
-      });
-      icons();
-    }
+    let activeType=parsed.types.length?parsed.types.at(-1):'';
+    if(activeType==='gif')activeType='animated';
+    if(!activeType&&parsed.hasFlags.includes('motion'))activeType='motion';
+    const mode=MEDIA_TYPE_MODES.find(m=>m.value===activeType)||MEDIA_TYPE_MODES[0];
+    btn.classList.toggle('active',Boolean(mode.value));
+    btn.title=`Media type: ${mode.label}`;
+    btn.innerHTML=`<i data-lucide="${mode.icon}"></i>`;
+    menu?.querySelectorAll('.search-popover-item').forEach(node=>{
+      node.classList.toggle('active',node.dataset.mediaTypeValue===mode.value);
+    });
+    icons();
   };
   const renderQueryChips=()=>{
     renderSearchBackdrop(input('builderQuery'), input('builderQueryBackdrop'));
-    renderBuilderShelfPills();
+    syncBuilderMediaTypeBtn();
   };
   const renderBuilderChips=renderQueryChips;
   const canSave=()=>Boolean(!collectionDraftRequests.has(draft.id)&&preview?.can_save&&selectionRulesMatch(draft)&&input('builderName').value.trim());
@@ -3485,6 +3453,35 @@ async function showCollectionBuilder() {
   };
   root.querySelectorAll('input').forEach(node=>node.addEventListener('input',()=>{node.classList.remove('invalid');saveDraft();renderPreview();}));
   attachSearchAutocomplete(input('builderQuery'), input('builderQuerySuggest'), () => { input('builderQuery').classList.remove('invalid'); saveDraft(); renderPreview(); });
+  const builderTypeBtn=input('builderMediaTypeBtn');
+  const builderTypeMenu=input('builderMediaTypeMenu');
+  if(builderTypeBtn&&builderTypeMenu){
+    builderTypeBtn.onclick=event=>{
+      event.stopPropagation();
+      builderTypeMenu.hidden=!builderTypeMenu.hidden;
+    };
+    builderTypeMenu.querySelectorAll('.search-popover-item').forEach(item=>{
+      item.onclick=event=>{
+        event.stopPropagation();
+        const chosen=item.dataset.mediaTypeValue||'';
+        const retained=parseLibrarySearch(input('builderQuery').value).terms.filter(term=>{
+          const lower=term.toLowerCase();
+          return !/^type:(image|video|animated|gif|motion|moving)$/i.test(lower)&&lower!=='has:motion'&&lower!=='is:motion'&&lower!=='has:moving'&&lower!=='is:moving';
+        });
+        if(chosen)retained.push(`type:${chosen}`);
+        input('builderQuery').value=retained.join(' ');
+        input('builderQuery').classList.remove('invalid');
+        builderTypeMenu.hidden=true;
+        saveDraft();
+        renderPreview();
+      };
+    });
+    document.addEventListener('click',event=>{
+      if(builderTypeMenu&&!builderTypeMenu.hidden&&!event.target.closest('#builderMediaTypeMenu')&&!event.target.closest('#builderMediaTypeBtn')){
+        builderTypeMenu.hidden=true;
+      }
+    });
+  }
   input('generateCollection').onclick=async()=>{
     const rules=fields(),version=beginRequest();
     renderPreview();
