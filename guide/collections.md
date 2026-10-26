@@ -9,7 +9,7 @@
 3. Select **Generate**. Click any preview image to inspect it full size in the lightbox, and use **Replace** on individual items you do not want.
 4. When the complete selection is ready, select **Save collection**.
 
-The query supports the same tags, exclusions, aliases, and search operators (`author:`, `-author:`, `source:`, `domain:`, `type:`, `parent:`, `has:`, `is:`, `orientation:`, `width:`, `height:`) as Library. Author-limit warnings highlight the files involved. If the rules or count change, generate a new selection before saving.
+The query supports the same tags, exclusions, aliases, and search operators (`shelf:`, `-shelf:`, `author:`, `-author:`, `source:`, `domain:`, `type:`, `parent:`, `has:`, `is:`, `orientation:`, `width:`, `height:`) as Library, and you can click any shelf pill below the search box to include or (`Shift`-click) exclude a shelf. Author-limit warnings highlight the files involved. If the rules or count change, generate a new selection before saving.
 
 In the **Collections** list, the search box filters saved collections by collection name, preset name, included or excluded tags, and item authors.
 

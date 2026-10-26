@@ -13,6 +13,7 @@ class ImportOutcome(StrEnum):
 class LocalImportCommand:
     source_path: Path
     accept_without_source: bool = False
+    shelf_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)

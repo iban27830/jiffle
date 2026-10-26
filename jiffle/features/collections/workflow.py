@@ -43,6 +43,8 @@ _OPERATOR_PREFIXES = (
     "-height:",
     "text:",
     "-text:",
+    "shelf:",
+    "-shelf:",
 )
 
 
@@ -54,6 +56,8 @@ class CollectionFilters:
     excluded_domains: tuple[str, ...] = ()
     sources: tuple[str, ...] = ()
     excluded_sources: tuple[str, ...] = ()
+    shelves: tuple[str, ...] = ()
+    excluded_shelves: tuple[str, ...] = ()
     media_type: str | None = None
     excluded_media_types: tuple[str, ...] = ()
     is_animated: bool | None = None
@@ -83,6 +87,10 @@ class CollectionFilters:
         return self.excluded_sources
 
     @property
+    def exclude_shelves(self) -> tuple[str, ...]:
+        return self.excluded_shelves
+
+    @property
     def exclude_media_ids(self) -> tuple[int, ...]:
         return self.excluded_media_ids
 
@@ -99,6 +107,8 @@ class CollectionFilters:
             or self.excluded_domains
             or self.sources
             or self.excluded_sources
+            or self.shelves
+            or self.excluded_shelves
             or self.media_type is not None
             or self.excluded_media_types
             or self.is_animated is not None
@@ -122,6 +132,7 @@ class CollectionFilters:
             self.authors
             or self.domains
             or self.sources
+            or self.shelves
             or self.media_type is not None
             or self.is_animated is True
             or self.parent_ids
@@ -236,6 +247,8 @@ def parse_collection_filters(value: object) -> CollectionFilters:
     excluded_domains: list[str] = []
     sources: list[str] = []
     excluded_sources: list[str] = []
+    shelves: list[str] = []
+    excluded_shelves: list[str] = []
     media_type: str | None = None
     excluded_media_types: list[str] = []
     is_animated: bool | None = None
@@ -275,6 +288,10 @@ def parse_collection_filters(value: object) -> CollectionFilters:
             target = excluded_sources if negated else sources
             if val_lower not in target:
                 target.append(val_lower)
+        elif op == "shelf":
+            target = excluded_shelves if negated else shelves
+            if val_lower not in target:
+                target.append(val_lower)
         elif op == "id":
             target_ids = excluded_media_ids if negated else media_ids
             for part in val.split(","):
@@ -290,6 +307,10 @@ def parse_collection_filters(value: object) -> CollectionFilters:
         elif op == "type":
             if val_lower in {"animated", "gif"}:
                 is_animated = not negated
+            elif val_lower in {"motion", "moving"}:
+                target_flags = excluded_flags if negated else has_flags
+                if "motion" not in target_flags:
+                    target_flags.append("motion")
             elif val_lower in {"image", "video"}:
                 if negated:
                     if val_lower not in excluded_media_types:
@@ -310,6 +331,10 @@ def parse_collection_filters(value: object) -> CollectionFilters:
                 target_flags = excluded_flags if negated else has_flags
                 if "animated" not in target_flags:
                     target_flags.append("animated")
+            elif val_lower in {"motion", "moving"}:
+                target_flags = excluded_flags if negated else has_flags
+                if "motion" not in target_flags:
+                    target_flags.append("motion")
             else:
                 target_flags = excluded_flags if negated else has_flags
                 if val_lower not in target_flags:
@@ -336,6 +361,8 @@ def parse_collection_filters(value: object) -> CollectionFilters:
         excluded_domains=tuple(excluded_domains),
         sources=tuple(sources),
         excluded_sources=tuple(excluded_sources),
+        shelves=tuple(shelves),
+        excluded_shelves=tuple(excluded_shelves),
         media_type=media_type,
         excluded_media_types=tuple(excluded_media_types),
         is_animated=is_animated,
@@ -878,6 +905,28 @@ def _operator_filter_clauses(
             clauses.append("NOT (LOWER(COALESCE(item.domain, '')) LIKE ?)")
             parameters.append(f"%{ex_src}%")
 
+    if table_exists("shelves") and table_exists("media_shelf_items"):
+        for shelf_val in filters.shelves:
+            norm_val = shelf_val.strip().lower()
+            if not norm_val:
+                continue
+            under_val = re.sub(r"\s+", "_", norm_val)
+            clauses.append(
+                "EXISTS (SELECT 1 FROM media_shelf_items msi JOIN shelves s ON s.id = msi.shelf_id "
+                "WHERE msi.media_item_id = item.id AND (LOWER(s.name) = ? OR LOWER(REPLACE(s.name, ' ', '_')) = ? OR CAST(s.id AS TEXT) = ?))"
+            )
+            parameters.extend((norm_val, under_val, norm_val))
+        for ex_shelf in filters.excluded_shelves:
+            norm_val = ex_shelf.strip().lower()
+            if not norm_val:
+                continue
+            under_val = re.sub(r"\s+", "_", norm_val)
+            clauses.append(
+                "NOT EXISTS (SELECT 1 FROM media_shelf_items msi JOIN shelves s ON s.id = msi.shelf_id "
+                "WHERE msi.media_item_id = item.id AND (LOWER(s.name) = ? OR LOWER(REPLACE(s.name, ' ', '_')) = ? OR CAST(s.id AS TEXT) = ?))"
+            )
+            parameters.extend((norm_val, under_val, norm_val))
+
     if filters.media_type:
         clauses.append("item.media_type = ?")
         parameters.append(filters.media_type)
@@ -1012,6 +1061,12 @@ def _operator_filter_clauses(
             return "(" + " OR ".join(parts) + ")" if parts else "0"
         if flag in {"animated", "gif"}:
             return animated_sql
+        if flag in {"motion", "moving"}:
+            return f"(item.media_type = 'video' OR ({animated_sql}))"
+        if flag in {"shelf", "shelves"}:
+            if table_exists("media_shelf_items"):
+                return "EXISTS (SELECT 1 FROM media_shelf_items msi WHERE msi.media_item_id = item.id)"
+            return "0"
         return None
 
     for flag in filters.has_flags:

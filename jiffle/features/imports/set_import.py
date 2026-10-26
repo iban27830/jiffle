@@ -9,6 +9,7 @@ from jiffle.features.imports.history import create_import_history, update_import
 from jiffle.features.imports.source_adapters.contracts import SourceMedia, SourceSet
 from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
 from jiffle.features.imports.universal_import import run_universal_import_job
+from jiffle.features.shelves.workflow import parse_shelf_ids, resolve_shelf_summaries
 from jiffle.infrastructure.database.connection import connect_database
 
 
@@ -33,7 +34,12 @@ class _StaticProvider:
         return url == self.source.canonical_url
 
 
-def create_set_import_job(connection: sqlite3.Connection, submitted_url: str, provider) -> int:
+def create_set_import_job(
+    connection: sqlite3.Connection,
+    submitted_url: str,
+    provider,
+    shelf_ids: object = (),
+) -> int:
     active = connection.execute(
         "SELECT b.id FROM background_jobs b JOIN source_set_imports s ON s.job_id=b.id "
         "WHERE b.status IN ('pending','running') ORDER BY b.id DESC LIMIT 1"
@@ -45,11 +51,17 @@ def create_set_import_job(connection: sqlite3.Connection, submitted_url: str, pr
         "INSERT INTO background_jobs (job_type, status) VALUES ('source_set_import', 'pending')"
     )
     job_id = int(cursor.lastrowid)
+    parsed_shelves = parse_shelf_ids(shelf_ids)
     connection.execute(
-        "INSERT INTO source_set_imports (job_id, submitted_url, provider) VALUES (?, ?, ?)",
-        (job_id, submitted_url, provider_name),
+        "INSERT INTO source_set_imports (job_id, submitted_url, provider, shelf_ids_json) VALUES (?, ?, ?, ?)",
+        (job_id, submitted_url, provider_name, json.dumps(list(parsed_shelves))),
     )
-    create_import_history(connection, job_id, {"url": submitted_url, "provider": provider_name, "set": True})
+    history_details: dict[str, object] = {"url": submitted_url, "provider": provider_name, "set": True}
+    if parsed_shelves:
+        shelves_summary = resolve_shelf_summaries(connection, parsed_shelves)
+        if shelves_summary:
+            history_details["shelves"] = shelves_summary
+    create_import_history(connection, job_id, history_details)
     connection.commit()
     return job_id
 
@@ -291,9 +303,15 @@ def _create_child_job(connection, parent_id: int, submitted_url: str) -> int:
         (parent_id,),
     )
     child_id = int(cursor.lastrowid)
+    parent_row = connection.execute(
+        "SELECT shelf_ids_json FROM source_set_imports WHERE job_id=?",
+        (parent_id,),
+    ).fetchone()
+    shelf_ids_json = parent_row["shelf_ids_json"] if parent_row is not None else "[]"
     connection.execute(
-        "INSERT INTO import_candidates (job_id, source_path, original_name, status) VALUES (?, ?, ?, 'pending')",
-        (child_id, submitted_url, Path(submitted_url).name or "import"),
+        "INSERT INTO import_candidates (job_id, source_path, original_name, status, shelf_ids_json) "
+        "VALUES (?, ?, ?, 'pending', ?)",
+        (child_id, submitted_url, Path(submitted_url).name or "import", shelf_ids_json or "[]"),
     )
     return child_id
 

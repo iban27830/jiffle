@@ -14,6 +14,23 @@ function normalizeTagToken(raw) {
   return unquote(raw).replace(/\s+/g, '_');
 }
 
+export const ALLOWED_HAS_FLAGS = [
+  'parent',
+  'children',
+  'family',
+  'source',
+  'edited',
+  'animated',
+  'motion',
+  'moving',
+  'shelf',
+  'shelves',
+];
+
+function normalizeShelfToken(raw) {
+  return unquote(raw).replace(/\s+/g, '_');
+}
+
 export function parseLibrarySearch(value) {
   const terms = tokenizeSearch(value);
   const authors = [];
@@ -22,6 +39,8 @@ export function parseLibrarySearch(value) {
   const excludedDomains = [];
   const sources = [];
   const excludedSources = [];
+  const shelves = [];
+  const excludedShelves = [];
   const mediaIds = [];
   const excludedMediaIds = [];
   const parentIds = [];
@@ -41,10 +60,11 @@ export function parseLibrarySearch(value) {
     const authorMatch = term.match(/^(-?)author:(?:"([^"]*)"|(.*))$/i);
     const domainMatch = term.match(/^(-?)domain:(?:"([^"]*)"|(.*))$/i);
     const sourceMatch = term.match(/^(-?)source:(?:"([^"]*)"|(.*))$/i);
+    const shelfMatch = term.match(/^(-?)shelf:(?:"([^"]*)"|(.*))$/i);
     const idMatch = term.match(/^(-?)id:(\d+)$/i);
     const parentMatch = term.match(/^parent:(\d+)$/i);
-    const typeMatch = term.match(/^type:(image|video|animated|gif)$/i);
-    const flagMatch = term.match(/^(-?)(?:has:(parent|children|family|source|edited|animated)|is:(edited|animated))$/i);
+    const typeMatch = term.match(/^type:(image|video|animated|gif|motion|moving)$/i);
+    const flagMatch = term.match(/^(-?)(?:has:(parent|children|family|source|edited|animated|motion|moving|shelf|shelves)|is:(edited|animated|motion|moving))$/i);
     const orientationMatch = term.match(/^(?:orientation|ratio):(portrait|landscape|square)$/i);
     const dimMatch = term.match(/^(width|height):(>=|>|<=|<|=)?(\d+)$/i);
     const textMatch = term.match(/^text:(?:"([^"]*)"|(.*))$/i);
@@ -67,6 +87,12 @@ export function parseLibrarySearch(value) {
         if (sourceMatch[1] === '-') excludedSources.push(val);
         else sources.push(val);
       }
+    } else if (shelfMatch) {
+      const val = normalizeShelfToken(shelfMatch[2] ?? shelfMatch[3] ?? '');
+      if (val) {
+        if (shelfMatch[1] === '-') excludedShelves.push(val);
+        else shelves.push(val);
+      }
     } else if (idMatch) {
       const id = Number(idMatch[2]);
       if (idMatch[1] === '-') excludedMediaIds.push(id);
@@ -74,9 +100,11 @@ export function parseLibrarySearch(value) {
     } else if (parentMatch) {
       parentIds.push(parentMatch[1]);
     } else if (typeMatch) {
-      types.push(typeMatch[1].toLowerCase());
+      const t = typeMatch[1].toLowerCase();
+      types.push(t === 'moving' ? 'motion' : t);
     } else if (flagMatch) {
-      const flag = (flagMatch[2] || flagMatch[3]).toLowerCase();
+      const rawFlag = (flagMatch[2] || flagMatch[3]).toLowerCase();
+      const flag = rawFlag === 'shelves' ? 'shelf' : (rawFlag === 'moving' ? 'motion' : rawFlag);
       if (flagMatch[1] === '-') excludedFlags.push(flag);
       else hasFlags.push(flag);
     } else if (orientationMatch) {
@@ -114,6 +142,8 @@ export function parseLibrarySearch(value) {
     excludedDomains: excludedDomains.filter(Boolean),
     sources: sources.filter(Boolean),
     excludedSources: excludedSources.filter(Boolean),
+    shelves: shelves.filter(Boolean),
+    excludedShelves: excludedShelves.filter(Boolean),
     mediaIds,
     excludedMediaIds,
     parentIds,
@@ -135,6 +165,10 @@ export function withAuthorFilter(value, author) {
   return withFilter(value, 'author', author);
 }
 
+export function withShelfFilter(value, shelf) {
+  return withFilter(value, 'shelf', shelf ? String(shelf).trim().replace(/\s+/g, '_') : '');
+}
+
 function quote(value) {
   const clean = String(value ?? '').replaceAll('"', '').trim();
   return /\s/.test(clean) ? `"${clean}"` : clean;
@@ -142,7 +176,11 @@ function quote(value) {
 
 export function withFilter(value, kind, filterValue) {
   const prefix = `${kind}:`;
-  const retained = parseLibrarySearch(value).terms.filter(term => !term.toLowerCase().startsWith(prefix.toLowerCase()));
+  const negPrefix = `-${kind}:`;
+  const retained = parseLibrarySearch(value).terms.filter(term => {
+    const lower = term.toLowerCase();
+    return !lower.startsWith(prefix.toLowerCase()) && !lower.startsWith(negPrefix.toLowerCase());
+  });
   if (filterValue == null || String(filterValue).trim() === '') return retained.join(' ');
   return [...retained, `${prefix}${quote(filterValue)}`].join(' ');
 }
@@ -151,10 +189,11 @@ function canonicalTokenKey(rawToken) {
   const str = String(rawToken ?? '').trim();
   const negated = str.startsWith('-') && str.length > 1;
   const body = negated ? str.slice(1) : str;
-  const opMatch = body.match(/^(author|domain|source):(?:"([^"]*)"|(.*))$/i);
+  const opMatch = body.match(/^(author|domain|source|shelf|has|is):(?:"([^"]*)"|(.*))$/i);
   if (opMatch) {
     const op = opMatch[1].toLowerCase();
-    const val = (opMatch[2] ?? opMatch[3] ?? '').trim().toLowerCase();
+    const rawVal = unquote(opMatch[2] ?? opMatch[3] ?? '').toLowerCase();
+    const val = op === 'shelf' ? rawVal.replace(/\s+/g, '_') : (op === 'has' && rawVal === 'shelves' ? 'shelf' : rawVal);
     return {negated, key: `${op}:${val}`};
   }
   return {negated, key: normalizeTagToken(body).toLowerCase()};
@@ -164,10 +203,13 @@ function formatTokenForSearch(rawToken) {
   const str = String(rawToken ?? '').trim();
   const negated = str.startsWith('-') && str.length > 1;
   const body = negated ? str.slice(1) : str;
-  const opMatch = body.match(/^(author|domain|source):(?:"([^"]*)"|(.*))$/i);
+  const opMatch = body.match(/^(author|domain|source|shelf):(?:"([^"]*)"|(.*))$/i);
   if (opMatch) {
     const op = opMatch[1].toLowerCase();
-    const val = (opMatch[2] ?? opMatch[3] ?? '').trim();
+    const val = unquote(opMatch[2] ?? opMatch[3] ?? '');
+    if (op === 'shelf') {
+      return `${negated ? '-' : ''}shelf:${val.replace(/\s+/g, '_')}`;
+    }
     return `${negated ? '-' : ''}${op}:${quote(val)}`;
   }
   return str;

@@ -38,6 +38,11 @@ from jiffle.features.imports.source_adapters.contracts import SourceMedia, Sourc
 from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
 from jiffle.features.imports.source_adapters.reverse_search import reverse_preview_bytes
 from jiffle.features.imports.url_normalization import normalize_source_url
+from jiffle.features.shelves.workflow import (
+    assign_shelves_to_media,
+    parse_shelf_ids,
+    resolve_shelf_summaries,
+)
 from jiffle.infrastructure.database.connection import connect_database
 from jiffle.infrastructure.media_revisions import create_original_revision
 
@@ -387,6 +392,7 @@ def create_universal_import_job(
     submitted_input: str,
     input_kind: str,
     original_name: str | None = None,
+    shelf_ids: object = (),
 ) -> int:
     cursor = connection.execute(
         "INSERT INTO background_jobs (job_type, status) VALUES ('import_resolve', 'pending')"
@@ -397,12 +403,13 @@ def create_universal_import_job(
         if input_kind == "file"
         else (original_name or Path(submitted_input).name or "import")
     )
+    parsed_shelves = parse_shelf_ids(shelf_ids)
     connection.execute(
-        "INSERT INTO import_candidates (job_id, source_path, original_name, status) "
-        "VALUES (?, ?, ?, 'pending')",
-        (job_id, submitted_input, display_name),
+        "INSERT INTO import_candidates (job_id, source_path, original_name, status, shelf_ids_json) "
+        "VALUES (?, ?, ?, 'pending', ?)",
+        (job_id, submitted_input, display_name, json.dumps(list(parsed_shelves))),
     )
-    create_import_history(connection, job_id, {
+    history_payload: dict[str, object] = {
         "submitted_input": submitted_input,
         "input_kind": input_kind,
         "resolution_method": "pending",
@@ -412,7 +419,12 @@ def create_universal_import_job(
         "search_state": "no_result",
         "search_outcome": "no_result",
         "provider_diagnostics": [],
-    })
+    }
+    if parsed_shelves:
+        shelves_summary = resolve_shelf_summaries(connection, parsed_shelves)
+        if shelves_summary:
+            history_payload["shelves"] = shelves_summary
+    create_import_history(connection, job_id, history_payload)
     connection.commit()
     return job_id
 
@@ -2775,11 +2787,41 @@ def _progress(connection, job_id, percent: int, message: str | None = None) -> N
 def _finish(connection, job_id, result, details):
     _finalize_timing(details)
     payload = dict(result)
+    cand_row = connection.execute(
+        "SELECT shelf_ids_json FROM import_candidates WHERE job_id=?", (job_id,)
+    ).fetchone()
+    raw_shelf_ids = cand_row["shelf_ids_json"] if cand_row is not None else "[]"
+    media_id = payload.get("media_item_id")
+    if isinstance(media_id, int) and media_id > 0:
+        applied_shelves = assign_shelves_to_media(connection, media_id, raw_shelf_ids)
+    else:
+        applied_shelves = resolve_shelf_summaries(connection, raw_shelf_ids)
+        review_id = payload.get("review_item_id")
+        if isinstance(review_id, int) and review_id > 0 and payload.get("outcome") == "duplicate":
+            incoming_shelves = parse_shelf_ids(raw_shelf_ids)
+            if incoming_shelves:
+                target_row = connection.execute(
+                    "SELECT candidate.id, candidate.shelf_ids_json "
+                    "FROM review_items review JOIN import_candidates candidate "
+                    "ON candidate.id=review.import_candidate_id WHERE review.id=?",
+                    (review_id,),
+                ).fetchone()
+                if target_row is not None:
+                    existing_shelves = parse_shelf_ids(target_row["shelf_ids_json"])
+                    merged_shelves = tuple(dict.fromkeys((*existing_shelves, *incoming_shelves)))
+                    if merged_shelves != existing_shelves:
+                        connection.execute(
+                            "UPDATE import_candidates SET shelf_ids_json=? WHERE id=?",
+                            (json.dumps(list(merged_shelves)), int(target_row["id"])),
+                        )
+    if applied_shelves:
+        payload["shelves"] = applied_shelves
+        details["shelves"] = applied_shelves
     if details.get("resolution_method") and "resolution_method" not in payload:
         payload["resolution_method"] = details["resolution_method"]
     payload["resolution"] = details
     connection.execute("UPDATE background_jobs SET status='completed', progress=100, result_json=?, finished_at=CURRENT_TIMESTAMP WHERE id=?", (json.dumps(payload), job_id))
-    update_import_history(connection, job_id, result.get("outcome", "failed"), {**details, **result})
+    update_import_history(connection, job_id, result.get("outcome", "failed"), {**details, **payload})
     connection.commit()
 
 

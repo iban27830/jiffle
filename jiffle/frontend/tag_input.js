@@ -42,12 +42,12 @@ export function searchTokenSuggestionQuery(value, cursorIndex = undefined, minCh
   if (!rawToken || /^["']/.test(rawToken)) {
     return {prefix: '', negated: false};
   }
-  const opMatch = rawToken.match(/^([a-z]+):(.*)$/i);
+  const opMatch = rawToken.match(/^([a-z_]+):(.*)$/i);
   if (opMatch) {
     const op = opMatch[1].toLowerCase();
-    if (op === 'author' || op === 'source' || op === 'domain') {
+    if (op === 'author' || op === 'source' || op === 'domain' || op === 'shelf' || op === 'has') {
       const queryPart = opMatch[2].replace(/^["']+|["']+$/g, '').trim().toLowerCase();
-      if (queryPart.length >= 1) {
+      if ((op === 'shelf' || op === 'has') ? queryPart.length >= 0 : queryPart.length >= 1) {
         return {prefix: `${op}:${queryPart}`, negated};
       }
     }
@@ -58,18 +58,23 @@ export function searchTokenSuggestionQuery(value, cursorIndex = undefined, minCh
 }
 
 function formatSuggestedToken(selectedTag, negated) {
-  const raw = String(selectedTag ?? '').trim().replace(/^-+/, '');
-  const opMatch = raw.match(/^(author|source|domain):(.*)$/i);
+  const rawTag = String(selectedTag ?? '').trim();
+  const alreadyNegated = rawTag.startsWith('-');
+  const effectiveNegated = alreadyNegated || negated;
+  const raw = rawTag.replace(/^-+/, '');
+  const opMatch = raw.match(/^(author|source|domain|shelf|has|is):(.*)$/i);
   if (opMatch) {
     const op = opMatch[1].toLowerCase();
     const val = opMatch[2].trim().replace(/^"+|"+$/g, '').trim();
     if (!val) return '';
-    const formattedVal = op === 'author' && /\s/.test(val) ? `"${val}"` : val;
-    return `${negated ? '-' : ''}${op}:${formattedVal}`;
+    const formattedVal = op === 'shelf'
+      ? val.replace(/\s+/g, '_')
+      : (op === 'author' && /\s/.test(val) ? `"${val}"` : val);
+    return `${effectiveNegated ? '-' : ''}${op}:${formattedVal}`;
   }
   const tag = normalizeTagInput(raw);
   if (!tag) return '';
-  return `${negated ? '-' : ''}${tag}`;
+  return `${effectiveNegated ? '-' : ''}${tag}`;
 }
 
 export function applySearchTokenSuggestion(value, selectedTag, cursorIndex = undefined) {

@@ -33,6 +33,7 @@ from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailu
 from urllib.parse import urlsplit
 from uuid import uuid4
 from jiffle.features.imports.url_normalization import normalize_source_url
+from jiffle.features.shelves.workflow import parse_shelf_ids
 from jiffle.infrastructure.database.connection import get_database
 
 imports_blueprint = Blueprint("imports", __name__)
@@ -58,10 +59,17 @@ def create_import_resolve_job():
         *request.files.getlist("files"),
     ]
     inputs: list[tuple[str, str, str | None]] = []
+    shelf_ids: tuple[int, ...] = ()
     if uploaded_files:
         valid_files = [item for item in uploaded_files if item and item.filename]
         if not valid_files:
             return _error("import.invalid_request", "A file is required.", 400)
+        raw_form_shelves = (
+            request.form.getlist("shelf_ids")
+            or request.form.get("shelf_ids")
+            or request.form.get("shelf_id")
+        )
+        shelf_ids = parse_shelf_ids(raw_form_shelves)
         settings.resolved_import_staging_path.mkdir(parents=True, exist_ok=True)
         for uploaded in valid_files:
             raw_original_name = Path(uploaded.filename or "upload").name
@@ -74,6 +82,10 @@ def create_import_resolve_job():
         payload = request.get_json(silent=True)
         if not isinstance(payload, dict):
             return _error("import.invalid_request", "A file or URL is required.", 400)
+        raw_payload_shelves = (
+            payload.get("shelf_ids") if "shelf_ids" in payload else payload.get("shelf_id")
+        )
+        shelf_ids = parse_shelf_ids(raw_payload_shelves)
         raw_urls_field = payload.get("urls")
         if isinstance(raw_urls_field, list):
             if not raw_urls_field or any(not isinstance(item, str) for item in raw_urls_field):
@@ -107,7 +119,9 @@ def create_import_resolve_job():
                 provider, "can_handle_set", lambda _url: False
             )(submitted_input):
                 try:
-                    job_id = create_set_import_job(connection, submitted_input, provider)
+                    job_id = create_set_import_job(
+                        connection, submitted_input, provider, shelf_ids=shelf_ids
+                    )
                 except ActiveSetImportError as error:
                     return jsonify({
                         "error": {
@@ -132,7 +146,11 @@ def create_import_resolve_job():
                 job_ids.append(job_id)
                 continue
         job_id = create_universal_import_job(
-            connection, submitted_input, input_kind, original_name=original_name
+            connection,
+            submitted_input,
+            input_kind,
+            original_name=original_name,
+            shelf_ids=shelf_ids,
         )
         arguments = (
             settings.database_path,
@@ -177,7 +195,10 @@ def create_import_job():
             "import.invalid_request", "accept_without_source must be boolean.", 400
         )
 
-    command = LocalImportCommand(Path(source_path), accept_without_source)
+    shelf_ids = parse_shelf_ids(
+        payload.get("shelf_ids") if "shelf_ids" in payload else payload.get("shelf_id")
+    )
+    command = LocalImportCommand(Path(source_path), accept_without_source, shelf_ids=shelf_ids)
     job_id = create_local_import_job(get_database(), command)
     settings: Settings = current_app.config["JIFFLE_SETTINGS"]
     arguments = (settings.database_path, settings, job_id, command)
@@ -192,13 +213,18 @@ def create_upload_import_job():
     uploaded = request.files.get("file")
     if uploaded is None or not uploaded.filename:
         return _error("import.invalid_request", "A file is required.", 400)
+    shelf_ids = parse_shelf_ids(
+        request.form.getlist("shelf_ids")
+        or request.form.get("shelf_ids")
+        or request.form.get("shelf_id")
+    )
     settings: Settings = current_app.config["JIFFLE_SETTINGS"]
     settings.resolved_import_staging_path.mkdir(parents=True, exist_ok=True)
     target = _staged_upload_target(
         settings.resolved_import_staging_path, uploaded.filename
     )
     uploaded.save(target)
-    command = LocalImportCommand(source_path=target, accept_without_source=False)
+    command = LocalImportCommand(source_path=target, accept_without_source=False, shelf_ids=shelf_ids)
     job_id = create_local_import_job(get_database(), command)
     arguments = (settings.database_path, settings, job_id, command)
     if settings.run_jobs_inline:

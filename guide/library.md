@@ -11,16 +11,17 @@ Open **Library** and enter a query. Examples:
 | `portrait blue_eyes` | Items with both tags |
 | `portrait -comic` | Portraits without the comic tag |
 | `author:artist_name` / `-author:artist_name` | Include or exclude items attributed to an author |
+| `shelf:shelf_name` / `-shelf:shelf_name` | Include or exclude items on a personal shelf |
 | `source:e621` / `domain:e621.net` | Filter by source provider or domain (`-source:` / `-domain:` to exclude) |
 | `id:123` / `-id:123` | Include or exclude an exact library item ID |
 | `parent:123` | Find a parent post and its child posts by source post ID |
-| `type:image`, `type:video`, `type:animated` | Filter by media type or animated GIF/WebP |
-| `has:parent`, `has:children`, `has:family`, `has:source`, `is:edited`, `is:animated` | Filter by relationship or revision state (`-has:` / `-is:` to exclude) |
+| `type:image`, `type:video`, `type:animated`, `type:motion` | Filter by static image, video, animated GIF/WebP, or all moving media (video + animated) |
+| `has:parent`, `has:children`, `has:family`, `has:source`, `has:shelf`, `is:edited`, `is:animated` | Filter by relationship, shelf, or revision state (`-has:` / `-is:` to exclude) |
 | `orientation:portrait` (`landscape`, `square`) | Filter by aspect orientation |
 | `width:>=1920` `height:>=1080` | Filter by pixel dimensions (`>`, `>=`, `<`, `<=`, `=`) |
 | `text:keyword` | Match author, domain, source URL, or tag text |
 
-Tag aliases apply to searches and collection rules. Suggestions appear at the cursor position as you type in the search bar (including `-tag` exclusions, tag aliases, substring matches, and `author:`, `source:`, or `domain:` prefixes), and the clear button resets the query. Select a displayed tag or author to adjust the query. Clicking an author keeps your existing search terms. Use the media-type filter to separate images, videos, and animated GIFs, and use the sort menu (**Newest first**, **Oldest first**, **Highest resolution**, **Largest file**, **Least used in collections**, **Most used in collections**, or **Random**) to reorder results; library cards also show **Video** and **GIF** badges.
+Tag aliases apply to searches and collection rules. Suggestions appear at the cursor position as you type in the search bar (including `-tag` exclusions, tag aliases, substring matches, `shelf` / `has:shelf` / `-has:shelf`, and `author:`, `source:`, `domain:`, or `shelf:` prefixes), and tokens are highlighted inline inside the search box. Use the leading media-type icon in the search bar to filter by **All media**, **Static images**, **Videos**, **Animated / GIF**, or **Video + Animated (all moving)**, and the sort icon (**Newest first**, **Oldest first**, **Highest resolution**, **Largest file**, **Least used in collections**, **Most used in collections**, **By shelf**, or **Random**) to reorder results.
 
 ## Inspect an item
 
@@ -35,9 +36,16 @@ Select a thumbnail to open its details, and use the `←` and `→` arrow keys t
 
 An edit marker means the active version is not the original. You can restore a previous version in Editor without deleting the others.
 
-## Add personal tags
+## Add personal tags and shelves
 
 Type under **Add tag**. Suggestions appear after two characters. Select a suggestion or press Enter to create the tag. Personal tags have an **×** to remove them; source-provided tags are read-only.
+
+Use **Shelves** to group media by your own themes with a custom color, independent of source tags:
+
+- In the details panel, assign or remove shelves, change a shelf's color, or type a name and select **+** to create a new shelf.
+- On gallery cards, colored dots indicate assigned shelves (hover a dot to see the shelf name).
+- Tick cards in the gallery (or use the select-page icon button next to the search bar) and use the **Shelf** combo field (**+** / **−**) to add or remove a shelf across all selected items at once.
+- Filter by shelf in the search bar (`shelf:name`, `-shelf:name`, `has:shelf`, `-has:shelf`), sort by **By shelf**, or delete a shelf everywhere using **×** next to its name.
 
 ## Parents, relatives, and duplicates
 

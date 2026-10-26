@@ -8,6 +8,7 @@ from jiffle.features.library.domain import (
     MediaItem,
     MediaType,
 )
+from jiffle.features.shelves.workflow import get_shelves_for_media_ids
 from jiffle.infrastructure.media_revisions import active_edit_operations
 
 
@@ -61,6 +62,15 @@ class SqliteLibraryRepository:
         if sort_key == "most_used":
             if self._table_exists("collection_items"):
                 return "(SELECT COUNT(*) FROM collection_items ci WHERE ci.media_item_id = item.id) DESC, item.id DESC"
+            return "item.id DESC"
+        if sort_key == "shelf":
+            if self._table_exists("shelves") and self._table_exists("media_shelf_items"):
+                return (
+                    "CASE WHEN EXISTS (SELECT 1 FROM media_shelf_items msi WHERE msi.media_item_id = item.id) THEN 0 ELSE 1 END ASC, "
+                    "(SELECT MIN(s.sort_order) FROM media_shelf_items msi JOIN shelves s ON s.id = msi.shelf_id WHERE msi.media_item_id = item.id) ASC, "
+                    "(SELECT LOWER(MIN(s.name)) FROM media_shelf_items msi JOIN shelves s ON s.id = msi.shelf_id WHERE msi.media_item_id = item.id) ASC, "
+                    "item.id DESC"
+                )
             return "item.id DESC"
         return "item.id DESC"
 
@@ -213,6 +223,10 @@ class SqliteLibraryRepository:
                         str(rev_row[1])
                     )
 
+        shelves_by_media: dict[int, tuple[dict[str, object], ...]] = {}
+        if self._table_exists("shelves") and self._table_exists("media_shelf_items"):
+            shelves_by_media = get_shelves_for_media_ids(self.connection, media_ids)
+
         items: list[MediaItem] = []
         for row in rows:
             item_id = int(row["id"])
@@ -318,6 +332,7 @@ class SqliteLibraryRepository:
                     fragment_count=fragment_count,
                     auto_collection_excluded=fragment_count > 0,
                     is_animated=bool(is_animated) if is_animated is not None else None,
+                    shelves=shelves_by_media.get(item_id, ()),
                 )
             )
         return tuple(items)
@@ -491,6 +506,43 @@ def _build_filter(
             clauses.append("NOT (LOWER(COALESCE(item.domain, '')) LIKE ?)")
             parameters.append(f"%{cleaned}%")
 
+    has_shelf_tables = _table_exists(connection, "shelves") and _table_exists(
+        connection, "media_shelf_items"
+    )
+    for shelf_val in query.shelves:
+        norm_val = shelf_val.strip().lower()
+        if not norm_val:
+            continue
+        if has_shelf_tables:
+            underscore_val = re.sub(r"\s+", "_", norm_val)
+            clauses.append(
+                "EXISTS ("
+                "SELECT 1 FROM media_shelf_items msi "
+                "JOIN shelves s ON s.id = msi.shelf_id "
+                "WHERE msi.media_item_id = item.id "
+                "AND (LOWER(s.name) = ? OR LOWER(REPLACE(s.name, ' ', '_')) = ? OR CAST(s.id AS TEXT) = ?)"
+                ")"
+            )
+            parameters.extend((norm_val, underscore_val, norm_val))
+        else:
+            clauses.append("0")
+
+    for ex_shelf in query.exclude_shelves:
+        norm_val = ex_shelf.strip().lower()
+        if not norm_val:
+            continue
+        if has_shelf_tables:
+            underscore_val = re.sub(r"\s+", "_", norm_val)
+            clauses.append(
+                "NOT EXISTS ("
+                "SELECT 1 FROM media_shelf_items msi "
+                "JOIN shelves s ON s.id = msi.shelf_id "
+                "WHERE msi.media_item_id = item.id "
+                "AND (LOWER(s.name) = ? OR LOWER(REPLACE(s.name, ' ', '_')) = ? OR CAST(s.id AS TEXT) = ?)"
+                ")"
+            )
+            parameters.extend((norm_val, underscore_val, norm_val))
+
     if query.media_type:
         clauses.append("item.media_type = ?")
         parameters.append(query.media_type.value)
@@ -549,6 +601,7 @@ def _build_filter(
         if has_is_animated_col
         else gif_sql
     )
+    motion_sql = f"(item.media_type = 'video' OR ({animated_sql}))"
 
     if query.is_animated is True:
         clauses.append(animated_sql)
@@ -559,6 +612,11 @@ def _build_filter(
             )
         else:
             clauses.append(f"NOT ({gif_sql})")
+
+    if query.is_motion is True:
+        clauses.append(motion_sql)
+    elif query.is_motion is False:
+        clauses.append(f"NOT ({motion_sql})")
 
     def flag_expression(flag_name: str) -> str | None:
         flag = flag_name.strip().lower()
@@ -628,6 +686,12 @@ def _build_filter(
             return "(" + " OR ".join(parts) + ")" if parts else "0"
         if flag in {"animated", "gif"}:
             return animated_sql
+        if flag in {"motion", "moving"}:
+            return f"(item.media_type = 'video' OR {animated_sql})"
+        if flag in {"shelf", "shelves"}:
+            if _table_exists(connection, "media_shelf_items"):
+                return "EXISTS (SELECT 1 FROM media_shelf_items msi WHERE msi.media_item_id = item.id)"
+            return "0"
         return None
 
     for flag in query.has_flags:

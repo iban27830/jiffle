@@ -38,6 +38,38 @@ let selectedMedia = null;
 let includeTag = ''; let excludeTag = '';
 let librarySearch = '';
 let reloadLibrary = null;
+let shelvesCatalog = [];
+let shelfPalette = ['#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#6366f1', '#84cc16', '#f97316'];
+const shelfToken = shelfOrName => String(shelfOrName?.token || shelfOrName?.name || shelfOrName || '').trim().replace(/\s+/g, '_');
+const nextDefaultShelfColor = () => shelfPalette[shelvesCatalog.length % shelfPalette.length] || '#0ea5e9';
+async function loadShelvesCatalog() {
+  try {
+    const res = await api('/api/v1/shelves');
+    if (Array.isArray(res?.items)) shelvesCatalog = res.items;
+    if (Array.isArray(res?.palette) && res.palette.length) shelfPalette = res.palette;
+  } catch {}
+  return shelvesCatalog;
+}
+function shelfDotsHtml(shelves) {
+  const list = Array.isArray(shelves) ? shelves.filter(s => s && s.name) : [];
+  if (!list.length) return '';
+  return `<span class="shelf-dots">${list.map(s => `<span class="shelf-dot" style="--shelf-color:${esc(s.color)}" title="${esc('Shelf: ' + s.name)}"></span>`).join('')}</span>`;
+}
+function openShelfInLibrary(tokenOrShelf) {
+  const token = shelfToken(tokenOrShelf);
+  if (!token) return;
+  const query = `shelf:${token}`;
+  const href = `#library?q=${encodeURIComponent(query)}`;
+  if (libraryPrefs().openLibraryInNewTab) {
+    window.open(href, '_blank', 'noopener');
+  } else {
+    selectedMedia = null;
+    librarySearch = query;
+    libraryOffset = 0;
+    saveViewState('library', {search: librarySearch, offset: 0, mediaType: '', selectedMediaId: null, scrollTop: 0, galleryScrollTop: 0});
+    navigate(`library?q=${encodeURIComponent(query)}`);
+  }
+}
 let monitoredCropJob = null;
 let monitoredBackgroundJob = null;
 let monitoredSetJob = null;
@@ -423,12 +455,316 @@ function setHeader(name, detail = '', controls = '') {
   icons();
 }
 
-function activeFiltersHtml() {
-  return parseLibrarySearch(librarySearch).terms.map(term => {
-    const excluded = term.startsWith('-');
-    const value = excluded ? term.slice(1) : term;
-    return `<span class="filter-chip${excluded ? ' excluded' : ''}">${excluded ? 'Not: ' : ''}${esc(value)}<button type="button" data-remove-term="${esc(term)}" title="Remove filter"><i data-lucide="x"></i></button></span>`;
-  }).join('');
+function findShelfByName(rawName) {
+  const trimmed = String(rawName ?? '').trim().replace(/^"+|"+$/g, '').trim();
+  if (!trimmed) return null;
+  const lower = trimmed.toLowerCase();
+  const slug = lower.replace(/\s+/g, '_');
+  return shelvesCatalog.find(s => {
+    const nameLower = String(s.name || '').trim().toLowerCase();
+    const tokLower = shelfToken(s).toLowerCase();
+    return nameLower === lower || tokLower === lower || tokLower === slug;
+  }) || null;
+}
+
+function highlightSearchTokensHtml(value) {
+  const text = String(value ?? '');
+  if (!text) return '';
+  const tokenRe = /(?:[^\s"]+|"[^"]*")+/g;
+  let out = '';
+  let lastIndex = 0;
+  for (const match of text.matchAll(tokenRe)) {
+    if (match.index > lastIndex) out += esc(text.slice(lastIndex, match.index));
+    const token = match[0];
+    let kindClass = 'is-tag';
+    let styleAttr = '';
+    if (token.startsWith('-') && token.length > 1) {
+      kindClass = 'is-excluded';
+    } else if (/^shelf:/i.test(token)) {
+      kindClass = 'is-shelf';
+      const rawShelf = token.slice(6).replace(/^"+|"+$/g, '').trim();
+      const matched = findShelfByName(rawShelf);
+      const color = matched?.color || '#0ea5e9';
+      styleAttr = ` style="--shelf-color:${esc(color)}"`;
+    } else if (/^(author|domain|source|id|parent|type|has|is|orientation|ratio|width|height|text):/i.test(token)) {
+      kindClass = 'is-operator';
+    }
+    out += `<mark class="search-hl-token ${kindClass}"${styleAttr}>${esc(token)}</mark>`;
+    lastIndex = match.index + token.length;
+  }
+  if (lastIndex < text.length) out += esc(text.slice(lastIndex));
+  return out;
+}
+
+function renderSearchBackdrop(inputNode, backdropNode) {
+  if (!inputNode || !backdropNode) return;
+  backdropNode.innerHTML = highlightSearchTokensHtml(inputNode.value);
+  backdropNode.scrollLeft = inputNode.scrollLeft;
+}
+
+function bindSearchBackdrop(inputNode, backdropNode) {
+  if (!inputNode || !backdropNode) return;
+  const sync = () => renderSearchBackdrop(inputNode, backdropNode);
+  inputNode.addEventListener('input', sync);
+  inputNode.addEventListener('scroll', () => { backdropNode.scrollLeft = inputNode.scrollLeft; });
+  sync();
+}
+
+function shelfComboHtml({idPrefix, placeholder = 'Shelf...', value = '', color = '', title = 'Select an existing shelf or type a new name', actionsHtml = ''}) {
+  const initialColor = color || nextDefaultShelfColor();
+  const hasActions = Boolean(actionsHtml);
+  return `<div id="${idPrefix}Combo" class="shelf-combo${hasActions ? ' has-inline-actions' : ''}"><label class="shelf-combo-color" title="Shelf color (click to change)"><span id="${idPrefix}ColorDot" class="shelf-dot-inline" style="--shelf-color:${esc(initialColor)}"></span><input id="${idPrefix}Color" type="color" class="shelf-color-input" value="${esc(initialColor)}"></label><input id="${idPrefix}Input" type="text" class="control shelf-combo-input" placeholder="${esc(placeholder)}" value="${esc(value)}" maxlength="80" autocomplete="off" spellcheck="false" title="${esc(title)}">${hasActions ? `<div class="shelf-combo-actions">${actionsHtml}</div>` : ''}<div id="${idPrefix}Suggest" class="tag-suggest shelf-combo-suggest" hidden></div></div>`;
+}
+
+async function resolveOrCreateShelf(rawName, color) {
+  const name = String(rawName ?? '').trim();
+  if (!name) return null;
+  const existing = findShelfByName(name);
+  if (existing) return {shelf: existing, created: false};
+  const res = await api('/api/v1/shelves', {
+    method: 'POST',
+    body: JSON.stringify({name, color: color || nextDefaultShelfColor()}),
+  });
+  await loadShelvesCatalog();
+  const resolved = shelvesCatalog.find(s => Number(s.id) === Number(res.shelf.id)) || res.shelf;
+  return {shelf: resolved, created: Boolean(res.created)};
+}
+
+async function confirmAndDeleteShelf(shelfId, shelfName, onAfterDelete) {
+  if (!confirm(`Delete shelf "${shelfName}" and remove it from all media items?`)) return false;
+  try {
+    await api(`/api/v1/shelves/${shelfId}`, {method: 'DELETE'});
+    await loadShelvesCatalog();
+    if (selectedMedia && Array.isArray(selectedMedia.shelves)) {
+      selectedMedia.shelves = selectedMedia.shelves.filter(s => Number(s.id) !== Number(shelfId));
+      renderShelvesSection(selectedMedia);
+      updateCardShelfDotsInDom(selectedMedia.id, selectedMedia.shelves);
+    }
+    document.querySelectorAll('#gallery .media-card').forEach(card => {
+      card.querySelectorAll('.shelf-dot').forEach(d => {
+        if (d.title === `Shelf: ${shelfName}`) d.remove();
+      });
+      const dotsWrap = card.querySelector('.shelf-dots');
+      if (dotsWrap && !dotsWrap.children.length) dotsWrap.remove();
+    });
+    if (currentView === 'library') reloadLibrary?.();
+    syncLibraryShelfSelects?.();
+    onAfterDelete?.();
+    toast(`Deleted shelf: ${shelfName}`);
+    return true;
+  } catch (error) {
+    toast(error.message, true);
+    return false;
+  }
+}
+
+function attachShelfCombo(comboNode, options = {}) {
+  if (!comboNode) return null;
+  const dotNode = comboNode.querySelector('.shelf-dot-inline');
+  const colorInput = comboNode.querySelector('.shelf-color-input');
+  const textInput = comboNode.querySelector('.shelf-combo-input');
+  const input = textInput;
+  const suggestNode = comboNode.querySelector('.shelf-combo-suggest');
+  let items = [];
+  let active = -1;
+
+  const close = () => {
+    if (!suggestNode) return;
+    suggestNode.hidden = true;
+    suggestNode.innerHTML = '';
+    items = [];
+    active = -1;
+  };
+
+  const syncColor = () => {
+    const matched = findShelfByName(textInput.value);
+    if (matched) {
+      colorInput.value = matched.color;
+      dotNode?.style.setProperty('--shelf-color', matched.color);
+      if (dotNode) dotNode.title = `Shelf: ${matched.name}`;
+    } else {
+      if (!colorInput.dataset.userTouched) colorInput.value = nextDefaultShelfColor();
+      dotNode?.style.setProperty('--shelf-color', colorInput.value);
+      if (dotNode) dotNode.title = 'New shelf color';
+    }
+    options.onChange?.({shelf: matched, name: textInput.value.trim(), color: colorInput.value});
+    return matched;
+  };
+
+  const pickItem = item => {
+    close();
+    textInput.value = item.name;
+    if (item.shelf) delete colorInput.dataset.userTouched;
+    syncColor();
+    options.onPick?.({shelf: item.shelf, name: item.name, color: colorInput.value, isCreateOption: item.type === 'create'});
+  };
+
+  const renderList = () => {
+    if (!items.length) { close(); return; }
+    suggestNode.innerHTML = items.map((item, index) => {
+      if (item.type === 'create') {
+        return `<button type="button" class="tag-suggest-item shelf-create-option${index === active ? ' active' : ''}" data-create-shelf="${esc(item.name)}"><span><span class="shelf-dot-inline" style="--shelf-color:${esc(item.color)}"></span>+ Create "${esc(item.name)}"</span><small>new</small></button>`;
+      }
+      const s = item.shelf;
+      return `<div class="tag-suggest-item shelf-suggest-row${index === active ? ' active' : ''}" data-shelf-id="${s.id}" data-shelf-name="${esc(s.name)}">
+        <button type="button" class="shelf-suggest-pick" data-pick-shelf-index="${index}">
+          <span class="shelf-dot-inline" style="--shelf-color:${esc(s.color)}"></span>
+          <span>${esc(s.name)}</span>
+        </button>
+        <span class="shelf-suggest-meta">
+          <small>${Number(s.item_count || 0)}</small>
+          <button type="button" class="shelf-delete-btn" data-delete-shelf-id="${s.id}" data-delete-shelf-name="${esc(s.name)}" title="Delete shelf and remove from all media">
+            <i data-lucide="x"></i>
+          </button>
+        </span>
+      </div>`;
+    }).join('');
+    suggestNode.hidden = false;
+    icons();
+    suggestNode.querySelectorAll('.tag-suggest-item').forEach((node, index) => {
+      node.onmousedown = event => {
+        if (event.target.closest('.shelf-delete-btn')) return;
+        event.preventDefault();
+        pickItem(items[index]);
+      };
+    });
+    suggestNode.querySelectorAll('.shelf-suggest-pick').forEach(btn => {
+      btn.onclick = event => {
+        event.preventDefault();
+        const idx = Number(btn.dataset.pickShelfIndex);
+        if (items[idx]) pickItem(items[idx]);
+      };
+    });
+    suggestNode.querySelectorAll('.shelf-delete-btn').forEach(btn => {
+      btn.onmousedown = event => {
+        event.preventDefault();
+        event.stopPropagation();
+      };
+      btn.onclick = event => {
+        event.preventDefault();
+        event.stopPropagation();
+        const s = {id: Number(btn.dataset.deleteShelfId), name: btn.dataset.deleteShelfName};
+        confirmAndDeleteShelf(s.id, s.name, () => {
+          if (input.value.trim().toLowerCase() === s.name.toLowerCase()) input.value = '';
+          syncColor();
+          renderItems();
+        });
+      };
+    });
+  };
+
+  const buildItems = (filterByTyped = true) => {
+    const typed = textInput.value.trim();
+    const typedLower = typed.toLowerCase();
+    const typedSlug = typedLower.replace(/\s+/g, '_');
+    const excludeIds = options.getExcludeIds?.() || null;
+    const matchedExact = findShelfByName(typed);
+    const available = shelvesCatalog.filter(s => !excludeIds || !excludeIds.has(Number(s.id)));
+    const filtered = (filterByTyped && typed)
+      ? available.filter(s => String(s.name || '').toLowerCase().includes(typedLower) || shelfToken(s).toLowerCase().includes(typedSlug))
+      : available;
+    items = filtered.map(s => ({
+      type: 'shelf',
+      shelf: s,
+      name: s.name,
+      color: s.color,
+      count: Number(s.item_count || 0),
+    }));
+    if (typed && !matchedExact) {
+      items.push({
+        type: 'create',
+        shelf: null,
+        name: typed,
+        color: colorInput.value || nextDefaultShelfColor(),
+      });
+    }
+    if (active >= items.length) active = -1;
+    renderList();
+  };
+  const renderItems = () => buildItems(false);
+
+  colorInput.onclick = event => event.stopPropagation();
+  colorInput.oninput = event => {
+    event.stopPropagation();
+    colorInput.dataset.userTouched = '1';
+    dotNode?.style.setProperty('--shelf-color', colorInput.value);
+    if (!suggestNode.hidden) buildItems(true);
+  };
+  colorInput.onchange = async event => {
+    event.stopPropagation();
+    const matched = findShelfByName(textInput.value);
+    if (matched) {
+      try {
+        const res = await api(`/api/v1/shelves/${matched.id}`, {method: 'PATCH', body: JSON.stringify({color: colorInput.value})});
+        await loadShelvesCatalog();
+        delete colorInput.dataset.userTouched;
+        syncColor();
+        document.querySelectorAll('#gallery .media-card').forEach(card => {
+          card.querySelectorAll('.shelf-dot').forEach(d => {
+            if (d.title === `Shelf: ${res.shelf.name}`) d.style.setProperty('--shelf-color', res.shelf.color);
+          });
+        });
+        if (selectedMedia && Array.isArray(selectedMedia.shelves)) {
+          selectedMedia.shelves = selectedMedia.shelves.map(s => Number(s.id) === Number(matched.id) ? {...s, color: res.shelf.color} : s);
+          renderShelvesSection(selectedMedia);
+          updateCardShelfDotsInDom(selectedMedia.id, selectedMedia.shelves);
+        }
+        syncLibraryShelfSelects?.();
+        renderSearchBackdrop(document.querySelector('#search'), document.querySelector('#searchBackdrop'));
+        toast(`Updated color for ${res.shelf.name}`);
+      } catch (error) { toast(error.message, true); }
+    }
+    options.onColorChange?.({shelf: matched, color: colorInput.value});
+  };
+
+  textInput.onfocus = () => buildItems(false);
+  textInput.onclick = () => { if (suggestNode.hidden) buildItems(false); };
+  textInput.oninput = () => {
+    syncColor();
+    active = -1;
+    buildItems(true);
+  };
+  textInput.onkeydown = event => {
+    if (event.key === 'ArrowDown' && items.length) {
+      event.preventDefault();
+      active = (active + 1) % items.length;
+      renderList();
+    } else if (event.key === 'ArrowUp' && items.length) {
+      event.preventDefault();
+      active = (active - 1 + items.length) % items.length;
+      renderList();
+    } else if (event.key === 'Escape' && !suggestNode.hidden) {
+      event.preventDefault();
+      close();
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      event.stopPropagation();
+      if (active >= 0 && items[active]) {
+        pickItem(items[active]);
+      } else {
+        close();
+        const matched = syncColor();
+        options.onSubmit?.({shelf: matched, name: textInput.value.trim(), color: colorInput.value});
+      }
+    }
+  };
+  textInput.onblur = () => setTimeout(close, 140);
+
+  syncColor();
+  return {
+    syncColor,
+    getName: () => textInput.value.trim(),
+    setName: val => {
+      textInput.value = val ?? '';
+      delete colorInput.dataset.userTouched;
+      return syncColor();
+    },
+    getColor: () => colorInput.value,
+    getShelf: () => findShelfByName(textInput.value),
+    input: textInput,
+    colorInput,
+    close,
+  };
 }
 
 function tagHtml(tag, manual = false) {
@@ -461,6 +797,7 @@ function applyAuthorFilter(author) {
   if (!input) return;
   librarySearch = withAuthorFilter(input.value.trim(), author);
   input.value = librarySearch;
+  renderSearchBackdrop(input, document.querySelector('#searchBackdrop'));
   libraryOffset = 0;
   if (reloadLibrary) reloadLibrary(); else showLibrary();
 }
@@ -470,12 +807,130 @@ function appendSearchTerm(term) {
   if (!input) return;
   librarySearch = toggleSearchTerm(input.value.trim(), term);
   input.value = librarySearch;
+  renderSearchBackdrop(input, document.querySelector('#searchBackdrop'));
   libraryOffset = 0;
   if (reloadLibrary) reloadLibrary(); else showLibrary();
 }
 
-function bindLibraryFilters(load) {
-  document.querySelectorAll('[data-remove-term]').forEach(node => node.onclick = () => appendSearchTerm(node.dataset.removeTerm));
+function shelvesSectionHtml(media) {
+  const mediaShelves = Array.isArray(media.shelves) ? media.shelves : [];
+  const parsed = parseLibrarySearch(librarySearch);
+  const chips = mediaShelves.length
+    ? mediaShelves.map(s => {
+      const token = shelfToken(s);
+      const tokenLower = token.toLowerCase();
+      const nameLower = String(s.name || '').toLowerCase();
+      const included = parsed.shelves.some(val => val.toLowerCase() === tokenLower || val.toLowerCase() === nameLower);
+      const excluded = parsed.excludedShelves.some(val => val.toLowerCase() === tokenLower || val.toLowerCase() === nameLower);
+      const state = included ? ' included' : excluded ? ' excluded' : '';
+      return `<span class="tag tag-filter shelf-chip${state}" style="--shelf-color:${esc(s.color)}" data-shelf-token="${esc(token)}" data-shelf-id="${s.id}" role="button" tabindex="0" title="${esc(`Filter by shelf:${token} (Shift+click to exclude)`)}"><label class="shelf-chip-color" title="Change shelf color"><span class="shelf-dot-inline" style="--shelf-color:${esc(s.color)}"></span><input type="color" class="shelf-chip-color-picker" data-patch-shelf-color="${s.id}" value="${esc(s.color)}"></label><span class="shelf-chip-name">${esc(s.name)}</span><button type="button" class="tag-remove shelf-chip-remove" data-remove-media-shelf="${s.id}" title="Remove from shelf"><i data-lucide="x"></i></button></span>`;
+    }).join('')
+    : '<span class="muted-value">No shelves</span>';
+  return `<div class="field shelves-section"><label title="Personal shelves with custom colors">Shelves</label><div class="tags shelf-chips">${chips}</div><div class="shelf-inspector-controls"><div class="shelf-inspector-row">${shelfComboHtml({idPrefix: 'inspectorShelf', placeholder: 'Shelf...', title: 'Select an existing shelf or type a new name'})}<button id="inspectorAddShelfBtn" type="button" class="icon-btn" title="Add to shelf (creates shelf if new)"><i data-lucide="plus"></i></button></div></div></div>`;
+}
+
+function updateCardShelfDotsInDom(mediaId, shelves) {
+  const cardPreview = document.querySelector(`.media-card[data-id="${mediaId}"] .media-card-preview`);
+  if (!cardPreview) return;
+  cardPreview.querySelector('.shelf-dots')?.remove();
+  const dotsHtml = shelfDotsHtml(shelves);
+  if (dotsHtml) cardPreview.insertAdjacentHTML('beforeend', dotsHtml);
+}
+
+let syncLibraryShelfSelects = null;
+
+function renderShelvesSection(media) {
+  const pane = document.querySelector('#inspector');
+  const section = pane?.querySelector('.shelves-section');
+  if (!pane || !section) return;
+  section.outerHTML = shelvesSectionHtml(media);
+  bindShelvesSection(pane, media);
+  icons();
+}
+
+function bindShelvesSection(pane, media) {
+  if (!pane || !media) return;
+  pane.querySelectorAll('[data-shelf-token]').forEach(chip => {
+    chip.onclick = event => {
+      if (event.target.closest('.shelf-chip-color') || event.target.closest('[data-remove-media-shelf]')) return;
+      const token = chip.dataset.shelfToken;
+      appendSearchTerm(event.shiftKey ? `-shelf:${token}` : `shelf:${token}`);
+    };
+    chip.onkeydown = event => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        if (event.target.closest('.shelf-chip-color') || event.target.closest('[data-remove-media-shelf]')) return;
+        event.preventDefault();
+        appendSearchTerm(`shelf:${chip.dataset.shelfToken}`);
+      }
+    };
+  });
+  pane.querySelectorAll('.shelf-chip-color').forEach(label => {
+    label.onclick = event => event.stopPropagation();
+  });
+  pane.querySelectorAll('[data-patch-shelf-color]').forEach(picker => {
+    picker.onchange = async event => {
+      event.stopPropagation();
+      const shelfId = Number(picker.dataset.patchShelfColor);
+      const color = event.target.value;
+      try {
+        const res = await api(`/api/v1/shelves/${shelfId}`, {method: 'PATCH', body: JSON.stringify({color})});
+        await loadShelvesCatalog();
+        if (selectedMedia && Number(selectedMedia.id) === Number(media.id)) {
+          selectedMedia.shelves = (selectedMedia.shelves || []).map(s => Number(s.id) === shelfId ? {...s, color: res.shelf.color} : s);
+          renderShelvesSection(selectedMedia);
+          updateCardShelfDotsInDom(selectedMedia.id, selectedMedia.shelves);
+        }
+        syncLibraryShelfSelects?.();
+        renderSearchBackdrop(document.querySelector('#search'), document.querySelector('#searchBackdrop'));
+        toast(`Updated color for ${res.shelf.name}`);
+      } catch (error) { toast(error.message, true); }
+    };
+  });
+  pane.querySelectorAll('[data-remove-media-shelf]').forEach(btn => {
+    btn.onclick = async event => {
+      event.stopPropagation();
+      const shelfId = Number(btn.dataset.removeMediaShelf);
+      try {
+        const res = await api('/api/v1/shelves/items', {method: 'POST', body: JSON.stringify({media_ids: [media.id], shelf_ids: [shelfId], action: 'remove'})});
+        if (Array.isArray(res.shelves)) shelvesCatalog = res.shelves;
+        const updatedShelves = res.media_shelves?.[String(media.id)] || [];
+        if (selectedMedia && Number(selectedMedia.id) === Number(media.id)) {
+          selectedMedia.shelves = updatedShelves;
+          renderShelvesSection(selectedMedia);
+        }
+        updateCardShelfDotsInDom(media.id, updatedShelves);
+        syncLibraryShelfSelects?.();
+        toast('Removed from shelf');
+      } catch (error) { toast(error.message, true); }
+    };
+  });
+  const assignedIds = new Set((media.shelves || []).map(s => Number(s.id)));
+  const assignInspectorShelf = async () => {
+    const name = inspectorCombo?.getName() || '';
+    if (!name) { toast('Enter or select a shelf', true); inspectorCombo?.input.focus(); return; }
+    const color = inspectorCombo?.getColor() || nextDefaultShelfColor();
+    try {
+      const resolved = await resolveOrCreateShelf(name, color);
+      if (!resolved?.shelf) return;
+      const res = await api('/api/v1/shelves/items', {method: 'POST', body: JSON.stringify({media_ids: [media.id], shelf_ids: [resolved.shelf.id], action: 'add'})});
+      if (Array.isArray(res.shelves)) shelvesCatalog = res.shelves;
+      const updatedShelves = res.media_shelves?.[String(media.id)] || [];
+      if (selectedMedia && Number(selectedMedia.id) === Number(media.id)) {
+        selectedMedia.shelves = updatedShelves;
+        renderShelvesSection(selectedMedia);
+      }
+      updateCardShelfDotsInDom(media.id, updatedShelves);
+      syncLibraryShelfSelects?.();
+      toast(`Assigned to shelf: ${resolved.shelf.name}`);
+    } catch (error) { toast(error.message, true); }
+  };
+  const inspectorCombo = attachShelfCombo(pane.querySelector('#inspectorShelfCombo'), {
+    getExcludeIds: () => assignedIds,
+    onPick: () => assignInspectorShelf(),
+    onSubmit: () => assignInspectorShelf(),
+  });
+  const addBtn = pane.querySelector('#inspectorAddShelfBtn');
+  if (addBtn) addBtn.onclick = assignInspectorShelf;
 }
 
 function tagsSectionHtml(media) {
@@ -606,10 +1061,17 @@ function attachSearchAutocomplete(input, suggest, onPick) {
     if (!items.length) { close(); return; }
     const {negated} = searchTokenSuggestionQuery(input.value, input.selectionStart);
     suggest.innerHTML = items.map((item, index) => {
+      const dot = item.kind === 'shelf' && item.color
+        ? `<span class="shelf-dot-inline" style="--shelf-color:${esc(item.color)}"></span>`
+        : '';
+      const alreadyNeg = String(item.tag || '').startsWith('-');
+      const prefixNeg = (negated && !alreadyNeg) ? '-' : '';
       const label = item.matched_alias
         ? `${escapeHtml(item.tag)} <span class="muted">← ${escapeHtml(item.matched_alias)} (${Number(item.count || 0)})</span>`
-        : escapeHtml(item.tag);
-      return `<button type="button" class="tag-suggest-item${index === active ? ' active' : ''}" data-tag="${escapeHtml(item.tag)}" data-tag-suggest="${escapeHtml(item.tag)}"><span>${negated ? '-' : ''}${label}</span><small>${item.count}</small></button>`;
+        : (item.kind === 'shelf' || item.kind === 'shelf_flag') && item.name && item.name !== String(item.tag).replace(/^shelf:/i, '')
+          ? `${escapeHtml(item.tag)} <span class="muted">(${escapeHtml(item.name)})</span>`
+          : escapeHtml(item.tag);
+      return `<button type="button" class="tag-suggest-item${index === active ? ' active' : ''}" data-tag="${escapeHtml(item.tag)}" data-tag-suggest="${escapeHtml(item.tag)}"><span>${dot}${prefixNeg}${label}</span><small>${item.count}</small></button>`;
     }).join('');
     suggest.hidden = false;
     suggest.querySelectorAll('.tag-suggest-item').forEach((node, index) => {
@@ -750,35 +1212,233 @@ async function monitorBackgroundScan(job) {
 
 async function restoreBackgroundScanMonitor(){try{const active=await api('/api/v1/background-scan-jobs/active');if(active.job)monitorBackgroundScan(active.job)}catch{}}
 
+const MEDIA_TYPE_MODES = [
+  {value: '', label: 'All media', icon: 'layers'},
+  {value: 'image', label: 'Static images', icon: 'image'},
+  {value: 'video', label: 'Videos', icon: 'film'},
+  {value: 'animated', label: 'Animated / GIF', icon: 'sparkles'},
+  {value: 'motion', label: 'Video + Animated (all moving)', icon: 'clapperboard'},
+];
+
+const LIBRARY_SORT_MODES = [
+  {value: 'newest', label: 'Newest first'},
+  {value: 'oldest', label: 'Oldest first'},
+  {value: 'resolution', label: 'Highest resolution'},
+  {value: 'file_size', label: 'Largest file'},
+  {value: 'least_used', label: 'Least used in collections'},
+  {value: 'most_used', label: 'Most used in collections'},
+  {value: 'shelf', label: 'By shelf'},
+  {value: 'random', label: 'Random'},
+];
+
 async function showLibrary() {
   const epoch=renderEpoch;
   let loadSeq = 0;
   const state = viewState('library');
   librarySearch = state.search ?? librarySearch;
   libraryOffset = Number(state.offset ?? libraryOffset);
+  let selectedLibraryIds = new Set();
+  let lastSelectedLibraryId = null;
+  let currentLibraryItems = [];
+  let currentMediaType = state.mediaType || '';
+  let currentSort = state.sort || 'newest';
   const prefs = applyLibraryPrefs();
   setHeader('Library', '', button('Import', 'upload', 'primary'));
   actions.querySelector('button').onclick = () => navigate('import');
+  const bulkActionsHtml = '<button id="bulkAddShelf" type="button" class="shelf-inline-action add" title="Add selected items to shelf (or create shelf if new)"><i data-lucide="plus"></i></button><button id="bulkRemoveShelf" type="button" class="shelf-inline-action remove" title="Remove selected items from shelf"><i data-lucide="minus"></i></button>';
   workspace.innerHTML = `<div class="library-layout"><div class="library-main">
-    <div class="toolbar"><div class="search-wrap"><input id="search" class="control search" placeholder="Tag, author, domain, source, or id:123" autocomplete="off" spellcheck="false"><button id="clearSearch" type="button" class="icon-btn" title="Clear search" ${librarySearch ? '' : 'hidden'}><i data-lucide="x"></i></button><div id="librarySearchSuggest" class="tag-suggest" hidden></div></div><select id="mediaType" class="control toolbar-select"><option value="">All types</option><option value="image">Images</option><option value="video">Videos</option><option value="animated">Animated / GIF</option></select><select id="librarySort" class="control toolbar-select"><option value="newest">Newest first</option><option value="oldest">Oldest first</option><option value="resolution">Highest resolution</option><option value="file_size">Largest file</option><option value="least_used">Least used in collections</option><option value="most_used">Most used in collections</option><option value="random">Random</option></select><label class="toolbar-count" title="Items per page"><span>Per page</span><select id="pageSize" class="control">${[20,40,60,100].map(size => `<option value="${size}" ${size === prefs.pageSize ? 'selected' : ''}>${size}</option>`).join('')}</select></label><button id="searchBtn" class="icon-btn" title="Search"><i data-lucide="search"></i></button><div id="activeFilters" class="active-filters"></div></div>
+    <div class="toolbar">
+      <div class="search-wrap has-leading-tools"><button id="mediaTypeBtn" type="button" class="search-inline-btn" title="Media type: All media"><i data-lucide="layers"></i></button><div id="mediaTypeMenu" class="search-popover-menu media-type-popover" hidden>${MEDIA_TYPE_MODES.map(mode => `<button type="button" class="search-popover-item" data-media-type-value="${mode.value}"><span class="popover-item-label"><i data-lucide="${mode.icon}"></i><span>${esc(mode.label)}</span></span></button>`).join('')}</div><button id="librarySortBtn" type="button" class="search-inline-btn" title="Sort: Newest first"><i data-lucide="arrow-up-down"></i></button><div id="librarySortMenu" class="search-popover-menu" hidden>${LIBRARY_SORT_MODES.map(mode => `<button type="button" class="search-popover-item" data-sort-value="${mode.value}"><span>${esc(mode.label)}</span></button>`).join('')}</div><div id="searchBackdrop" class="search-backdrop" aria-hidden="true"></div><input id="search" class="control search has-backdrop" placeholder="Tag, author, domain, source, shelf:, or id:123" autocomplete="off" spellcheck="false"><button id="clearSearch" type="button" class="icon-btn" title="Clear search" ${librarySearch ? '' : 'hidden'}><i data-lucide="x"></i></button><button id="searchBtn" type="button" class="icon-btn" title="Search"><i data-lucide="search"></i></button><div id="librarySearchSuggest" class="tag-suggest" hidden></div></div>
+      <button id="selectAllLibraryPage" type="button" class="icon-btn" title="Select all items on this page"><i data-lucide="check-square"></i></button>
+      ${shelfComboHtml({idPrefix: 'bulkShelf', placeholder: 'Shelf...', value: state.bulkShelfName || '', title: 'Select an existing shelf or type a new name', actionsHtml: bulkActionsHtml})}
+    </div>
     <div id="gallery" class="gallery"></div><div id="pager" class="pager"></div></div><div id="inspectorResize" class="inspector-resize" title="Resize panel"></div><aside id="inspector" class="inspector"><div class="empty">Select a file</div></aside></div>`;
-  document.querySelector('#search').value = librarySearch;
-  document.querySelector('#mediaType').value = state.mediaType || '';
-  document.querySelector('#librarySort').value = state.sort || 'newest';
+  const searchInput = document.querySelector('#search');
+  const searchBackdrop = document.querySelector('#searchBackdrop');
+  searchInput.value = librarySearch;
+  bindSearchBackdrop(searchInput, searchBackdrop);
+
+  const syncMediaTypeBtn = () => {
+    const btn = document.querySelector('#mediaTypeBtn');
+    const menu = document.querySelector('#mediaTypeMenu');
+    if (!btn) return;
+    const mode = MEDIA_TYPE_MODES.find(m => m.value === currentMediaType) || MEDIA_TYPE_MODES[0];
+    btn.classList.toggle('active', Boolean(mode.value));
+    btn.title = `Media type: ${mode.label}`;
+    btn.innerHTML = `<i data-lucide="${mode.icon}"></i>`;
+    menu?.querySelectorAll('.search-popover-item').forEach(node => {
+      node.classList.toggle('active', node.dataset.mediaTypeValue === mode.value);
+    });
+    icons();
+  };
+
+  const syncSortBtn = () => {
+    const btn = document.querySelector('#librarySortBtn');
+    const menu = document.querySelector('#librarySortMenu');
+    if (!btn) return;
+    const mode = LIBRARY_SORT_MODES.find(m => m.value === currentSort) || LIBRARY_SORT_MODES[0];
+    btn.classList.toggle('active', mode.value !== 'newest');
+    btn.title = `Sort: ${mode.label}`;
+    menu?.querySelectorAll('.search-popover-item').forEach(node => {
+      node.classList.toggle('active', node.dataset.sortValue === mode.value);
+    });
+  };
+  syncMediaTypeBtn();
+  syncSortBtn();
+
+  let bulkShelfCombo = null;
+
+  const populateLibraryShelves = () => {
+    bulkShelfCombo?.syncColor();
+    renderSearchBackdrop(searchInput, searchBackdrop);
+  };
+  syncLibraryShelfSelects = populateLibraryShelves;
+  loadShelvesCatalog().then(() => { if (epoch === renderEpoch && currentView === 'library') populateLibraryShelves(); });
+
+  const updateFooterStatus = () => {
+    if (selectedLibraryIds.size > 0) {
+      statusText.innerHTML = `<span>Showing ${currentLibraryItems.length}</span> <span class="status-selected-badge">${selectedLibraryIds.size} selected</span>`;
+    } else {
+      statusText.textContent = `Showing ${currentLibraryItems.length}`;
+    }
+  };
+
+  const updateBulkSelectionUi = () => {
+    const selectPageBtn = document.querySelector('#selectAllLibraryPage');
+    document.querySelectorAll('#gallery .media-card').forEach(card => {
+      const cid = Number(card.dataset.id);
+      const checked = selectedLibraryIds.has(cid);
+      card.classList.toggle('bulk-selected', checked);
+      const check = card.querySelector('.card-select-check');
+      if (check) check.classList.toggle('checked', checked);
+    });
+    if (selectPageBtn) {
+      if (selectedLibraryIds.size > 0) {
+        selectPageBtn.classList.add('active');
+        selectPageBtn.innerHTML = '<i data-lucide="x-square"></i>';
+        selectPageBtn.title = `${selectedLibraryIds.size} selected — click to clear selection (Shift+click to select full page)`;
+      } else {
+        selectPageBtn.classList.remove('active');
+        selectPageBtn.innerHTML = '<i data-lucide="check-square"></i>';
+        selectPageBtn.title = 'Select all items on this page';
+      }
+      icons();
+    }
+    updateFooterStatus();
+  };
+
+  const toggleLibraryCardSelection = (id, shiftKey = false) => {
+    const pageIds = currentLibraryItems.map(item => Number(item.id));
+    const shouldSelect = !selectedLibraryIds.has(id);
+    if (shiftKey && lastSelectedLibraryId !== null && pageIds.includes(lastSelectedLibraryId) && pageIds.includes(id)) {
+      const start = pageIds.indexOf(lastSelectedLibraryId);
+      const end = pageIds.indexOf(id);
+      for (let i = Math.min(start, end); i <= Math.max(start, end); i += 1) {
+        if (shouldSelect) selectedLibraryIds.add(pageIds[i]);
+        else selectedLibraryIds.delete(pageIds[i]);
+      }
+    } else if (shouldSelect) {
+      selectedLibraryIds.add(id);
+    } else {
+      selectedLibraryIds.delete(id);
+    }
+    lastSelectedLibraryId = id;
+    updateBulkSelectionUi();
+  };
+
+  const handleSelectPageOrClear = event => {
+    const pageIds = currentLibraryItems.map(item => Number(item.id));
+    if (selectedLibraryIds.size > 0 && !event?.shiftKey) {
+      selectedLibraryIds.clear();
+      lastSelectedLibraryId = null;
+      updateBulkSelectionUi();
+      return;
+    }
+    if (!pageIds.length) return;
+    pageIds.forEach(id => selectedLibraryIds.add(id));
+    updateBulkSelectionUi();
+  };
+
+  const applyBulkShelfUpdate = async (shelfId, action = 'add') => {
+    const mediaIds = [...selectedLibraryIds];
+    if (!mediaIds.length) { toast('Select at least one item', true); return; }
+    if (!shelfId) { toast('Select or create a shelf first', true); return; }
+    try {
+      const res = await api('/api/v1/shelves/items', {
+        method: 'POST',
+        body: JSON.stringify({media_ids: mediaIds, shelf_ids: [Number(shelfId)], action}),
+      });
+      if (Array.isArray(res.shelves)) shelvesCatalog = res.shelves;
+      const mediaShelvesMap = res.media_shelves || {};
+      currentLibraryItems.forEach(item => {
+        if (Object.prototype.hasOwnProperty.call(mediaShelvesMap, String(item.id))) {
+          item.shelves = mediaShelvesMap[String(item.id)];
+          updateCardShelfDotsInDom(item.id, item.shelves);
+        }
+      });
+      if (selectedMedia && Object.prototype.hasOwnProperty.call(mediaShelvesMap, String(selectedMedia.id))) {
+        selectedMedia.shelves = mediaShelvesMap[String(selectedMedia.id)];
+        renderShelvesSection(selectedMedia);
+      }
+      populateLibraryShelves();
+      toast(action === 'add' ? `Added ${res.updated} item(s) to shelf` : `Removed ${res.updated} item(s) from shelf`);
+    } catch (error) { toast(error.message, true); }
+  };
+
+  const handleBulkAddShelf = async () => {
+    const name = bulkShelfCombo?.getName() || '';
+    if (!name) { toast('Enter or select a shelf', true); bulkShelfCombo?.input.focus(); return; }
+    const color = bulkShelfCombo?.getColor() || nextDefaultShelfColor();
+    try {
+      const resolved = await resolveOrCreateShelf(name, color);
+      if (!resolved?.shelf) return;
+      bulkShelfCombo?.setName(resolved.shelf.name);
+      saveViewState('library', {bulkShelfName: resolved.shelf.name});
+      populateLibraryShelves();
+      if (selectedLibraryIds.size > 0) {
+        await applyBulkShelfUpdate(resolved.shelf.id, 'add');
+      } else if (resolved.created) {
+        toast(`Created shelf: ${resolved.shelf.name}`);
+      } else {
+        toast('Select at least one item', true);
+      }
+    } catch (error) { toast(error.message, true); }
+  };
+
+  const handleBulkRemoveShelf = async () => {
+    const name = bulkShelfCombo?.getName() || '';
+    if (!name) { toast('Enter or select a shelf', true); bulkShelfCombo?.input.focus(); return; }
+    const shelf = findShelfByName(name);
+    if (!shelf) { toast('Select an existing shelf', true); return; }
+    await applyBulkShelfUpdate(shelf.id, 'remove');
+  };
+
+  bulkShelfCombo = attachShelfCombo(document.querySelector('#bulkShelfCombo'), {
+    onChange: ({name}) => saveViewState('library', {bulkShelfName: name}),
+    onPick: ({isCreateOption}) => { if (isCreateOption) handleBulkAddShelf(); },
+    onSubmit: () => handleBulkAddShelf(),
+  });
+
   const load = async () => {
     const seq = ++loadSeq;
     const pageSize = libraryPrefs().pageSize;
     librarySearch = document.querySelector('#search').value.trim();
+    renderSearchBackdrop(searchInput, searchBackdrop);
     const clearBtn = document.querySelector('#clearSearch');
     if (clearBtn) clearBtn.hidden = !document.querySelector('#search').value;
     const parsedSearch = parseLibrarySearch(librarySearch);
-    const selectedType = document.querySelector('#mediaType').value;
+    populateLibraryShelves();
+    const selectedType = currentMediaType;
     const type = selectedType || (parsedSearch.types.length ? parsedSearch.types.at(-1) : '');
-    const sort = document.querySelector('#librarySort').value || 'newest';
+    const sort = currentSort || 'newest';
     const textFilter = parsedSearch.textTerms.length ? parsedSearch.textTerms.map(term => `&q=${encodeURIComponent(term)}`).join('') : '&q=';
     const authorFilter = `${parsedSearch.authors.map(author => `&author=${encodeURIComponent(author)}`).join('')}${parsedSearch.excludedAuthors.map(author => `&exclude_author=${encodeURIComponent(author)}`).join('')}`;
     const domainFilter = `${parsedSearch.domains.map(domain => `&domain=${encodeURIComponent(domain)}`).join('')}${parsedSearch.excludedDomains.map(domain => `&exclude_domain=${encodeURIComponent(domain)}`).join('')}`;
     const sourceFilter = `${parsedSearch.sources.map(source => `&source=${encodeURIComponent(source)}`).join('')}${parsedSearch.excludedSources.map(source => `&exclude_source=${encodeURIComponent(source)}`).join('')}`;
+    const params = new URLSearchParams();
+    parsedSearch.shelves.forEach(s => params.append('shelf', s));
+    parsedSearch.excludedShelves.forEach(s => params.append('exclude_shelf', s));
+    const shelfFilter = params.toString() ? `&${params.toString()}` : '';
     const idFilter = `${parsedSearch.mediaIds.map(id => `&id=${id}`).join('')}${parsedSearch.excludedMediaIds.map(id => `&exclude_id=${id}`).join('')}`;
     const parentFilter = (parsedSearch.parentIds || []).map(pid => `&parent=${encodeURIComponent(pid)}`).join('');
     const flagFilter = `${parsedSearch.hasFlags.map(flag => `&has=${encodeURIComponent(flag)}`).join('')}${parsedSearch.excludedFlags.map(flag => `&exclude_has=${encodeURIComponent(flag)}`).join('')}`;
@@ -786,28 +1446,47 @@ async function showLibrary() {
     const dimensionFilter = `${parsedSearch.minWidth != null ? `&min_width=${parsedSearch.minWidth}` : ''}${parsedSearch.maxWidth != null ? `&max_width=${parsedSearch.maxWidth}` : ''}${parsedSearch.minHeight != null ? `&min_height=${parsedSearch.minHeight}` : ''}${parsedSearch.maxHeight != null ? `&max_height=${parsedSearch.maxHeight}` : ''}`;
     const filters = `${parsedSearch.includedTags.map(tag => `&tag=${encodeURIComponent(tag)}`).join('')}${parsedSearch.excludedTags.map(tag => `&exclude_tag=${encodeURIComponent(tag)}`).join('')}`;
     saveViewState('library', {search:librarySearch, offset:libraryOffset, mediaType:selectedType, sort});
-    if(parseRoute(location.hash).id && librarySearch!==`id:${parseRoute(location.hash).id}`)history.replaceState(null,'','#library');
-    const data = await api(`/api/v1/media?limit=${pageSize}&offset=${libraryOffset}${textFilter}&type=${encodeURIComponent(type)}&sort=${encodeURIComponent(sort)}${authorFilter}${domainFilter}${sourceFilter}${idFilter}${parentFilter}${flagFilter}${orientationFilter}${dimensionFilter}${filters}`);
+    const currentRoute = parseRoute(location.hash);
+    if((currentRoute.id && librarySearch!==`id:${currentRoute.id}`) || ((currentRoute.params.has('q') || currentRoute.params.has('shelf')) && librarySearch !== (currentRoute.params.get('q') || (currentRoute.params.get('shelf') ? `shelf:${currentRoute.params.get('shelf').trim().replace(/\s+/g, '_')}` : '')).trim()))history.replaceState(null,'','#library');
+    const data = await api(`/api/v1/media?limit=${pageSize}&offset=${libraryOffset}${textFilter}&type=${encodeURIComponent(type)}&sort=${encodeURIComponent(sort)}${authorFilter}${domainFilter}${sourceFilter}${shelfFilter}${idFilter}${parentFilter}${flagFilter}${orientationFilter}${dimensionFilter}${filters}`);
     if (epoch !== renderEpoch || seq !== loadSeq || !document.querySelector('#gallery')) return;
+    currentLibraryItems = data.items || [];
     meta.textContent = `${data.page.total} files`;
-    statusText.textContent = `Showing ${data.items.length}`;
-    document.querySelector('#activeFilters').innerHTML = activeFiltersHtml();
-    document.querySelector('#gallery').innerHTML = data.items.length ? data.items.map(item => `<button class="media-card" data-id="${item.id}"><span class="media-card-preview"><img loading="lazy" src="${esc(item.thumbnail_url)}" alt="">${item.is_edited?`<span class="edited-marker" title="Edited: ${esc(editSummary(item.edit_operations))}"><i data-lucide="wand-sparkles"></i></span>`:''}${item.has_parent?`<span class="parent-marker" data-parent-media-id="${item.parent_media_id || ''}" data-parent-remote-id="${esc(item.parent_id || '')}" title="Has parent"><i data-lucide="corner-left-up"></i></span>`:''}${item.has_family?`<span class="family-marker" title="Relatives: ${item.relatives?.length || item.family_members?.length || 0}"><i data-lucide="users-round"></i></span>`:''}${item.derived_from_media_id?`<span class="fragment-marker" title="Fragment of Media #${item.derived_from_media_id}"><i data-lucide="scissors"></i></span>`:''}${item.type==='video'?'<span class="media-kind-marker" title="Video"><i data-lucide="film"></i>Video</span>':item.is_animated?'<span class="media-kind-marker" title="Animation"><i data-lucide="sparkles"></i>GIF</span>':''}${item.fragment_count?`<span class="fragment-count-marker" title="${item.fragment_count} fragment(s) - excluded from automatic collections"><i data-lucide="git-branch"></i>${item.fragment_count}</span>`:''}</span><span class="media-card-body"><strong>${esc(item.author || 'Unknown author')}</strong><small>${esc(item.domain || item.type)} · ${item.width || '?'}×${item.height || '?'}</small></span></button>`).join('') : '<div class="empty">The library is empty</div>';
-    document.querySelectorAll('.media-card').forEach(card => card.onclick = () => inspectMedia(Number(card.dataset.id)));
+    updateFooterStatus();
+    document.querySelector('#gallery').innerHTML = data.items.length ? data.items.map(item => `<button class="media-card${selectedLibraryIds.has(item.id) ? ' bulk-selected' : ''}" data-id="${item.id}"><span class="media-card-preview"><img loading="lazy" src="${esc(item.thumbnail_url)}" alt=""><span class="card-select-check${selectedLibraryIds.has(item.id) ? ' checked' : ''}" data-select-id="${item.id}" title="Select item (Shift+click for range)"></span>${item.is_edited?`<span class="edited-marker" title="Edited: ${esc(editSummary(item.edit_operations))}"><i data-lucide="wand-sparkles"></i></span>`:''}${item.has_parent?`<span class="parent-marker" data-parent-media-id="${item.parent_media_id || ''}" data-parent-remote-id="${esc(item.parent_id || '')}" title="Has parent"><i data-lucide="corner-left-up"></i></span>`:''}${item.has_family?`<span class="family-marker" title="Relatives: ${item.relatives?.length || item.family_members?.length || 0}"><i data-lucide="users-round"></i></span>`:''}${item.derived_from_media_id?`<span class="fragment-marker" title="Fragment of Media #${item.derived_from_media_id}"><i data-lucide="scissors"></i></span>`:''}${item.type==='video'?'<span class="media-kind-marker" title="Video"><i data-lucide="film"></i>Video</span>':item.is_animated?'<span class="media-kind-marker" title="Animation"><i data-lucide="sparkles"></i>GIF</span>':''}${item.fragment_count?`<span class="fragment-count-marker" title="${item.fragment_count} fragment(s) - excluded from automatic collections"><i data-lucide="git-branch"></i>${item.fragment_count}</span>`:''}${shelfDotsHtml(item.shelves)}</span><span class="media-card-body"><strong>${esc(item.author || 'Unknown author')}</strong><small>${esc(item.domain || item.type)} · ${item.width || '?'}×${item.height || '?'}</small></span></button>`).join('') : '<div class="empty">The library is empty</div>';
+    document.querySelectorAll('.media-card').forEach(card => {
+      card.onclick = event => {
+        if (event.ctrlKey || event.metaKey || event.shiftKey) {
+          event.preventDefault();
+          toggleLibraryCardSelection(Number(card.dataset.id), event.shiftKey);
+          return;
+        }
+        inspectMedia(Number(card.dataset.id));
+      };
+    });
+    document.querySelectorAll('.card-select-check').forEach(check => {
+      check.onclick = event => {
+        event.stopPropagation();
+        event.preventDefault();
+        toggleLibraryCardSelection(Number(check.dataset.selectId), event.shiftKey);
+      };
+    });
     document.querySelectorAll('.parent-marker').forEach(marker => marker.onclick = event => { event.stopPropagation(); const localId=Number(marker.dataset.parentMediaId||0); appendSearchTerm(localId ? `id:${localId}` : `parent:${marker.dataset.parentRemoteId}`); });
     if (selectedMedia) document.querySelector(`.media-card[data-id="${selectedMedia.id}"]`)?.classList.add('selected');
+    updateBulkSelectionUi();
     const from = data.page.total ? libraryOffset + 1 : 0;
     const to = Math.min(libraryOffset + data.items.length, data.page.total);
-    document.querySelector('#pager').innerHTML = `<span class="page-range">${from}-${to} of ${data.page.total}</span><button class="btn" id="prev" ${libraryOffset === 0 ? 'disabled' : ''}><i data-lucide="chevron-left"></i>Previous</button><button class="btn" id="next" ${libraryOffset + pageSize >= data.page.total ? 'disabled' : ''}>Next<i data-lucide="chevron-right"></i></button>`;
+    document.querySelector('#pager').innerHTML = `<span class="page-range">${from}-${to} of ${data.page.total}</span><label class="toolbar-count" title="Items per page"><span>Per page</span><select id="pageSize" class="control">${[20,40,60,100].map(size => `<option value="${size}" ${size === pageSize ? 'selected' : ''}>${size}</option>`).join('')}</select></label><button class="btn" id="prev" ${libraryOffset === 0 ? 'disabled' : ''}><i data-lucide="chevron-left"></i>Previous</button><button class="btn" id="next" ${libraryOffset + pageSize >= data.page.total ? 'disabled' : ''}>Next<i data-lucide="chevron-right"></i></button>`;
+    document.querySelector('#pageSize').onchange = event => { saveLibraryPrefs({pageSize: Number(event.target.value)}); libraryOffset = 0; load(); };
     document.querySelector('#prev').onclick = () => { libraryOffset = Math.max(0, libraryOffset - pageSize); load(); };
     document.querySelector('#next').onclick = () => { libraryOffset += pageSize; load(); };
-    bindLibraryFilters(load);
     if (selectedMedia) {
       const authorContainer = document.querySelector('#inspector .author-tags');
       if (authorContainer) {
         authorContainer.innerHTML = authorHtml(selectedMedia.author);
         bindAuthorFilters(authorContainer);
       }
+      renderShelvesSection(selectedMedia);
       const tagSection = document.querySelector('#inspector .tag-section');
       if (tagSection) {
         tagSection.outerHTML = tagsSectionHtml(selectedMedia);
@@ -818,16 +1497,57 @@ async function showLibrary() {
     icons();
   };
   reloadLibrary = load;
-  const searchInput = document.querySelector('#search');
   const clearSearchBtn = document.querySelector('#clearSearch');
   searchInput.addEventListener('input', () => { clearSearchBtn.hidden = !searchInput.value; });
-  clearSearchBtn.onclick = () => { searchInput.value = ''; clearSearchBtn.hidden = true; libraryOffset = 0; load(); };
-  attachSearchAutocomplete(searchInput, document.querySelector('#librarySearchSuggest'), () => { clearSearchBtn.hidden = !searchInput.value; libraryOffset = 0; load(); });
+  clearSearchBtn.onclick = () => { searchInput.value = ''; renderSearchBackdrop(searchInput, searchBackdrop); clearSearchBtn.hidden = true; libraryOffset = 0; load(); };
+  attachSearchAutocomplete(searchInput, document.querySelector('#librarySearchSuggest'), () => { renderSearchBackdrop(searchInput, searchBackdrop); clearSearchBtn.hidden = !searchInput.value; libraryOffset = 0; load(); });
   document.querySelector('#searchBtn').onclick = () => { libraryOffset = 0; load(); };
   searchInput.onkeydown = event => { if (event.key === 'Enter' && !event.defaultPrevented) { libraryOffset = 0; load(); } };
-  document.querySelector('#mediaType').onchange = () => { libraryOffset = 0; load(); };
-  document.querySelector('#librarySort').onchange = () => { libraryOffset = 0; load(); };
-  document.querySelector('#pageSize').onchange = event => { saveLibraryPrefs({pageSize:Number(event.target.value)}); libraryOffset = 0; load(); };
+  const mediaTypeBtn = document.querySelector('#mediaTypeBtn');
+  const mediaTypeMenu = document.querySelector('#mediaTypeMenu');
+  const sortBtn = document.querySelector('#librarySortBtn');
+  const sortMenu = document.querySelector('#librarySortMenu');
+  mediaTypeBtn.onclick = event => {
+    event.stopPropagation();
+    if (sortMenu) sortMenu.hidden = true;
+    mediaTypeMenu.hidden = !mediaTypeMenu.hidden;
+  };
+  mediaTypeMenu.querySelectorAll('.search-popover-item').forEach(item => {
+    item.onclick = event => {
+      event.stopPropagation();
+      currentMediaType = item.dataset.mediaTypeValue || '';
+      mediaTypeMenu.hidden = true;
+      syncMediaTypeBtn();
+      libraryOffset = 0;
+      load();
+    };
+  });
+  sortBtn.onclick = event => {
+    event.stopPropagation();
+    if (mediaTypeMenu) mediaTypeMenu.hidden = true;
+    sortMenu.hidden = !sortMenu.hidden;
+  };
+  sortMenu.querySelectorAll('.search-popover-item').forEach(item => {
+    item.onclick = event => {
+      event.stopPropagation();
+      currentSort = item.dataset.sortValue || 'newest';
+      sortMenu.hidden = true;
+      syncSortBtn();
+      libraryOffset = 0;
+      load();
+    };
+  });
+  document.addEventListener('click', event => {
+    if (mediaTypeMenu && !mediaTypeMenu.hidden && !event.target.closest('#mediaTypeMenu') && !event.target.closest('#mediaTypeBtn')) {
+      mediaTypeMenu.hidden = true;
+    }
+    if (sortMenu && !sortMenu.hidden && !event.target.closest('#librarySortMenu') && !event.target.closest('#librarySortBtn')) {
+      sortMenu.hidden = true;
+    }
+  });
+  document.querySelector('#selectAllLibraryPage').onclick = handleSelectPageOrClear;
+  document.querySelector('#bulkAddShelf').onclick = handleBulkAddShelf;
+  document.querySelector('#bulkRemoveShelf').onclick = handleBulkRemoveShelf;
   bindInspectorResize();
   icons(); await load();
   const selectedId = Number(state.selectedMediaId || 0);
@@ -881,7 +1601,7 @@ async function inspectMedia(id) {
   const characters = selectedMedia.character_tags?.length ? `<div class="field"><label>Characters</label><div class="tags">${selectedMedia.character_tags.map(tagHtml).join('')}</div></div>` : '';
   const fileSourceField = selectedMedia.file_source_url && selectedMedia.file_source_url !== selectedMedia.source_url
     ? `<div class="field"><label>File source</label><a href="${safeHref(selectedMedia.file_source_url)}" target="_blank" rel="noopener" class="ellipsis">${esc(selectedMedia.file_source_url)}</a></div>` : '';
-  pane.innerHTML = `<button id="closeInspector" class="icon-btn inspector-close" title="Close"><i data-lucide="x"></i></button>${preview}<h2>${esc(selectedMedia.author || 'Unknown author')}</h2><div class="field"><label>Media ID</label><button type="button" id="searchMediaId" class="text-link">${selectedMedia.id}</button></div><div class="field"><label>Source</label><a href="${safeHref(selectedMedia.source_url)}" target="_blank" rel="noopener" class="ellipsis">${esc(selectedMedia.source_url || 'Not specified')}</a></div>${fileSourceField}${parentField}${relatives}${fragmentField}${fragmentNotice}${characters}<div class="field"><label>Size</label>${selectedMedia.width || '?'} × ${selectedMedia.height || '?'} · ${formatBytes(selectedMedia.file_size)}</div>${edits}${selectedMedia.crop_review?.blocked?`<div class="field crop-admission-notice"><strong>Crop review required</strong><small>${esc(selectedMedia.crop_review.error_message || "Not eligible for collections until reviewed in Crop.")}</small></div>`:""}${tagsSectionHtml(selectedMedia)}<div class="form-actions inspector-actions"><a class="icon-btn" href="${esc(selectedMedia.content_url)}" target="_blank" rel="noopener" title="Open full size"><i data-lucide="maximize-2"></i></a>${selectedMedia.source_url?'<button id="refreshMetadata" class="btn"><i data-lucide="refresh-cw"></i>Refresh metadata</button>':''}<button id="openEditor" class="btn"><i data-lucide="panel-top-open"></i>Open in Editor</button>${selectedMedia.type==='image'&&!selectedMedia.is_animated?'<button id="replaceMediaBackground" class="btn"><i data-lucide="image-plus"></i>Replace background</button>':''}<button id="addCollection" class="btn"><i data-lucide="folder-plus"></i>Build collection</button><button id="deleteMedia" class="icon-btn danger" title="Delete"><i data-lucide="trash-2"></i></button></div>`;
+  pane.innerHTML = `<button id="closeInspector" class="icon-btn inspector-close" title="Close"><i data-lucide="x"></i></button>${preview}<h2>${esc(selectedMedia.author || 'Unknown author')}</h2><div class="field"><label>Media ID</label><button type="button" id="searchMediaId" class="text-link">${selectedMedia.id}</button></div><div class="field"><label>Source</label><a href="${safeHref(selectedMedia.source_url)}" target="_blank" rel="noopener" class="ellipsis">${esc(selectedMedia.source_url || 'Not specified')}</a></div>${fileSourceField}${parentField}${relatives}${fragmentField}${fragmentNotice}${characters}<div class="field"><label>Size</label>${selectedMedia.width || '?'} × ${selectedMedia.height || '?'} · ${formatBytes(selectedMedia.file_size)}</div>${edits}${selectedMedia.crop_review?.blocked?`<div class="field crop-admission-notice"><strong>Crop review required</strong><small>${esc(selectedMedia.crop_review.error_message || "Not eligible for collections until reviewed in Crop.")}</small></div>`:""}${shelvesSectionHtml(selectedMedia)}${tagsSectionHtml(selectedMedia)}<div class="form-actions inspector-actions"><a class="icon-btn" href="${esc(selectedMedia.content_url)}" target="_blank" rel="noopener" title="Open full size"><i data-lucide="maximize-2"></i></a>${selectedMedia.source_url?'<button id="refreshMetadata" class="btn"><i data-lucide="refresh-cw"></i>Refresh metadata</button>':''}<button id="openEditor" class="btn"><i data-lucide="panel-top-open"></i>Open in Editor</button>${selectedMedia.type==='image'&&!selectedMedia.is_animated?'<button id="replaceMediaBackground" class="btn"><i data-lucide="image-plus"></i>Replace background</button>':''}<button id="addCollection" class="btn"><i data-lucide="folder-plus"></i>Build collection</button><button id="deleteMedia" class="icon-btn danger" title="Delete"><i data-lucide="trash-2"></i></button></div>`;
   if (selectedMedia.type !== 'video') {
     const previewNode = pane.querySelector('.inspector-preview');
     if (previewNode) previewNode.onclick = () => openMediaLightbox({contentUrl: selectedMedia.content_url, type: selectedMedia.type, title: `${selectedMedia.author || 'Unknown author'} · Media #${selectedMedia.id}`});
@@ -891,12 +1611,13 @@ async function inspectMedia(id) {
   authorHeading.outerHTML = `<div class="tags author-tags">${authorHtml(selectedMedia.author)}</div>`;
   bindAuthorFilters(pane);
   document.querySelector('#closeInspector').onclick = () => { pane.querySelector('video')?.pause(); pane.classList.remove('has-media'); document.querySelectorAll('.media-card.selected').forEach(card => card.classList.remove('selected')); selectedMedia=null; saveViewState('library',{selectedMediaId:null}); };
-  document.querySelector('#searchMediaId').onclick = () => { librarySearch=`id:${id}`; libraryOffset=0; document.querySelector('#search').value=librarySearch; reloadLibrary(); };
+  document.querySelector('#searchMediaId').onclick = () => { librarySearch=`id:${id}`; libraryOffset=0; const s=document.querySelector('#search'); s.value=librarySearch; renderSearchBackdrop(s, document.querySelector('#searchBackdrop')); reloadLibrary(); };
   const parentSearch = (selectedMedia.parent_media_id ? `id:${selectedMedia.parent_media_id}` : `parent:${selectedMedia.parent_id}`);
-  document.querySelector('#searchParentMedia')?.addEventListener('click', () => { librarySearch=parentSearch; libraryOffset=0; document.querySelector('#search').value=librarySearch; reloadLibrary(); });
-  document.querySelector('#searchParentRemote')?.addEventListener('click', () => { librarySearch=parentSearch; libraryOffset=0; document.querySelector('#search').value=librarySearch; reloadLibrary(); });
+  document.querySelector('#searchParentMedia')?.addEventListener('click', () => { librarySearch=parentSearch; libraryOffset=0; const s=document.querySelector('#search'); s.value=librarySearch; renderSearchBackdrop(s, document.querySelector('#searchBackdrop')); reloadLibrary(); });
+  document.querySelector('#searchParentRemote')?.addEventListener('click', () => { librarySearch=parentSearch; libraryOffset=0; const s=document.querySelector('#search'); s.value=librarySearch; renderSearchBackdrop(s, document.querySelector('#searchBackdrop')); reloadLibrary(); });
   pane.querySelectorAll('.relative-link').forEach(node => node.onclick = () => openMediaInLibrary(Number(node.dataset.mediaId)));
   pane.querySelectorAll('.trim-source-link').forEach(node => node.onclick = () => { const sourceId = Number(node.dataset.mediaId); saveViewState('editor',{targetMediaId:sourceId,analysisId:null,backgroundOpen:false,trimTarget:true}); navigate('editor'); });
+  bindShelvesSection(pane, selectedMedia);
   bindTagSection(pane, selectedMedia);
   document.querySelector('#deleteMedia').onclick = async () => { if (!confirm('Delete this file?')) return; try { await api(`/api/v1/media/${id}`, {method:'DELETE'}); toast('File deleted'); selectedMedia=null; showLibrary(); } catch(error) { toast(error.message,true); } };
   document.querySelector('#addCollection').onclick = () => {
@@ -921,31 +1642,146 @@ async function inspectMedia(id) {
   icons();
 }
 
+function renderHistoryRow(item, historyLabels) {
+  let details={}; try { details=JSON.parse(item.details_json || '{}'); } catch {}
+  const set=details.set || {};
+  const counters=['accepted','duplicate','review','blocked','failed'].filter(key=>details[key] != null).map(key=>`${key}: ${details[key]}`).join(' · ');
+  const issues=Array.isArray(details.issues) && details.issues.length ? `<details class="history-issues"><summary>Issues (${details.issues.length})</summary><ul>${details.issues.map(issue=>`<li><a href="${safeHref(issue.url)}" target="_blank" rel="noopener">${esc(issue.post_id || issue.remote_id || 'post')}</a>: ${esc(issue.message || issue.code || 'Import failed')}</li>`).join('')}</ul></details>` : '';
+  const diagnostics=historyDiagnosticsHtml(details, item);
+  const mediaId = Number(details.media_item_id);
+  const hasMedia = Number.isInteger(mediaId) && mediaId > 0 && (item.event_type === 'import.duplicate' || item.event_type === 'import.accepted');
+  const label = historyLabels[item.event_type] || item.event_type;
+  const openAction = hasMedia ? `<a type="button" class="icon-btn open-import-media" data-media-id="${mediaId}" title="Open in Library" href="${libraryHref(mediaId)}" target="${libraryTarget()}" rel="noopener" aria-label="Open in Library"><i data-lucide="images"></i></a>` : '';
+  const duplicateNote = details.merged ? ` · merged into #${mediaId}` : (details.possible_duplicate_of ? ` · possible duplicate #${esc(details.possible_duplicate_of)}` : '');
+  const resolved = details.resolved_source_url ? ` · ${esc(details.resolved_source_url)}` : '';
+  const duration = details.timing?.duration_ms != null ? ` · ${formatDuration(details.timing.duration_ms)}` : '';
+  const slowest = details.timing?.slowest_posts?.[0];
+  const slowestLabel = slowest ? ` · slowest #${esc(slowest.post_id)} (${formatDuration(slowest.duration_ms)})` : '';
+  const historyShelves = Array.isArray(details.shelves) && details.shelves.length
+    ? `<span class="history-shelves">${details.shelves.map(s => `<span class="shelf-badge" style="--shelf-color:${esc(s.color)}" title="${esc('Shelf: ' + s.name)}"><span class="shelf-dot-inline" style="--shelf-color:${esc(s.color)}"></span>${esc(s.name)}</span>`).join('')}</span>`
+    : '';
+  return `<article class="history-row"><i data-lucide="${item.event_type === 'import.pending' ? 'loader-circle' : 'activity'}" class="${item.event_type === 'import.pending' ? 'spin' : ''}"></i><div><div class="history-head"><strong>${esc(label)}</strong>${historyShelves}</div><small>${set.name ? `${esc(set.name)} · ` : ''}Import #${item.entity_id}${counters ? ` · ${esc(counters)}` : ''}${duration}${slowestLabel}${duplicateNote}${resolved}</small>${diagnostics}${issues}</div><div class="history-meta"><time>${esc(formatDateTime(item.created_at))}</time>${openAction}</div></article>`;
+}
+
+async function extractDroppedFilesAndFolder(dataTransfer) {
+  const items = [...(dataTransfer?.items || [])];
+  const entries = items.map(item => item.webkitGetAsEntry?.() || item.getAsEntry?.()).filter(Boolean);
+  const firstDir = entries.find(entry => entry.isDirectory);
+  if (!firstDir) {
+    return {files: [...(dataTransfer?.files || [])], folderName: ''};
+  }
+  const mediaExtRe = /\.(?:jpe?g|png|gif|webp|avif|bmp|mp4|webm|mov|mkv)$/i;
+  const isMediaFile = file => Boolean(file && (file.type?.startsWith('image/') || file.type?.startsWith('video/') || mediaExtRe.test(file.name || '')));
+  const readEntry = entry => new Promise(resolve => {
+    if (entry.isFile) {
+      entry.file(file => resolve(isMediaFile(file) ? [file] : []), () => resolve([]));
+      return;
+    }
+    if (entry.isDirectory) {
+      const reader = entry.createReader();
+      const childEntries = [];
+      const readBatch = () => {
+        reader.readEntries(async batch => {
+          if (batch.length) {
+            childEntries.push(...batch);
+            readBatch();
+          } else {
+            const nested = await Promise.all(childEntries.map(readEntry));
+            resolve(nested.flat());
+          }
+        }, () => resolve([]));
+      };
+      readBatch();
+      return;
+    }
+    resolve([]);
+  });
+  const nestedFiles = await Promise.all(entries.map(readEntry));
+  return {files: nestedFiles.flat(), folderName: firstDir.name || ''};
+}
+
 async function showImport() {
   const epoch=renderEpoch;
   setHeader('Import', 'Drop an image or paste a link');
-  const history = await api('/api/v1/history?limit=100&entity_type=background_job');
+  const [history] = await Promise.all([
+    api('/api/v1/history?limit=100&entity_type=background_job'),
+    loadShelvesCatalog(),
+  ]);
   if(epoch!==renderEpoch||currentView!=='import')return;
+  const importState = viewState('import');
   const historyLabels = {'import.pending':'Importing','import.accepted':'Imported','import.review':'Waiting for review','import.duplicate':'Already imported','import.rejected':'Review rejected','import.failed':'Import failed','import.set_completed':'Set imported','import.set_partial':'Set partially imported','import.set_cancelled':'Set import stopped'};
-  const historyRows = history.items.map(item=>{
-    let details={}; try { details=JSON.parse(item.details_json || '{}'); } catch {}
-    const set=details.set || {};
-    const counters=['accepted','duplicate','review','blocked','failed'].filter(key=>details[key] != null).map(key=>`${key}: ${details[key]}`).join(' · ');
-    const issues=Array.isArray(details.issues) && details.issues.length ? `<details class="history-issues"><summary>Issues (${details.issues.length})</summary><ul>${details.issues.map(issue=>`<li><a href="${safeHref(issue.url)}" target="_blank" rel="noopener">${esc(issue.post_id || issue.remote_id || 'post')}</a>: ${esc(issue.message || issue.code || 'Import failed')}</li>`).join('')}</ul></details>` : '';
-    const diagnostics=historyDiagnosticsHtml(details, item);
-    const mediaId = Number(details.media_item_id);
-    const hasMedia = Number.isInteger(mediaId) && mediaId > 0 && (item.event_type === 'import.duplicate' || item.event_type === 'import.accepted');
-    const label = historyLabels[item.event_type] || item.event_type;
-    const openAction = hasMedia ? `<a type="button" class="icon-btn open-import-media" data-media-id="${mediaId}" title="Open in Library" href="${libraryHref(mediaId)}" target="${libraryTarget()}" rel="noopener" aria-label="Open in Library"><i data-lucide="images"></i></a>` : '';
-    const duplicateNote = details.merged ? ` · merged into #${mediaId}` : (details.possible_duplicate_of ? ` · possible duplicate #${esc(details.possible_duplicate_of)}` : '');
-    const resolved = details.resolved_source_url ? ` · ${esc(details.resolved_source_url)}` : '';
-    const duration = details.timing?.duration_ms != null ? ` · ${formatDuration(details.timing.duration_ms)}` : '';
-    const slowest = details.timing?.slowest_posts?.[0];
-    const slowestLabel = slowest ? ` · slowest #${esc(slowest.post_id)} (${formatDuration(slowest.duration_ms)})` : '';
-    return `<article class="history-row"><i data-lucide="${item.event_type === 'import.pending' ? 'loader-circle' : 'activity'}" class="${item.event_type === 'import.pending' ? 'spin' : ''}"></i><div><strong>${esc(label)}</strong><small>${set.name ? `${esc(set.name)} · ` : ''}Import #${item.entity_id}${counters ? ` · ${esc(counters)}` : ''}${duration}${slowestLabel}${duplicateNote}${resolved}</small>${diagnostics}${issues}</div><div class="history-meta"><time>${esc(formatDateTime(item.created_at))}</time>${openAction}</div></article>`;
-  }).join('');
-  workspace.innerHTML = `<div class="page"><section id="dropImport" class="drop-import" tabindex="0"><i data-lucide="upload-cloud"></i><strong>Drop a file, image link, or post link here</strong><span>Paste an image, video, or URL into this window</span><input id="fileImport" type="file" accept="image/*,video/*" multiple hidden><button id="chooseImport" type="button" class="btn primary"><i data-lucide="file-up"></i>Choose file</button><input id="pasteImport" class="control" type="url" placeholder="https://..." aria-label="Image or post URL"><button id="submitUrlImport" type="button" class="btn"><i data-lucide="link"></i>Resolve and import</button><div id="importResolveStatus" class="muted" aria-live="polite"></div></section><section class="import-history"><div class="page-head"><h2>Import history</h2><span class="badge">${history.page.total}</span></div><div class="item-list">${historyRows || '<div class="empty">History is empty</div>'}</div></section></div>`;
+  const historyRows = history.items.map(item => renderHistoryRow(item, historyLabels)).join('');
+  const initialShelf = shelvesCatalog.find(s => Number(s.id) === Number(importState.importShelfId)) || findShelfByName(importState.importShelfName) || null;
+  const initialShelfName = initialShelf ? initialShelf.name : (importState.importShelfName || '');
+  const initialShelfColor = initialShelf ? initialShelf.color : nextDefaultShelfColor();
+  workspace.innerHTML = `<div class="page"><section id="dropImport" class="drop-import" tabindex="0"><i data-lucide="upload-cloud"></i><strong>Drop a file, image link, or post link here</strong><span>Paste an image, video, or URL into this window</span><input id="fileImport" type="file" accept="image/*,video/*" multiple hidden><button id="chooseImport" type="button" class="btn primary"><i data-lucide="file-up"></i>Choose file</button><input id="pasteImport" class="control" type="url" placeholder="https://..." aria-label="Image or post URL"><button id="submitUrlImport" type="button" class="btn"><i data-lucide="link"></i>Resolve and import</button><div class="import-shelf-controls"><label class="import-shelf-check" title="Assign all imported files in this batch (including already-imported duplicates) to the selected shelf"><input id="importUseShelf" type="checkbox" ${importState.importUseShelf ? 'checked' : ''}><span>Add to shelf</span></label><div id="importShelfBar" class="import-shelf-bar" ${importState.importUseShelf ? '' : 'hidden'}>${shelfComboHtml({idPrefix: 'importShelf', placeholder: 'Shelf...', value: initialShelfName, color: initialShelfColor, title: 'Select an existing shelf or type a new name'})}<button id="importCreateShelfBtn" type="button" class="icon-btn" title="Create or confirm shelf"><i data-lucide="plus"></i></button><button id="openImportShelfLibrary" type="button" class="icon-btn" title="Open selected shelf in Library"><i data-lucide="images"></i></button></div></div><div id="importResolveStatus" class="muted" aria-live="polite"></div></section><section class="import-history"><div class="page-head"><h2>Import history</h2><span class="badge">${history.page.total}</span></div><div class="item-list">${historyRows || '<div class="empty">History is empty</div>'}</div></section></div>`;
   const drop = document.querySelector('#dropImport'); const fileInput = document.querySelector('#fileImport');
+  const useShelfInput = document.querySelector('#importUseShelf');
+  const shelfBar = document.querySelector('#importShelfBar');
+  const openShelfLibBtn = document.querySelector('#openImportShelfLibrary');
+  const createShelfBtn = document.querySelector('#importCreateShelfBtn');
+  let importShelfCombo = null;
+
+  const syncImportShelfUi = () => {
+    const useShelf = Boolean(useShelfInput?.checked);
+    if (shelfBar) shelfBar.hidden = !useShelf;
+    const activeShelf = importShelfCombo?.getShelf() || null;
+    const name = importShelfCombo?.getName() || '';
+    if (openShelfLibBtn) openShelfLibBtn.disabled = !activeShelf;
+    saveViewState('import', {importUseShelf: useShelf, importShelfId: activeShelf ? Number(activeShelf.id) : null, importShelfName: name});
+  };
+  const confirmOrCreateImportShelf = async () => {
+    const name = importShelfCombo?.getName() || '';
+    if (!name) { toast('Enter a shelf name', true); importShelfCombo?.input.focus(); return null; }
+    const color = importShelfCombo?.getColor() || nextDefaultShelfColor();
+    try {
+      const resolved = await resolveOrCreateShelf(name, color);
+      if (!resolved?.shelf) return null;
+      useShelfInput.checked = true;
+      importShelfCombo?.setName(resolved.shelf.name);
+      syncImportShelfUi();
+      toast(resolved.created ? `Created shelf: ${resolved.shelf.name}` : `Selected shelf: ${resolved.shelf.name}`);
+      return resolved.shelf;
+    } catch (error) {
+      toast(error.message, true);
+      return null;
+    }
+  };
+  importShelfCombo = attachShelfCombo(document.querySelector('#importShelfCombo'), {
+    onChange: () => syncImportShelfUi(),
+    onPick: ({shelf, isCreateOption}) => {
+      if (isCreateOption || !shelf) {
+        confirmOrCreateImportShelf();
+      } else {
+        useShelfInput.checked = true;
+        syncImportShelfUi();
+      }
+    },
+    onSubmit: () => confirmOrCreateImportShelf(),
+  });
+  syncImportShelfUi();
+  useShelfInput.onchange = () => syncImportShelfUi();
+  openShelfLibBtn.onclick = () => {
+    const activeShelf = importShelfCombo?.getShelf();
+    if (activeShelf) openShelfInLibrary(activeShelf);
+  };
+  createShelfBtn.onclick = () => confirmOrCreateImportShelf();
+  const resolveImportShelfId = async () => {
+    if (!useShelfInput?.checked) return null;
+    const name = importShelfCombo?.getName() || '';
+    if (!name) return null;
+    try {
+      const resolved = await resolveOrCreateShelf(name, importShelfCombo?.getColor() || nextDefaultShelfColor());
+      if (resolved?.shelf) {
+        importShelfCombo?.setName(resolved.shelf.name);
+        syncImportShelfUi();
+        return Number(resolved.shelf.id);
+      }
+    } catch (error) {
+      toast(error.message, true);
+    }
+    return null;
+  };
   const showQueued = created => {
     const ids = Array.isArray(created.job_ids) && created.job_ids.length ? created.job_ids : [created.job_id];
     const list = document.querySelector('.import-history .item-list');
@@ -992,14 +1828,22 @@ async function showImport() {
     const valid = [...(files || [])].filter(Boolean);
     if (!valid.length) return;
     try {
-      const body = new FormData();
+      const form = new FormData();
       valid.forEach(file => {
         const hintedName = valid.length === 1 ? transferFilenameHint(dataTransfer, file.name) : (file.name || '');
-        if (hintedName && hintedName !== file.name) body.append('file', file, hintedName);
-        else body.append('file', file);
+        if (hintedName && hintedName !== file.name) form.append('file', file, hintedName);
+        else form.append('file', file);
       });
-      const res = await api('/api/v1/import-resolve-jobs', {method:'POST', body});
-      await awaitImportJobs(res);
+      const shelfId = await resolveImportShelfId();
+      if (shelfId) form.append('shelf_ids', shelfId);
+      const res = await api('/api/v1/import-resolve-jobs', {method:'POST', body: form});
+      const jobs = await awaitImportJobs(res);
+      if (shelfId) {
+        const mediaIds = jobs.map(j => Number(j?.result?.media_item_id || j?.result?.duplicate_of || 0)).filter(id => id > 0);
+        if (mediaIds.length) {
+          await api('/api/v1/shelves/items', {method: 'POST', body: JSON.stringify({media_ids: mediaIds, shelf_ids: [Number(shelfId)], action: 'add'})}).catch(() => {});
+        }
+      }
       refreshCounts();
       if (currentView === 'import') showImport();
     } catch (error) {
@@ -1013,10 +1857,18 @@ async function showImport() {
   const submitUrl = async rawUrl => {
     const urls = String(rawUrl ?? '').split(/[\r\n]+|\s+(?=https?:\/\/)/i).map(u => u.trim()).filter(Boolean);
     if (!urls.length) return;
-    const url = urls.join('\n');
+    const normalized = urls.join('\n');
+    const shelfId = await resolveImportShelfId();
+    const payload = shelfId ? {url: normalized, shelf_ids: [Number(shelfId)]} : {url: normalized};
     try {
-      const res = await api('/api/v1/import-resolve-jobs', {method:'POST', body:JSON.stringify({url})});
-      await awaitImportJobs(res);
+      const res = await api('/api/v1/import-resolve-jobs', {method:'POST', body:JSON.stringify(payload)});
+      const jobs = await awaitImportJobs(res);
+      if (shelfId) {
+        const mediaIds = jobs.map(j => Number(j?.result?.media_item_id || j?.result?.duplicate_of || 0)).filter(id => id > 0);
+        if (mediaIds.length) {
+          await api('/api/v1/shelves/items', {method: 'POST', body: JSON.stringify({media_ids: mediaIds, shelf_ids: [Number(shelfId)], action: 'add'})}).catch(() => {});
+        }
+      }
       refreshCounts();
       if (currentView === 'import') showImport();
     } catch (error) {
@@ -1027,7 +1879,19 @@ async function showImport() {
   };
   drop.ondragover = event => { event.preventDefault(); drop.classList.add('dragging'); };
   drop.ondragleave = () => drop.classList.remove('dragging');
-  drop.ondrop = async event => { event.preventDefault(); drop.classList.remove('dragging'); const files=[...(event.dataTransfer?.files || [])]; if (files.length) await submitFiles(files, event.dataTransfer); else submitUrl(droppedUrl(event.dataTransfer)); };
+  drop.ondrop = async event => {
+    event.preventDefault();
+    drop.classList.remove('dragging');
+    const dataTransfer = event.dataTransfer;
+    const {files, folderName} = await extractDroppedFilesAndFolder(dataTransfer);
+    if (folderName && useShelfInput?.checked && importShelfCombo && !importShelfCombo.getName()) {
+      const existing = findShelfByName(folderName);
+      importShelfCombo.setName(existing ? existing.name : folderName.trim().slice(0, 80));
+      syncImportShelfUi();
+    }
+    if (files.length) await submitFiles(files, dataTransfer);
+    else submitUrl(droppedUrl(dataTransfer));
+  };
   const handlePaste = event => {
     if (event.defaultPrevented || currentView !== 'import') return;
     const files = [...(event.clipboardData?.files || [])].filter(item => item.type?.startsWith('image/') || item.type?.startsWith('video/'));
@@ -2464,18 +3328,19 @@ async function showSavedCollection(id) {
 async function showCollectionBuilder() {
   const epoch=renderEpoch;
   setHeader('Collection builder','Draft saved in this tab',button('New draft','file-plus'));
-  const presets=await api('/api/v1/collection-presets');
+  const [presets]=await Promise.all([api('/api/v1/collection-presets'), loadShelvesCatalog()]);
   if(epoch!==renderEpoch)return;
   let draft=viewState('collections').draft || {id:`${Date.now()}-${Math.random()}`,name:'',query:'',requested_count:10,preset_id:null,preset_name:'',preview:null,rejectedIds:[]};
   saveViewState('collections',{screen:'builder',draft});
   let preview=draft.preview;
   let rejectedIds=[...(draft.rejectedIds||[])];
   let operation=0;
-  workspace.innerHTML = `<div class="page collection-builder"><section class="panel"><div class="panel-head"><i data-lucide="wand-sparkles"></i>Selection rules</div><div class="panel-body builder-fields"><div class="form-row"><label>Preset</label><select id="builderPreset" class="control"><option value="">No preset</option>${presets.items.map(item => `<option value="${item.id}">${esc(item.name)}</option>`).join('')}</select></div><div class="form-row"><label>Preset name</label><input id="builderPresetName" class="control" maxlength="120" placeholder="Name for a new preset"></div><div class="form-row"><label>Collection name</label><input id="builderName" class="control" maxlength="120"></div><div class="form-row"><label>Count</label><input id="builderCount" class="control" type="number" min="1" max="1000" value="10"></div><div class="form-row builder-search"><label>Search</label><div class="search-wrap"><input id="builderQuery" class="control" placeholder="portrait blue_eyes -comic author:artist" autocomplete="off" spellcheck="false"><div id="builderQuerySuggest" class="tag-suggest" hidden></div></div><div id="builderQueryChips" class="search-chips"></div></div><div class="builder-actions"><button id="savePreset" class="btn"><i data-lucide="bookmark-plus"></i>Save preset</button><button id="deletePreset" class="icon-btn danger" title="Delete selected preset"><i data-lucide="trash-2"></i></button><button id="generateCollection" class="btn primary"><i data-lucide="shuffle"></i>Generate</button></div></div></section><div id="builderSummary" class="builder-summary"></div><div id="builderPreview" class="collection-preview-grid"><div class="empty">Enter tags and generate a selection</div></div><div class="builder-savebar"><button id="cancelBuilder" class="btn"><i data-lucide="chevron-left"></i>Collections</button><span id="builderStatus">No collection generated yet</span><button id="commitCollection" class="btn primary" disabled><i data-lucide="save"></i>Save collection</button></div></div>`;
+  workspace.innerHTML = `<div class="page collection-builder"><section class="panel"><div class="panel-head"><i data-lucide="wand-sparkles"></i>Selection rules</div><div class="panel-body builder-fields"><div class="form-row"><label>Preset</label><select id="builderPreset" class="control"><option value="">No preset</option>${presets.items.map(item => `<option value="${item.id}">${esc(item.name)}</option>`).join('')}</select></div><div class="form-row"><label>Preset name</label><input id="builderPresetName" class="control" maxlength="120" placeholder="Name for a new preset"></div><div class="form-row"><label>Collection name</label><input id="builderName" class="control" maxlength="120"></div><div class="form-row"><label>Count</label><input id="builderCount" class="control" type="number" min="1" max="1000" value="10"></div><div class="form-row builder-search"><label>Search</label><div class="search-wrap"><div id="builderQueryBackdrop" class="search-backdrop" aria-hidden="true"></div><input id="builderQuery" class="control search has-backdrop" placeholder="portrait blue_eyes -comic author:artist shelf:pinup" autocomplete="off" spellcheck="false"><div id="builderQuerySuggest" class="tag-suggest" hidden></div></div><div id="builderShelfPills" class="builder-shelf-pills" title="Click to include shelf in collection query (Shift+click to exclude)" hidden></div></div><div class="builder-actions"><button id="savePreset" class="btn"><i data-lucide="bookmark-plus"></i>Save preset</button><button id="deletePreset" class="icon-btn danger" title="Delete selected preset"><i data-lucide="trash-2"></i></button><button id="generateCollection" class="btn primary"><i data-lucide="shuffle"></i>Generate</button></div></div></section><div id="builderSummary" class="builder-summary"></div><div id="builderPreview" class="collection-preview-grid"><div class="empty">Enter tags and generate a selection</div></div><div class="builder-savebar"><button id="cancelBuilder" class="btn"><i data-lucide="chevron-left"></i>Collections</button><span id="builderStatus">No collection generated yet</span><button id="commitCollection" class="btn primary" disabled><i data-lucide="save"></i>Save collection</button></div></div>`;
   const root=document.querySelector('.collection-builder');
   const input=id=>root.querySelector(`#${id}`);
   input('builderName').value=draft.name||'';
   input('builderQuery').value=draft.query||'';
+  bindSearchBackdrop(input('builderQuery'), input('builderQueryBackdrop'));
   input('builderCount').value=String(draft.requested_count||10);
   input('builderPreset').value=String(draft.preset_id||'');
   input('builderPresetName').value=draft.preset_name||'';
@@ -2500,19 +3365,58 @@ async function showCollectionBuilder() {
     else if(currentView==='collections'&&viewState('collections').screen==='builder')showCollectionBuilder();
     return true;
   };
+  const renderBuilderShelfPills=()=>{
+    const parsed=parseLibrarySearch(input('builderQuery').value);
+    const pillsNode=input('builderShelfPills');
+    if(!pillsNode)return;
+    if(!shelvesCatalog.length){
+      pillsNode.hidden=true;
+      pillsNode.innerHTML='';
+    }else{
+      pillsNode.hidden=false;
+      pillsNode.innerHTML=`<span class="builder-shelf-label" title="Click to include shelf in collection query (Shift+click to exclude)">Shelves:</span>`+shelvesCatalog.map(s=>{
+        const token=shelfToken(s);
+        const tokenLower=token.toLowerCase();
+        const nameLower=String(s.name||'').toLowerCase();
+        const included=parsed.shelves.some(val=>val.toLowerCase()===tokenLower||val.toLowerCase()===nameLower);
+        const excluded=parsed.excludedShelves.some(val=>val.toLowerCase()===tokenLower||val.toLowerCase()===nameLower);
+        const state=included?' included':excluded?' excluded':'';
+        return `<button type="button" class="shelf-pill${state}" data-builder-shelf="${esc(token)}" style="--shelf-color:${esc(s.color)}" title="${esc(`Click to include shelf:${token} in collection query (Shift+click to exclude)`)}"><span class="shelf-dot-inline" style="--shelf-color:${esc(s.color)}"></span><span>${esc(s.name)}</span><small>${Number(s.item_count||0)}</small><span role="button" tabindex="0" class="shelf-pill-delete" data-delete-shelf-id="${s.id}" data-delete-shelf-name="${esc(s.name)}" title="Delete shelf everywhere"><i data-lucide="x"></i></span></button>`;
+      }).join('');
+      pillsNode.querySelectorAll('[data-builder-shelf]').forEach(btn=>{
+        btn.onclick=event=>{
+          if(event.target.closest('.shelf-pill-delete'))return;
+          const token=btn.dataset.builderShelf;
+          const term=event.shiftKey?`-shelf:${token}`:`shelf:${token}`;
+          input('builderQuery').value=toggleSearchTerm(input('builderQuery').value.trim(),term);
+          input('builderQuery').classList.remove('invalid');
+          saveDraft();renderPreview();
+        };
+      });
+      pillsNode.querySelectorAll('.shelf-pill-delete').forEach(delBtn=>{
+        delBtn.onclick=event=>{
+          event.preventDefault();
+          event.stopPropagation();
+          confirmAndDeleteShelf(Number(delBtn.dataset.deleteShelfId), delBtn.dataset.deleteShelfName, ()=>{
+            renderBuilderShelfPills();
+          });
+        };
+        delBtn.onkeydown=event=>{
+          if(event.key==='Enter'||event.key===' '){
+            event.preventDefault();
+            event.stopPropagation();
+            confirmAndDeleteShelf(Number(delBtn.dataset.deleteShelfId), delBtn.dataset.deleteShelfName, ()=>{
+              renderBuilderShelfPills();
+            });
+          }
+        };
+      });
+      icons();
+    }
+  };
   const renderQueryChips=()=>{
-    input('builderQueryChips').innerHTML=parseLibrarySearch(input('builderQuery').value).terms.map(token=>{
-      const excluded=token.startsWith('-')&&token.length>1;
-      const raw=excluded?token.slice(1):token;
-      const opMatch=raw.match(/^(author|source|domain|type|parent|has|is|orientation|ratio|width|height|id|text):(?:"([^"]*)"|(.*))$/i);
-      if(opMatch){
-        const op=opMatch[1].toLowerCase();
-        const val=(opMatch[2]??opMatch[3]??'').replace(/^"+|"+$/g,'').trim();
-        return `<span class="filter-chip operator-chip${excluded?' excluded':''}" data-operator="${esc(op)}">${esc(`${excluded?'-':''}${op}:${val}`)}</span>`;
-      }
-      const clean=raw.replace(/^"+|"+$/g,'').trim();
-      return `<span class="filter-chip${excluded?' excluded':''}">${esc(`${excluded?'-':''}${clean}`)}</span>`;
-    }).join('');
+    renderSearchBackdrop(input('builderQuery'), input('builderQueryBackdrop'));
+    renderBuilderShelfPills();
   };
   const renderBuilderChips=renderQueryChips;
   const canSave=()=>Boolean(!collectionDraftRequests.has(draft.id)&&preview?.can_save&&selectionRulesMatch(draft)&&input('builderName').value.trim());
@@ -2790,6 +3694,11 @@ async function navigate(destination, options={}) {
   if(view==='library'&&route.id){
     selectedMedia=null;librarySearch=`id:${route.id}`;libraryOffset=0;
     saveViewState('library',{search:librarySearch,offset:0,mediaType:'',selectedMediaId:route.id,scrollTop:0,galleryScrollTop:0});
+  } else if(view==='library'&&(route.params.has('q')||route.params.has('shelf'))){
+    const qParam=(route.params.get('q')||'').trim();
+    const shelfParam=(route.params.get('shelf')||'').trim().replace(/\s+/g,'_');
+    selectedMedia=null;librarySearch=qParam||(shelfParam?`shelf:${shelfParam}`:'');libraryOffset=0;
+    saveViewState('library',{search:librarySearch,offset:0,mediaType:'',selectedMediaId:null,scrollTop:0,galleryScrollTop:0});
   }
   if(view==='collections'){
     if(route.id)saveViewState('collections',{screen:'detail',collectionId:route.id,scrollTop:0});

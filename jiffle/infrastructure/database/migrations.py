@@ -914,6 +914,50 @@ def migration_37(connection: sqlite3.Connection) -> None:
     )
 
 
+def migration_38(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS shelves (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            color TEXT NOT NULL DEFAULT '#0ea5e9',
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS media_shelf_items (
+            shelf_id INTEGER NOT NULL REFERENCES shelves(id) ON DELETE CASCADE,
+            media_item_id INTEGER NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,
+            added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (shelf_id, media_item_id)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS media_shelf_items_media_idx "
+        "ON media_shelf_items(media_item_id)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS media_shelf_items_shelf_idx "
+        "ON media_shelf_items(shelf_id)"
+    )
+    if _table_exists(connection, "import_candidates") and not _column_exists(
+        connection, "import_candidates", "shelf_ids_json"
+    ):
+        connection.execute(
+            "ALTER TABLE import_candidates ADD COLUMN shelf_ids_json TEXT NOT NULL DEFAULT '[]'"
+        )
+    if _table_exists(connection, "source_set_imports") and not _column_exists(
+        connection, "source_set_imports", "shelf_ids_json"
+    ):
+        connection.execute(
+            "ALTER TABLE source_set_imports ADD COLUMN shelf_ids_json TEXT NOT NULL DEFAULT '[]'"
+        )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -952,6 +996,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     (35, migration_35),
     (36, migration_36),
     (37, migration_37),
+    (38, migration_38),
 )
 
 
@@ -992,3 +1037,12 @@ def _table_exists(connection: sqlite3.Connection, table_name: str) -> bool:
         (table_name,),
     ).fetchone()
     return row is not None
+
+
+def _column_exists(
+    connection: sqlite3.Connection, table_name: str, column_name: str
+) -> bool:
+    return any(
+        row[1] == column_name
+        for row in connection.execute(f"PRAGMA table_info({table_name})")
+    )

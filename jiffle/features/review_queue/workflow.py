@@ -38,6 +38,7 @@ from jiffle.features.imports.universal_import import (
     filter_source_tags,
     resolve_exact_downloads,
 )
+from jiffle.features.shelves.workflow import assign_shelves_to_media
 from jiffle.infrastructure.database.connection import connect_database
 from jiffle.infrastructure.media_revisions import create_original_revision
 
@@ -266,6 +267,12 @@ def accept_source_candidate(
         "UPDATE import_candidates SET status='accepted', media_item_id=? WHERE id=?",
         (media_item_id, row["import_candidate_id"]),
     )
+    cand_shelf_row = connection.execute(
+        "SELECT shelf_ids_json FROM import_candidates WHERE id=?",
+        (row["import_candidate_id"],),
+    ).fetchone()
+    if cand_shelf_row is not None:
+        assign_shelves_to_media(connection, media_item_id, cand_shelf_row["shelf_ids_json"])
     connection.execute(
         "UPDATE review_items SET status='accepted', resolved_at=CURRENT_TIMESTAMP WHERE id=?",
         (review_id,),
@@ -1249,6 +1256,12 @@ def _complete_review(
         "UPDATE import_candidates SET status='accepted', media_item_id=? WHERE id=?",
         (media_item_id, candidate_id),
     )
+    cand_shelf_row = connection.execute(
+        "SELECT shelf_ids_json FROM import_candidates WHERE id=?",
+        (candidate_id,),
+    ).fetchone()
+    if cand_shelf_row is not None:
+        assign_shelves_to_media(connection, media_item_id, cand_shelf_row["shelf_ids_json"])
     connection.execute(
         "UPDATE review_items SET status='accepted', resolved_at=CURRENT_TIMESTAMP WHERE id=?",
         (review_id,),

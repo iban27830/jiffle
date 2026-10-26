@@ -1,4 +1,5 @@
 import json
+import re
 
 from flask import Blueprint, jsonify, request
 
@@ -30,6 +31,55 @@ def list_tag_suggestions():
     connection = get_database()
 
     lower_raw = raw_prefix.lower()
+    if lower_raw.startswith("shelf:"):
+        sub = raw_prefix.split(":", 1)[1].strip().lower().strip('"').strip("'")
+        sub_under = re.sub(r"\s+", "_", sub)
+        shelf_entries = _load_shelf_entries(connection)
+        flag_items = (
+            _load_shelf_flag_items(connection)
+            if _shelf_sub_matches_flags(sub)
+            else []
+        )
+        if not shelf_entries and not flag_items:
+            return jsonify({"items": [], "query": raw_prefix})
+        if sub == "":
+            matched = shelf_entries[:limit]
+        else:
+            prefix_matches = [
+                entry
+                for entry in shelf_entries
+                if entry[0].lower().startswith(sub)
+                or entry[1].lower().startswith(sub_under)
+            ]
+            substring_matches = [
+                entry
+                for entry in shelf_entries
+                if entry not in prefix_matches
+                and (sub in entry[0].lower() or sub_under in entry[1].lower())
+            ]
+            matched = (prefix_matches + substring_matches)[:limit]
+        shelf_list = [
+            {
+                "tag": f"shelf:{token}",
+                "name": name,
+                "color": color,
+                "count": count,
+                "kind": "shelf",
+            }
+            for name, token, color, _sort_order, count in matched
+        ]
+        return jsonify({
+            "items": (shelf_list + flag_items)[:limit],
+            "query": raw_prefix,
+        })
+
+    if lower_raw.startswith(("has:", "-has:")):
+        sub = raw_prefix.split(":", 1)[1].strip().lower().strip('"').strip("'")
+        if sub == "" or "shelf".startswith(sub) or "shelves".startswith(sub):
+            flag_items = _load_shelf_flag_items(connection)
+            return jsonify({"items": flag_items[:limit], "query": raw_prefix})
+        return jsonify({"items": [], "query": raw_prefix})
+
     if lower_raw.startswith("author:"):
         author_prefix = raw_prefix.split(":", 1)[1].strip().strip('"').lower()
         if len(author_prefix) < 1:
@@ -124,6 +174,40 @@ def list_tag_suggestions():
     prefix = normalize_tag_name(raw_prefix)
     if not prefix:
         return _error("tags.invalid_query", "A search prefix is required.", 400)
+
+    shelf_items: list[dict[str, object]] = []
+    shelf_entries = _load_shelf_entries(connection)
+    if shelf_entries:
+        raw_clean = raw_prefix.strip().lower().strip('"').strip("'")
+        if "shelf".startswith(prefix):
+            matched_shelves = shelf_entries[:limit]
+        else:
+            prefix_shelves = [
+                entry
+                for entry in shelf_entries
+                if entry[0].lower().startswith(raw_clean)
+                or entry[1].lower().startswith(prefix)
+            ]
+            substring_shelves = [
+                entry
+                for entry in shelf_entries
+                if entry not in prefix_shelves
+                and (raw_clean in entry[0].lower() or prefix in entry[1].lower())
+            ]
+            matched_shelves = (prefix_shelves + substring_shelves)[:limit]
+        shelf_items = [
+            {
+                "tag": f"shelf:{token}",
+                "name": name,
+                "color": color,
+                "count": count,
+                "kind": "shelf",
+            }
+            for name, token, color, _sort_order, count in matched_shelves
+        ]
+    if "shelf".startswith(prefix):
+        shelf_items.extend(_load_shelf_flag_items(connection))
+
     glob_pattern = escape_glob_prefix(prefix)
     rows = connection.execute(
         "SELECT LOWER(tag) AS tag, COUNT(*) AS usage FROM media_tags "
@@ -210,6 +294,9 @@ def list_tag_suggestions():
             if len(items) >= limit:
                 break
 
+    if shelf_items:
+        items = (shelf_items + items)[:limit]
+
     return jsonify({
         "items": items[:limit],
         "query": prefix,
@@ -217,6 +304,85 @@ def list_tag_suggestions():
 
 
 list_tags = list_tag_suggestions
+
+
+def _load_shelf_entries(connection) -> list[tuple[str, str, str, int, int]]:
+    has_shelf_tables = (
+        connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('shelves', 'media_shelf_items')"
+        ).fetchone()[0]
+        == 2
+    )
+    if not has_shelf_tables:
+        return []
+    rows = connection.execute(
+        "SELECT s.id, s.name, s.color, s.sort_order, COUNT(item.id) AS item_count "
+        "FROM shelves s "
+        "LEFT JOIN media_shelf_items msi ON msi.shelf_id = s.id "
+        "LEFT JOIN media_items item ON item.id = msi.media_item_id AND item.deleted_at IS NULL "
+        "GROUP BY s.id "
+        "ORDER BY s.sort_order ASC, item_count DESC, LOWER(s.name) ASC, s.id ASC"
+    ).fetchall()
+    shelf_entries: list[tuple[str, str, str, int, int]] = []
+    for row in rows:
+        name = str(row["name"])
+        token = re.sub(r"\s+", "_", name.strip())
+        shelf_entries.append((
+            name,
+            token,
+            str(row["color"]),
+            int(row["sort_order"]),
+            int(row["item_count"]),
+        ))
+    return shelf_entries
+
+
+def _shelf_sub_matches_flags(sub: str) -> bool:
+    if sub == "":
+        return True
+    return any(
+        kw.startswith(sub) or sub in kw
+        for kw in ("has", "any", "no", "none", "empty")
+    )
+
+
+def _load_shelf_flag_items(connection) -> list[dict[str, object]]:
+    has_shelf_tables = (
+        connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('shelves', 'media_shelf_items')"
+        ).fetchone()[0]
+        == 2
+    )
+    if not has_shelf_tables:
+        return []
+    shelved_count = int(
+        connection.execute(
+            "SELECT COUNT(DISTINCT item.id) FROM media_items item "
+            "JOIN media_shelf_items msi ON msi.media_item_id = item.id "
+            "WHERE item.deleted_at IS NULL"
+        ).fetchone()[0]
+    )
+    unshelved_count = int(
+        connection.execute(
+            "SELECT COUNT(*) FROM media_items item "
+            "WHERE item.deleted_at IS NULL "
+            "AND NOT EXISTS (SELECT 1 FROM media_shelf_items msi WHERE msi.media_item_id = item.id)"
+        ).fetchone()[0]
+    )
+    return [
+        {
+            "tag": "has:shelf",
+            "name": "Has any shelf",
+            "count": shelved_count,
+            "kind": "shelf_flag",
+        },
+        {
+            "tag": "-has:shelf",
+            "name": "No shelf",
+            "count": unshelved_count,
+            "kind": "shelf_flag",
+        },
+    ]
 
 
 @tag_management_blueprint.post("/api/v1/media/<int:media_id>/tags")

@@ -13,6 +13,11 @@ from PIL import Image
 from jiffle.configuration.settings import Settings
 from jiffle.features.imports.domain import ImportOutcome, LocalImportCommand, LocalImportResult
 from jiffle.features.imports.history import create_import_history, update_import_history
+from jiffle.features.shelves.workflow import (
+    assign_shelves_to_media,
+    parse_shelf_ids,
+    resolve_shelf_summaries,
+)
 from jiffle.infrastructure.database.connection import connect_database
 from jiffle.infrastructure.media_revisions import create_original_revision
 
@@ -43,12 +48,18 @@ def create_local_import_job(
         "INSERT INTO background_jobs (job_type, status) VALUES ('local_import', 'pending')"
     )
     job_id = int(cursor.lastrowid)
+    shelf_ids = parse_shelf_ids(command.shelf_ids)
     connection.execute(
         "INSERT INTO import_candidates "
-        "(job_id, source_path, original_name, status) VALUES (?, ?, ?, 'pending')",
-        (job_id, str(command.source_path), command.source_path.name),
+        "(job_id, source_path, original_name, status, shelf_ids_json) VALUES (?, ?, ?, 'pending', ?)",
+        (job_id, str(command.source_path), command.source_path.name, json.dumps(list(shelf_ids))),
     )
-    create_import_history(connection, job_id, {"name": command.source_path.name})
+    history_details: dict[str, object] = {"name": command.source_path.name}
+    if shelf_ids:
+        shelves = resolve_shelf_summaries(connection, shelf_ids)
+        if shelves:
+            history_details["shelves"] = shelves
+    create_import_history(connection, job_id, history_details)
     connection.commit()
     return job_id
 
@@ -499,7 +510,18 @@ def _mark_running(connection: sqlite3.Connection, job_id: int) -> None:
 def _mark_completed(
     connection: sqlite3.Connection, job_id: int, result: LocalImportResult
 ) -> None:
-    payload = {
+    row = connection.execute(
+        "SELECT shelf_ids_json FROM import_candidates WHERE job_id = ?", (job_id,)
+    ).fetchone()
+    raw_shelf_ids = row["shelf_ids_json"] if row is not None else "[]"
+    applied_shelves = (
+        assign_shelves_to_media(connection, result.media_item_id, raw_shelf_ids)
+        if result.media_item_id
+        else resolve_shelf_summaries(connection, raw_shelf_ids)
+    )
+    if result.review_item_id and not result.media_item_id:
+        _merge_pending_review_shelves(connection, int(result.review_item_id), raw_shelf_ids)
+    payload: dict[str, object] = {
         "outcome": result.outcome.value,
         "candidate_id": result.candidate_id,
         "media_item_id": result.media_item_id,
@@ -507,6 +529,8 @@ def _mark_completed(
     }
     if result.resolution_method:
         payload["resolution_method"] = result.resolution_method
+    if applied_shelves:
+        payload["shelves"] = applied_shelves
     connection.execute(
         "UPDATE background_jobs SET status = 'completed', progress = 100, "
         "result_json = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -514,6 +538,29 @@ def _mark_completed(
     )
     update_import_history(connection, job_id, result.outcome.value, payload)
     connection.commit()
+
+
+def _merge_pending_review_shelves(
+    connection: sqlite3.Connection, review_item_id: int, raw_shelf_ids: object
+) -> None:
+    incoming = parse_shelf_ids(raw_shelf_ids)
+    if not incoming:
+        return
+    row = connection.execute(
+        "SELECT candidate.id, candidate.shelf_ids_json "
+        "FROM review_items review JOIN import_candidates candidate "
+        "ON candidate.id = review.import_candidate_id WHERE review.id = ?",
+        (review_item_id,),
+    ).fetchone()
+    if row is None:
+        return
+    existing = parse_shelf_ids(row["shelf_ids_json"])
+    merged = tuple(dict.fromkeys((*existing, *incoming)))
+    if merged != existing:
+        connection.execute(
+            "UPDATE import_candidates SET shelf_ids_json = ? WHERE id = ?",
+            (json.dumps(list(merged)), int(row["id"])),
+        )
 
 
 def _mark_failed(

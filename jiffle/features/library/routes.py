@@ -208,8 +208,13 @@ _VALID_SORTS = frozenset({
     "random",
     "least_used",
     "most_used",
+    "shelf",
 })
 _VALID_ORIENTATIONS = frozenset({"portrait", "landscape", "square"})
+
+
+def _multi_values(name: str) -> list[str]:
+    return request.args.getlist(name)
 
 
 def _parse_query() -> tuple[LibraryQuery | None, str | None]:
@@ -225,15 +230,18 @@ def _parse_query() -> tuple[LibraryQuery | None, str | None]:
     raw_type = _optional_parameter("type")
     media_type: MediaType | None = None
     is_animated: bool | None = None
+    is_motion: bool | None = None
     if raw_type:
         lowered_type = raw_type.lower()
         if lowered_type in {"animated", "gif"}:
             is_animated = True
+        elif lowered_type in {"motion", "moving"}:
+            is_motion = True
         else:
             try:
                 media_type = MediaType(lowered_type)
             except ValueError:
-                return None, "Type must be image, video, animated, or gif."
+                return None, "Type must be image, video, animated, gif, or motion."
 
     media_ids_list: list[int] = []
     for raw_id_val in request.args.getlist("id"):
@@ -292,6 +300,50 @@ def _parse_query() -> tuple[LibraryQuery | None, str | None]:
         if parent_match:
             parent_or_remote_id, text = parent_match.group(1), None
 
+    shelves = [s.strip().lower() for s in _multi_values("shelf") if s.strip()]
+    exclude_shelves = [
+        s.strip().lower() for s in _multi_values("exclude_shelf") if s.strip()
+    ]
+    has_flags_list = [
+        value.strip().lower() for value in request.args.getlist("has") if value.strip()
+    ]
+    exclude_flags_list = [
+        value.strip().lower()
+        for value in request.args.getlist("exclude_has")
+        if value.strip()
+    ]
+    if text:
+        remaining_tokens: list[str] = []
+        for token in re.findall(r'(?:[^\s"]+|"[^"]*")+', text):
+            lower_tok = token.lower()
+            if lower_tok.startswith(("shelf:", "-shelf:")):
+                neg = lower_tok.startswith("-")
+                raw_val = (
+                    token.split(":", 1)[1]
+                    .strip()
+                    .strip('"')
+                    .strip("'")
+                    .strip()
+                    .lower()
+                )
+                if raw_val:
+                    (exclude_shelves if neg else shelves).append(raw_val)
+            elif lower_tok.startswith(("has:", "-has:")):
+                neg = lower_tok.startswith("-")
+                raw_val = (
+                    token.split(":", 1)[1]
+                    .strip()
+                    .strip('"')
+                    .strip("'")
+                    .strip()
+                    .lower()
+                )
+                if raw_val:
+                    (exclude_flags_list if neg else has_flags_list).append(raw_val)
+            else:
+                remaining_tokens.append(token)
+        text = " ".join(remaining_tokens).strip() or None
+
     authors = tuple(
         value.strip() for value in request.args.getlist("author") if value.strip()
     )
@@ -310,14 +362,8 @@ def _parse_query() -> tuple[LibraryQuery | None, str | None]:
     exclude_sources = tuple(
         value.strip() for value in request.args.getlist("exclude_source") if value.strip()
     )
-    has_flags = tuple(
-        value.strip().lower() for value in request.args.getlist("has") if value.strip()
-    )
-    exclude_flags = tuple(
-        value.strip().lower()
-        for value in request.args.getlist("exclude_has")
-        if value.strip()
-    )
+    has_flags = tuple(dict.fromkeys(has_flags_list))
+    exclude_flags = tuple(dict.fromkeys(exclude_flags_list))
 
     return LibraryQuery(
         limit=limit,
@@ -339,10 +385,13 @@ def _parse_query() -> tuple[LibraryQuery | None, str | None]:
         exclude_domains=exclude_domains,
         sources=sources,
         exclude_sources=exclude_sources,
+        shelves=tuple(dict.fromkeys(shelves)),
+        exclude_shelves=tuple(dict.fromkeys(exclude_shelves)),
         media_ids=tuple(media_ids_list),
         exclude_media_ids=tuple(exclude_media_ids_list),
         parent_or_remote_id=parent_or_remote_id,
         is_animated=is_animated,
+        is_motion=is_motion,
         has_flags=has_flags,
         exclude_flags=exclude_flags,
         orientation=orientation,

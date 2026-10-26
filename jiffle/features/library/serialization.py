@@ -38,6 +38,7 @@ def serialize_media(item: MediaItem) -> dict[str, object]:
         "fragment_count": item.fragment_count,
         "auto_collection_excluded": item.auto_collection_excluded,
         "is_animated": item.is_animated,
+        "shelves": [dict(s) for s in item.shelves],
         "content_url": f"/api/v1/media/{item.id}/content?revision={item.active_revision_id or 0}",
         "thumbnail_url": f"/api/v1/media/{item.id}/thumbnail?revision={item.active_revision_id or 0}",
     }

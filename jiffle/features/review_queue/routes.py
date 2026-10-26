@@ -402,7 +402,8 @@ def _review_rows_by_id(review_ids):
     rows = get_database().execute(
         "SELECT review.id, review.reason, review.status, review.created_at, "
         "candidate.original_name, candidate.stored_path, candidate.media_type, "
-        "candidate.content_hash, candidate.width, candidate.height, candidate.file_size "
+        "candidate.content_hash, candidate.width, candidate.height, candidate.file_size, "
+        "candidate.shelf_ids_json "
         "FROM review_items review JOIN import_candidates candidate "
         f"ON candidate.id=review.import_candidate_id WHERE review.id IN ({placeholders})",
         unique_ids,
@@ -693,13 +694,17 @@ def _review_path(row) -> Path | None:
 
 
 def _serialize(row, search=None, source_candidates=None):
+    from jiffle.features.shelves.workflow import resolve_shelf_summaries
+
     review_id = row["id"]
+    raw_shelf_ids = row["shelf_ids_json"] if "shelf_ids_json" in row.keys() else "[]"
     return {
         "id": review_id, "kind": "candidate",
         "reason": row["reason"], "status": row["status"],
         "original_name": row["original_name"], "type": row["media_type"],
         "width": row["width"], "height": row["height"],
         "file_size": row["file_size"], "created_at": row["created_at"],
+        "shelves": resolve_shelf_summaries(get_database(), raw_shelf_ids),
         "content_url": f"/api/v1/review-items/{review_id}/content",
         "thumbnail_url": f"/api/v1/review-items/{review_id}/thumbnail",
         "source_candidates": (
