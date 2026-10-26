@@ -101,13 +101,13 @@ def bulk_shelf_items_route():
     action = str(payload.get("action") or "add").strip().lower()
     connection = get_database()
     try:
-        updated = bulk_update_media_shelves(connection, media_ids, shelf_ids, action=action)
+        stats = bulk_update_media_shelves(connection, media_ids, shelf_ids, action=action)
     except ShelfFailure as error:
         return _error_response(error)
     media_shelves = get_shelves_for_media_ids(connection, media_ids)
     return jsonify(
         {
-            "updated": updated,
+            **stats,
             "action": action,
             "shelves": list_shelves(connection),
             "media_shelves": {str(mid): list(media_shelves.get(mid, ())) for mid in media_ids},

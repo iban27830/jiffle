@@ -303,7 +303,7 @@ def bulk_update_media_shelves(
     media_ids: Sequence[int],
     shelf_ids: Sequence[int],
     action: str = "add",
-) -> int:
+) -> dict[str, int]:
     clean_media_ids = tuple(
         dict.fromkeys(int(mid) for mid in media_ids if isinstance(mid, int) and not isinstance(mid, bool) and mid > 0)
     )
@@ -335,23 +335,56 @@ def bulk_update_media_shelves(
         ).fetchall()
     ]
     if not live_media:
-        return 0
+        return {"updated": 0, "added": 0, "already_present": 0, "removed": 0, "already_absent": 0}
+
+    valid_shelf_ph = ",".join("?" for _ in valid_shelves)
+    live_media_ph = ",".join("?" for _ in live_media)
+    existing_pairs = {
+        (int(row[0]), int(row[1]))
+        for row in connection.execute(
+            f"SELECT shelf_id, media_item_id FROM media_shelf_items "
+            f"WHERE shelf_id IN ({valid_shelf_ph}) AND media_item_id IN ({live_media_ph})",
+            (*valid_shelves, *live_media),
+        ).fetchall()
+    }
 
     if action == "add":
-        pairs = [(sid, mid) for sid in valid_shelves for mid in live_media]
-        connection.executemany(
-            "INSERT OR IGNORE INTO media_shelf_items (shelf_id, media_item_id) VALUES (?, ?)",
-            pairs,
-        )
-    else:
-        valid_shelf_ph = ",".join("?" for _ in valid_shelves)
-        live_media_ph = ",".join("?" for _ in live_media)
+        added_media_ids = [
+            mid for mid in live_media if any((sid, mid) not in existing_pairs for sid in valid_shelves)
+        ]
+        already_present = len(live_media) - len(added_media_ids)
+        pairs = [(sid, mid) for sid in valid_shelves for mid in live_media if (sid, mid) not in existing_pairs]
+        if pairs:
+            connection.executemany(
+                "INSERT OR IGNORE INTO media_shelf_items (shelf_id, media_item_id) VALUES (?, ?)",
+                pairs,
+            )
+            connection.commit()
+        return {
+            "updated": len(added_media_ids),
+            "added": len(added_media_ids),
+            "already_present": already_present,
+            "removed": 0,
+            "already_absent": 0,
+        }
+
+    removed_media_ids = [
+        mid for mid in live_media if any((sid, mid) in existing_pairs for sid in valid_shelves)
+    ]
+    already_absent = len(live_media) - len(removed_media_ids)
+    if removed_media_ids:
         connection.execute(
             f"DELETE FROM media_shelf_items WHERE shelf_id IN ({valid_shelf_ph}) AND media_item_id IN ({live_media_ph})",
             (*valid_shelves, *live_media),
         )
-    connection.commit()
-    return len(live_media)
+        connection.commit()
+    return {
+        "updated": len(removed_media_ids),
+        "added": 0,
+        "already_present": 0,
+        "removed": len(removed_media_ids),
+        "already_absent": already_absent,
+    }
 
 
 def get_shelves_for_media_ids(

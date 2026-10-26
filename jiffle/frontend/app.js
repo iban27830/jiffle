@@ -921,7 +921,11 @@ function bindShelvesSection(pane, media) {
       }
       updateCardShelfDotsInDom(media.id, updatedShelves);
       syncLibraryShelfSelects?.();
-      toast(`Assigned to shelf: ${resolved.shelf.name}`);
+      if (res.added === 0 && res.already_present > 0) {
+        toast(`Already on shelf: ${resolved.shelf.name}`, 'warn');
+      } else {
+        toast(`Assigned to shelf: ${resolved.shelf.name}`);
+      }
     } catch (error) { toast(error.message, true); }
   };
   const inspectorCombo = attachShelfCombo(pane.querySelector('#inspectorShelfCombo'), {
@@ -1381,7 +1385,27 @@ async function showLibrary() {
         renderShelvesSection(selectedMedia);
       }
       populateLibraryShelves();
-      toast(action === 'add' ? `Added ${res.updated} item(s) to shelf` : `Removed ${res.updated} item(s) from shelf`);
+      if (action === 'add') {
+        const added = Number(res.added ?? res.updated ?? 0);
+        const already = Number(res.already_present ?? 0);
+        if (added > 0 && already > 0) {
+          toast(`Added ${added} to shelf (${already} already on shelf)`);
+        } else if (added > 0) {
+          toast(`Added ${added} item(s) to shelf`);
+        } else {
+          toast(already === 1 ? 'Already on this shelf' : `All ${already} selected items are already on this shelf`, 'warn');
+        }
+      } else {
+        const removed = Number(res.removed ?? res.updated ?? 0);
+        const absent = Number(res.already_absent ?? 0);
+        if (removed > 0 && absent > 0) {
+          toast(`Removed ${removed} from shelf (${absent} not on shelf)`);
+        } else if (removed > 0) {
+          toast(`Removed ${removed} item(s) from shelf`);
+        } else {
+          toast(absent === 1 ? 'Item is not on this shelf' : `None of the ${absent} selected items were on this shelf`, 'warn');
+        }
+      }
     } catch (error) { toast(error.message, true); }
   };
 
