@@ -106,7 +106,8 @@ def create_app(
             connection.execute(
                 "UPDATE operation_history SET event_type='import.failed' "
                 "WHERE entity_type='background_job' AND event_type='import.pending' "
-                "AND entity_id IN (SELECT id FROM background_jobs WHERE status='failed')"
+                "AND (entity_id NOT IN (SELECT id FROM background_jobs) "
+                "OR entity_id IN (SELECT id FROM background_jobs WHERE status NOT IN ('pending', 'running')))"
             )
             connection.execute(
                 "UPDATE export_runs SET status='failed', finished_at=CURRENT_TIMESTAMP "

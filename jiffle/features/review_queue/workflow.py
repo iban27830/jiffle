@@ -27,6 +27,7 @@ from jiffle.features.imports.source_adapters.contracts import SourceMedia, Sourc
 from jiffle.features.imports.source_adapters.danbooru import SourceProviderFailure
 from jiffle.features.imports.source_adapters.platform_tags import add_platform_tags
 from jiffle.features.imports.universal_import import (
+    _download_similar_candidates,
     _extension,
     _match_to_source,
     _record_provider_diagnostic,
@@ -894,54 +895,20 @@ def _stage_reverse_candidates(
             )
         )
 
-    stored: list[tuple[object, str, object]] = []
+    filtered_matches = []
     for match in matches:
         key = (match.provider, str(match.remote_id or match.canonical_url or ""))
         if key in existing:
             continue
-        # Only a real download from the matched post becomes a confirmable
-        # candidate.  A reverse-search result whose post could not be loaded is
-        # reported instead of staging the service's cropped preview as if it
-        # were the source file.
-        media_url = match.direct_media_url
-        if not media_url:
-            unresolved_message = (
-                f"A similar source was found ({match.canonical_url}), "
-                "but its media file could not be loaded automatically."
-                if match.canonical_url
-                else "A similar source was found, but its post could not be loaded, so "
-                "only a search preview is available. It is not offered as a file."
-            )
-            _record_provider_diagnostic(
-                diagnostics, "perceptual_search", match.provider, "unavailable", 0,
-                "import.source_link_unresolved",
-                unresolved_message,
-                remote_id=match.remote_id,
-                source_url=match.canonical_url,
-                author=match.author,
-                confidence=match.confidence,
-            )
-            continue
-        name = f"candidate-{uuid4().hex}{_extension(media_url)}"
-        path = settings.resolved_import_staging_path / name
-        try:
-            local_candidate = _safe_media_path(settings.media_path, str(media_url))
-            if local_candidate is not None and local_candidate.is_file():
-                shutil.copy2(local_candidate, path)
-            else:
-                downloader.download(media_url, path, match.canonical_url)
-            inspection = inspect_media(path)
-        except Exception as error:
-            path.unlink(missing_ok=True)
-            _record_provider_diagnostic(
-                diagnostics, "perceptual_search", match.provider, "unavailable", 0,
-                "import.candidate_unavailable",
-                _safe_error_message(error, "The similar candidate was unavailable."),
-                remote_id=match.remote_id,
-            )
-            continue
-        stored.append((match, name, inspection))
+        filtered_matches.append(match)
         existing.add(key)
+
+    downloaded = _download_similar_candidates(
+        filtered_matches, settings, downloader, diagnostics
+    )
+    stored: list[tuple[object, str, object]] = [
+        (match, path.name, inspection) for match, path, inspection in downloaded
+    ]
     if not stored:
         return 0
     stored.sort(key=lambda item: item[0].confidence, reverse=True)

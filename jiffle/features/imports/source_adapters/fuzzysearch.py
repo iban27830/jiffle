@@ -60,12 +60,18 @@ class FuzzySearchReverseSearchProvider:
         preview = reverse_preview_bytes(image_path)
         if preview is None:
             return []
+        if not _FUZZYSEARCH_LOCK.acquire(timeout=12.0):
+            raise SourceProviderFailure(
+                "import.provider_timeout", "FuzzySearch reverse search timed out."
+            )
         try:
-            with _FUZZYSEARCH_LOCK:
+            try:
                 response = self._request(
                     files={"image": ("jiffle-preview.jpg", preview, "image/jpeg")},
                     timeout=self.timeout,
                 )
+            finally:
+                _FUZZYSEARCH_LOCK.release()
             status = getattr(response, "status_code", None)
             if status == 429:
                 raise SourceProviderFailure(

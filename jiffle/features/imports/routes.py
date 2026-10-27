@@ -1,9 +1,10 @@
 import json
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait
 from hashlib import md5, sha256
 from pathlib import Path
 from threading import Thread
+import time
 
 from flask import Blueprint, current_app, jsonify, request
 
@@ -16,6 +17,7 @@ from jiffle.features.imports.implicit_tags import (
 from jiffle.features.imports.local_import import create_local_import_job, run_local_import_job
 from jiffle.features.imports.url_import import create_url_import_job, run_url_import_job
 from jiffle.features.imports.universal_import import (
+    PROVIDER_SEARCH_TIMEOUT_SECONDS,
     _filename_hash_hints,
     _provider_needs_configuration,
     create_universal_import_job,
@@ -369,12 +371,19 @@ def search_sources():
             return provider, provider.search_by_md5(provider_digest)
 
         pass_matches: list[dict[str, object]] = []
-        with ThreadPoolExecutor(max_workers=max(1, len(searchable))) as executor:
-            futures = {
-                executor.submit(lookup, provider, provider_digest): provider
-                for provider, provider_digest in searchable
-            }
-            for future in as_completed(futures):
+        executor = ThreadPoolExecutor(max_workers=max(1, len(searchable)))
+        futures = {
+            executor.submit(lookup, provider, provider_digest): provider
+            for provider, provider_digest in searchable
+        }
+        pending = set(futures)
+        deadline = time.monotonic() + PROVIDER_SEARCH_TIMEOUT_SECONDS
+        while pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            done, pending = wait(pending, timeout=min(remaining, 0.5))
+            for future in done:
                 provider = futures[future]
                 try:
                     _, provider_matches = future.result()
@@ -391,6 +400,16 @@ def search_sources():
                         "code": "import.source_search_failed",
                         "message": "The source search failed.",
                     })
+        for future in pending:
+            future.cancel()
+            provider = futures[future]
+            name = getattr(provider, "provider_name", "unknown")
+            errors.append({
+                "provider": name,
+                "code": "import.provider_timeout",
+                "message": f"{name} did not answer within {PROVIDER_SEARCH_TIMEOUT_SECONDS:.0f} seconds.",
+            })
+        executor.shutdown(wait=False, cancel_futures=True)
         return pass_matches
 
     matches.extend(_run_lookup_pass(digest, sha256_digest))

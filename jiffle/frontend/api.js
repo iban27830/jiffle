@@ -25,8 +25,16 @@ export async function api(path, options = {}) {
 
 const activeJobWaiters = new Map();
 let batchPollerRunning = false;
+const JOB_INACTIVITY_TIMEOUT_MS = 180000;
+const MAX_CONSECUTIVE_POLL_FAILURES = 5;
 
 function settleJobWaiter(entry, job) {
+  entry.pollFailures = 0;
+  const progressKey = `${job.status}:${job.progress ?? ''}:${job.message ?? ''}:${job.processed ?? ''}`;
+  if (entry.lastProgressKey !== progressKey) {
+    entry.lastProgressKey = progressKey;
+    entry.lastActivityAt = Date.now();
+  }
   for (const waiter of entry.waiters) {
     try { waiter.onProgress?.(job); } catch {}
   }
@@ -47,7 +55,25 @@ function settleJobWaiter(entry, job) {
     for (const waiter of entry.waiters) waiter.reject(err);
     return true;
   }
+  if (
+    job.type !== 'source_set_import'
+    && entry.lastActivityAt
+    && (Date.now() - entry.lastActivityAt) > JOB_INACTIVITY_TIMEOUT_MS
+  ) {
+    activeJobWaiters.delete(entry.jobId);
+    const err = new Error('Background job timed out while resolving providers.');
+    for (const waiter of entry.waiters) waiter.reject(err);
+    return true;
+  }
   return false;
+}
+
+function handlePollError(entry, error) {
+  entry.pollFailures = (entry.pollFailures || 0) + 1;
+  if (entry.pollFailures >= MAX_CONSECUTIVE_POLL_FAILURES) {
+    activeJobWaiters.delete(entry.jobId);
+    for (const waiter of entry.waiters) waiter.reject(error);
+  }
 }
 
 async function runCoalescedJobPoller() {
@@ -62,8 +88,12 @@ async function runCoalescedJobPoller() {
           const job = await api(`/api/v1/jobs/${entry.jobId}`);
           settleJobWaiter(entry, job);
         } catch (error) {
-          activeJobWaiters.delete(entry.jobId);
-          for (const waiter of entry.waiters) waiter.reject(error);
+          if (/404|not found/i.test(String(error?.message || ''))) {
+            activeJobWaiters.delete(entry.jobId);
+            for (const waiter of entry.waiters) waiter.reject(error);
+          } else {
+            handlePollError(entry, error);
+          }
         }
       } else {
         for (let i = 0; i < entries.length; i += 100) {
@@ -88,8 +118,7 @@ async function runCoalescedJobPoller() {
             }
           } catch (error) {
             for (const entry of chunk) {
-              activeJobWaiters.delete(entry.jobId);
-              for (const waiter of entry.waiters) waiter.reject(error);
+              handlePollError(entry, error);
             }
           }
         }
@@ -113,7 +142,7 @@ export async function waitForJob(statusUrl, onProgress) {
     return new Promise((resolve, reject) => {
       let entry = activeJobWaiters.get(jobId);
       if (!entry) {
-        entry = {jobId, waiters: []};
+        entry = {jobId, waiters: [], lastActivityAt: Date.now(), lastProgressKey: '', pollFailures: 0};
         activeJobWaiters.set(jobId, entry);
       }
       entry.waiters.push({onProgress, resolve, reject});

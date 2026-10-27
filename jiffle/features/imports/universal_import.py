@@ -12,7 +12,7 @@ from dataclasses import replace
 from pathlib import Path
 import shutil
 import sqlite3
-from threading import Lock
+from threading import Event, Lock
 import time
 from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
@@ -52,6 +52,9 @@ MIN_SIMILAR_CONFIDENCE = 80.0
 # Perceptual lookups contact remote services that can be slow or unreachable.
 # They run in parallel under one deadline, like the exact-search phase.
 REVERSE_SEARCH_TIMEOUT_SECONDS = 20.0
+REVERSE_RESOLVE_TIMEOUT_SECONDS = 15.0
+EXACT_DOWNLOAD_TIMEOUT_SECONDS = 30.0
+CANDIDATE_DOWNLOAD_TIMEOUT_SECONDS = 35.0
 MAX_REVERSE_CANDIDATES = 5
 
 # A provider that is blocked or black-holed must not park an import: search
@@ -1072,6 +1075,7 @@ def run_universal_import_job(
             # Videos are searched through one representative frame, so a re-encoded
             # or sample-quality copy can still match the post it was taken from even
             # though its bytes differ from the original.
+            _progress(connection, job_id, 75, "Running reverse image search")
             for raw_match in _reverse_similar(
                 original_path, providers, details["provider_diagnostics"], settings=settings
             ):
@@ -1085,42 +1089,13 @@ def run_universal_import_job(
                         similar.append(coerced)
             similar = _unique_similar(similar)
             details["similar_candidates_found"] = len(similar)
-            for match in similar:
-                media_url = match.direct_media_url
-                if not media_url:
-                    unresolved_message = (
-                        f"A similar source was found ({match.canonical_url}), "
-                        "but its media file could not be loaded automatically."
-                        if match.canonical_url
-                        else "A similar source was found, but its post could not be loaded, so "
-                        "only a search preview is available. It is not offered as a file."
-                    )
-                    _record_provider_diagnostic(
-                        details["provider_diagnostics"], "perceptual_search", match.provider,
-                        "unavailable", 0, "import.source_link_unresolved",
-                        unresolved_message,
-                        remote_id=match.remote_id,
-                        source_url=match.canonical_url,
-                        author=match.author,
-                        confidence=match.confidence,
-                    )
-                    continue
-                path = settings.resolved_import_staging_path / f"candidate-{uuid4().hex}{_extension(media_url)}"
-                try:
-                    local_candidate = _safe_media_path(settings.media_path, str(media_url))
-                    if local_candidate is not None and local_candidate.is_file():
-                        shutil.copy2(local_candidate, path)
-                    else:
-                        downloader.download(media_url, path, match.canonical_url)
-                    candidate_inspection = inspect_media(path)
-                    candidate_paths.append((match, path, candidate_inspection))
-                except Exception as error:
-                    path.unlink(missing_ok=True)
-                    _record_provider_diagnostic(
-                        details["provider_diagnostics"], "perceptual_search", match.provider, "unavailable", 0,
-                        "import.candidate_unavailable", _safe_error_message(error, "The similar candidate was unavailable."),
-                        remote_id=match.remote_id,
-                    )
+            if similar:
+                _progress(connection, job_id, 85, "Downloading source candidates")
+            candidate_paths.extend(
+                _download_similar_candidates(
+                    similar, settings, downloader, details["provider_diagnostics"]
+                )
+            )
             if candidate_paths:
                 candidate_paths.sort(key=lambda item: item[0].confidence, reverse=True)
                 connection.execute(
@@ -1211,6 +1186,36 @@ def run_universal_import_job(
     finally:
         for path in temporary:
             path.unlink(missing_ok=True)
+        try:
+            job_row = connection.execute(
+                "SELECT status, result_json FROM background_jobs WHERE id=?",
+                (job_id,),
+            ).fetchone()
+            if job_row is not None and job_row["status"] in {"pending", "running"}:
+                _failed(
+                    connection,
+                    job_id,
+                    "import.resolve_failed",
+                    "The input could not be resolved.",
+                    details,
+                )
+            elif job_row is not None:
+                pending_hist = connection.execute(
+                    "SELECT id FROM operation_history "
+                    "WHERE entity_type='background_job' AND entity_id=? AND event_type='import.pending'",
+                    (job_id,),
+                ).fetchone()
+                if pending_hist is not None:
+                    outcome = "failed"
+                    if job_row["status"] == "completed" and job_row["result_json"]:
+                        try:
+                            outcome = json.loads(job_row["result_json"]).get("outcome") or "accepted"
+                        except Exception:
+                            outcome = "accepted"
+                    update_import_history(connection, job_id, outcome, details)
+                    connection.commit()
+        except Exception:
+            pass
         if input_kind == "file":
             row = connection.execute(
                 "SELECT candidate.status, candidate.stored_path, job.error_code "
@@ -1407,7 +1412,7 @@ def _search_exact(
             ))
         # Abandoned searches keep running in the background; their results are
         # discarded, so the caller must not wait for their threads either.
-        executor.shutdown(wait=False)
+        executor.shutdown(wait=False, cancel_futures=True)
     results.sort(key=lambda item: item[0])
     matches: list[SourceMatch] = []
     errors: list[dict[str, str]] = []
@@ -1459,46 +1464,87 @@ def _search_exact(
 
 def _download_exact_candidates(exact, digest, settings, downloader, diagnostics=None):
     settings.resolved_import_staging_path.mkdir(parents=True, exist_ok=True)
+    abandoned = Event()
 
     def download_one(index, match):
         media_url = match.direct_media_url or match.preview_url
         if not media_url:
             error = {"provider": match.provider, "code": "import.candidate_unavailable", "message": "The exact candidate has no media URL.", "remote_id": match.remote_id}
-            if diagnostics is not None:
-                _record_provider_diagnostic(diagnostics, "exact_download", match.provider, "unavailable", 0, error["code"], error["message"], remote_id=match.remote_id)
-            return index, match, None, error, False
+            return index, match, None, error, False, "unavailable"
         downloaded = settings.resolved_import_staging_path / f"resolve-{uuid4().hex}{_extension(media_url)}"
         try:
             downloader.download(media_url, downloaded, match.canonical_url)
+            if abandoned.is_set():
+                downloaded.unlink(missing_ok=True)
+                return index, match, None, None, False, "abandoned"
             exact_hash_match = _md5(downloaded) == digest
             if not exact_hash_match and not _allows_transcoded_source_media(
                 match.provider, media_url, downloaded
             ):
                 downloaded.unlink(missing_ok=True)
                 error = {"provider": match.provider, "code": "import.candidate_hash_mismatch", "message": "The downloaded candidate did not match the source hash.", "remote_id": match.remote_id}
-                if diagnostics is not None:
-                    _record_provider_diagnostic(diagnostics, "exact_download", match.provider, "unavailable", 0, error["code"], error["message"], remote_id=match.remote_id)
-                return index, match, None, error, False
-            if diagnostics is not None:
-                _record_provider_diagnostic(diagnostics, "exact_download", match.provider, "matched", 1, remote_id=match.remote_id)
-            return index, match, downloaded, None, exact_hash_match
+                return index, match, None, error, False, "unavailable"
+            if abandoned.is_set():
+                downloaded.unlink(missing_ok=True)
+                return index, match, None, None, False, "abandoned"
+            return index, match, downloaded, None, exact_hash_match, "matched"
         except Exception as error:
             downloaded.unlink(missing_ok=True)
             code, message = _download_failure(error, "The exact candidate was unavailable.")
             item = {"provider": match.provider, "code": code, "message": message, "remote_id": match.remote_id}
-            if diagnostics is not None:
-                _record_provider_diagnostic(diagnostics, "exact_download", match.provider, "unavailable", 0, code, message, remote_id=match.remote_id)
-            return index, match, None, item, False
+            return index, match, None, item, False, "unavailable"
 
     valid = []
     errors = []
     candidates = [(index, match) for index, match in enumerate(exact)]
     if not candidates:
         return valid, errors
-    with ThreadPoolExecutor(max_workers=min(4, len(candidates)), thread_name_prefix="jiffle-exact") as executor:
-        futures = [executor.submit(download_one, index, match) for index, match in candidates]
-        results = [future.result() for future in as_completed(futures)]
-    for index, match, downloaded, error, _exact_hash_match in sorted(
+    executor = ThreadPoolExecutor(
+        max_workers=min(4, len(candidates)), thread_name_prefix="jiffle-exact"
+    )
+    futures = {
+        executor.submit(download_one, index, match): (index, match)
+        for index, match in candidates
+    }
+    pending = set(futures)
+    results = []
+    deadline = time.monotonic() + EXACT_DOWNLOAD_TIMEOUT_SECONDS
+    while pending:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        done, pending = wait(pending, timeout=min(remaining, 0.5))
+        for future in done:
+            results.append(future.result())
+        if any(item[2] is not None and item[4] for item in results) and pending:
+            deadline = min(deadline, time.monotonic() + 2.0)
+    abandoned.set()
+    for future in pending:
+        future.cancel()
+        index, match = futures[future]
+        error = {
+            "provider": match.provider,
+            "code": "import.download_timeout",
+            "message": "The exact candidate download timed out.",
+            "remote_id": match.remote_id,
+        }
+        results.append((index, match, None, error, False, "unavailable"))
+    executor.shutdown(wait=False, cancel_futures=True)
+    for index, match, downloaded, error, _exact_hash_match, diag_status in sorted(
+        results, key=lambda item: item[0]
+    ):
+        if diagnostics is not None:
+            if diag_status == "matched":
+                _record_provider_diagnostic(
+                    diagnostics, "exact_download", match.provider, "matched", 1,
+                    remote_id=match.remote_id,
+                )
+            elif error is not None:
+                _record_provider_diagnostic(
+                    diagnostics, "exact_download", match.provider, "unavailable", 0,
+                    error["code"], error["message"], remote_id=match.remote_id,
+                )
+    for index, match, downloaded, error, _exact_hash_match, _diag_status in sorted(
         results, key=lambda item: (0 if item[4] else 1, item[0])
     ):
         if downloaded is not None:
@@ -1506,6 +1552,108 @@ def _download_exact_candidates(exact, digest, settings, downloader, diagnostics=
         elif error:
             errors.append(error)
     return valid, errors
+
+
+def _download_similar_candidates(similar, settings, downloader, diagnostics=None):
+    """Download perceptual source candidates in parallel under a bounded deadline."""
+    settings.resolved_import_staging_path.mkdir(parents=True, exist_ok=True)
+    downloadable = []
+    for index, match in enumerate(similar):
+        media_url = match.direct_media_url
+        if not media_url:
+            unresolved_message = (
+                f"A similar source was found ({match.canonical_url}), "
+                "but its media file could not be loaded automatically."
+                if match.canonical_url
+                else "A similar source was found, but its post could not be loaded, so "
+                "only a search preview is available. It is not offered as a file."
+            )
+            if diagnostics is not None:
+                _record_provider_diagnostic(
+                    diagnostics, "perceptual_search", match.provider,
+                    "unavailable", 0, "import.source_link_unresolved",
+                    unresolved_message,
+                    remote_id=match.remote_id,
+                    source_url=match.canonical_url,
+                    author=match.author,
+                    confidence=match.confidence,
+                )
+            continue
+        downloadable.append((index, match, media_url))
+
+    if not downloadable:
+        return []
+
+    abandoned = Event()
+
+    def download_one(index, match, media_url):
+        path = settings.resolved_import_staging_path / f"candidate-{uuid4().hex}{_extension(media_url)}"
+        try:
+            local_candidate = _safe_media_path(settings.media_path, str(media_url))
+            if local_candidate is not None and local_candidate.is_file():
+                shutil.copy2(local_candidate, path)
+            else:
+                downloader.download(media_url, path, match.canonical_url)
+            if abandoned.is_set():
+                path.unlink(missing_ok=True)
+                return index, match, None, None, None
+            candidate_inspection = inspect_media(path)
+            if abandoned.is_set():
+                path.unlink(missing_ok=True)
+                return index, match, None, None, None
+            return index, match, path, candidate_inspection, None
+        except Exception as error:
+            path.unlink(missing_ok=True)
+            return index, match, None, None, error
+
+    executor = ThreadPoolExecutor(
+        max_workers=min(4, len(downloadable)), thread_name_prefix="jiffle-sim-dl"
+    )
+    futures = {
+        executor.submit(download_one, index, match, media_url): (index, match)
+        for index, match, media_url in downloadable
+    }
+    pending = set(futures)
+    raw_outcomes = []
+    deadline = time.monotonic() + CANDIDATE_DOWNLOAD_TIMEOUT_SECONDS
+    while pending:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        done, pending = wait(pending, timeout=min(remaining, 0.5))
+        for future in done:
+            raw_outcomes.append(future.result())
+    abandoned.set()
+    for future in pending:
+        future.cancel()
+        index, match = futures[future]
+        raw_outcomes.append((
+            index,
+            match,
+            None,
+            None,
+            TimeoutError("The similar candidate download timed out."),
+        ))
+    executor.shutdown(wait=False, cancel_futures=True)
+
+    candidate_paths = []
+    for _index, match, path, candidate_inspection, error in sorted(
+        raw_outcomes, key=lambda item: item[0]
+    ):
+        if path is not None and candidate_inspection is not None:
+            candidate_paths.append((match, path, candidate_inspection))
+        elif error is not None and diagnostics is not None:
+            _record_provider_diagnostic(
+                diagnostics,
+                "perceptual_search",
+                match.provider,
+                "unavailable",
+                0,
+                "import.candidate_unavailable",
+                _safe_error_message(error, "The similar candidate was unavailable."),
+                remote_id=match.remote_id,
+            )
+    return candidate_paths
 
 
 def resolve_exact_downloads(
@@ -1878,10 +2026,14 @@ def _reverse_similar(
         })
     # Abandoned searches keep running in the background; their results are
     # discarded, so the caller must not wait for their threads either.
-    executor.shutdown(wait=False)
+    executor.shutdown(wait=False, cancel_futures=True)
 
-    collected: list[object] = []
-    for result in raw_results:
+    url_cache: dict[str, object] = {}
+    url_cache_lock = Lock()
+    provider_entries: list[tuple[dict[str, object], list[object], list[object], float]] = []
+    resolve_tasks: list[tuple[int, int, object]] = []
+
+    for p_idx, result in enumerate(raw_results):
         provider_name = str(result["provider"])
         error = result.get("error")
         if error:
@@ -1905,8 +2057,61 @@ def _reverse_similar(
             raw for raw in raw_matches
             if (_reverse_confidence(raw) or 0) >= min_confidence
         ]
+        capped_accepted = sorted(
+            accepted,
+            key=lambda item: _reverse_confidence(item) or 0.0,
+            reverse=True,
+        )[:MAX_REVERSE_CANDIDATES]
+        provider_entries.append((result, raw_matches, accepted, min_confidence))
+        for m_idx, raw in enumerate(capped_accepted):
+            resolve_tasks.append((p_idx, m_idx, raw))
+
+    resolved_by_provider: dict[int, list[tuple[int, object]]] = {
+        idx: [] for idx in range(len(provider_entries))
+    }
+    if resolve_tasks:
+        resolve_executor = ThreadPoolExecutor(
+            max_workers=min(6, len(resolve_tasks)),
+            thread_name_prefix="jiffle-rev-resolve",
+        )
+        resolve_futures = {
+            resolve_executor.submit(
+                _resolve_reverse_candidate,
+                raw,
+                providers,
+                url_cache,
+                url_cache_lock,
+            ): (p_idx, m_idx, raw)
+            for p_idx, m_idx, raw in resolve_tasks
+        }
+        resolve_pending = set(resolve_futures)
+        resolve_deadline = time.monotonic() + REVERSE_RESOLVE_TIMEOUT_SECONDS
+        while resolve_pending:
+            remaining = resolve_deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            done, resolve_pending = wait(resolve_pending, timeout=min(remaining, 0.5))
+            for future in done:
+                p_idx, m_idx, raw = resolve_futures[future]
+                try:
+                    resolved_by_provider[p_idx].append((m_idx, future.result()))
+                except Exception:
+                    resolved_by_provider[p_idx].append((m_idx, raw))
+        for future in resolve_pending:
+            future.cancel()
+            p_idx, m_idx, raw = resolve_futures[future]
+            resolved_by_provider[p_idx].append((m_idx, raw))
+        resolve_executor.shutdown(wait=False, cancel_futures=True)
+
+    collected: list[object] = []
+    for p_idx, (result, raw_matches, accepted, min_confidence) in enumerate(provider_entries):
+        provider_name = str(result["provider"])
+        error = result.get("error")
         resolved = [
-            _resolve_reverse_candidate(raw, providers) for raw in accepted
+            item
+            for _m_idx, item in sorted(
+                resolved_by_provider.get(p_idx, ()), key=lambda pair: pair[0]
+            )
         ]
         kept = [
             match
@@ -2146,14 +2351,29 @@ def _reverse_candidate_from_url(url: str, providers):
         if not callable(fetch) and not callable(fetch_metadata):
             continue
         source = None
+        fetch_failed_missing = False
         if callable(fetch):
             try:
                 source = _coerce_source(
                     fetch(url), url, getattr(provider, "provider_name", "unknown")
                 )
+            except SourceProviderFailure as error:
+                if error.code == "import.source_media_missing":
+                    fetch_failed_missing = True
+                elif error.code in {
+                    "import.rate_limited",
+                    "import.e621_rate_limited",
+                    "import.e621_timeout",
+                    "import.provider_timeout",
+                }:
+                    _mark_provider_failure(provider_name)
             except Exception:
                 source = None
-        if source is None and callable(fetch_metadata):
+        if (
+            source is None
+            and callable(fetch_metadata)
+            and (not callable(fetch) or fetch_failed_missing)
+        ):
             try:
                 source = _coerce_source(
                     fetch_metadata(url), url, getattr(provider, "provider_name", "unknown")
@@ -2178,7 +2398,7 @@ def _reverse_candidate_from_url(url: str, providers):
     return None
 
 
-def _resolve_reverse_candidate(raw, providers):
+def _resolve_reverse_candidate(raw, providers, url_cache=None, url_cache_lock=None):
     if isinstance(raw, SourceMatch) and raw.direct_media_url:
         return raw
     confidence = _reverse_confidence(raw)
@@ -2188,7 +2408,18 @@ def _resolve_reverse_candidate(raw, providers):
     raw_direct = raw.get("direct_media_url") if isinstance(raw, dict) else getattr(raw, "direct_media_url", None)
     fallback = None
     for url in _reverse_links(raw):
-        resolved = _reverse_candidate_from_url(url, providers)
+        cached_hit = False
+        resolved = None
+        if url_cache is not None and url_cache_lock is not None:
+            with url_cache_lock:
+                if url in url_cache:
+                    resolved = url_cache[url]
+                    cached_hit = True
+        if not cached_hit:
+            resolved = _reverse_candidate_from_url(url, providers)
+            if url_cache is not None and url_cache_lock is not None:
+                with url_cache_lock:
+                    url_cache[url] = resolved
         if resolved is None:
             continue
         candidate = replace(
@@ -2222,24 +2453,10 @@ def _resolve_reverse_candidate(raw, providers):
 
     digest = _extract_md5_from_reverse_raw(raw, fallback)
     if digest:
-        md5_matches: list[SourceMatch] = []
-        for provider in providers or ():
-            search = getattr(provider, "search_by_md5", None)
-            if not callable(search):
-                continue
-            provider_name = getattr(provider, "provider_name", "unknown")
-            if _provider_on_cooldown(provider_name) or _provider_needs_configuration(provider):
-                continue
-            algorithm = str(getattr(provider, "hash_algorithm", "md5") or "md5").strip().lower()
-            if algorithm != "md5":
-                continue
-            try:
-                for item in search(digest) or []:
-                    match = _coerce_match(item, "perceptual")
-                    if match is not None:
-                        md5_matches.append(match)
-            except Exception:
-                continue
+        exact_matches, _ = _search_exact(providers or (), digest, None)
+        md5_matches = [
+            replace(item, match_method="perceptual") for item in exact_matches
+        ]
         file_match = next((item for item in md5_matches if item.direct_media_url), None)
         if file_match is not None:
             pool = [item for item in ([fallback] if fallback is not None else []) + md5_matches if item is not None]

@@ -34,6 +34,7 @@ class RequestsMediaDownloader:
 
     connect_timeout = 15
     read_timeout = 45
+    max_total_seconds: float | None = 45.0
     max_attempts = 3
     max_redirects = 5
     chunk_size = 64 * 1024
@@ -41,13 +42,25 @@ class RequestsMediaDownloader:
     transient_statuses = {408, 429, 500, 502, 503, 504}
     redirect_statuses = {301, 302, 303, 307, 308}
 
+    def _deadline_exceeded(self, started_at: float) -> bool:
+        return (
+            self.max_total_seconds is not None
+            and self.max_total_seconds > 0
+            and (time.monotonic() - started_at) > self.max_total_seconds
+        )
+
     def download(self, url: str, destination: Path, referer: str | None = None) -> None:
         ensure_public_url(url)
         headers = {"User-Agent": "Jiffle/2.0"}
         if referer:
             headers["Referer"] = referer
+        started_at = time.monotonic()
         for attempt in range(self.max_attempts):
             destination.unlink(missing_ok=True)
+            if attempt > 0 and self._deadline_exceeded(started_at):
+                raise MediaDownloadError(
+                    "import.download_timeout", "Media download timed out."
+                )
             response = None
             try:
                 current_url = url
@@ -96,7 +109,7 @@ class RequestsMediaDownloader:
                     raise ValueError("Source returned HTML instead of media")
                 if status in self.transient_statuses:
                     message = f"Source returned temporary HTTP {status}."
-                    if attempt < self.max_attempts - 1:
+                    if attempt < self.max_attempts - 1 and not self._deadline_exceeded(started_at):
                         _sleep_backoff(response, attempt)
                         continue
                     if status == 408:
@@ -129,6 +142,11 @@ class RequestsMediaDownloader:
                 written = 0
                 with destination.open("wb") as file:
                     for chunk in response.iter_content(self.chunk_size):
+                        if self._deadline_exceeded(started_at):
+                            raise MediaDownloadError(
+                                "import.download_timeout",
+                                "Media download timed out.",
+                            )
                         if chunk:
                             written += len(chunk)
                             if written > self.max_bytes:
@@ -146,7 +164,7 @@ class RequestsMediaDownloader:
                 raise
             except (requests.Timeout, requests.ConnectionError) as error:
                 destination.unlink(missing_ok=True)
-                if attempt < self.max_attempts - 1:
+                if attempt < self.max_attempts - 1 and not self._deadline_exceeded(started_at):
                     _sleep_backoff(None, attempt)
                     continue
                 code = "import.download_timeout" if isinstance(error, requests.Timeout) else "import.download_unavailable"
@@ -156,7 +174,11 @@ class RequestsMediaDownloader:
                 destination.unlink(missing_ok=True)
                 error_response = getattr(error, "response", None)
                 error_status = getattr(error_response, "status_code", None)
-                if error_status in self.transient_statuses and attempt < self.max_attempts - 1:
+                if (
+                    error_status in self.transient_statuses
+                    and attempt < self.max_attempts - 1
+                    and not self._deadline_exceeded(started_at)
+                ):
                     _sleep_backoff(error_response, attempt)
                     continue
                 raise MediaDownloadError("import.download_unavailable", "Media download failed.") from error

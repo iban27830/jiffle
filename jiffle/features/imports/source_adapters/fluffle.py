@@ -83,13 +83,19 @@ class FluffleReverseSearchProvider:
         if png_bytes is None:
             return []
         data = {"includeNsfw": "true", "limit": FLUFFLE_LIMIT}
+        if not _FLUFFLE_LOCK.acquire(timeout=12.0):
+            raise SourceProviderFailure(
+                "import.provider_timeout", "Fluffle reverse search timed out."
+            )
         try:
-            with _FLUFFLE_LOCK:
+            try:
                 response = self._request(
                     files={"file": ("image.png", png_bytes, "image/png")},
                     data=data,
                     timeout=self.timeout,
                 )
+            finally:
+                _FLUFFLE_LOCK.release()
             status = getattr(response, "status_code", None)
             if status == 429:
                 raise SourceProviderFailure(

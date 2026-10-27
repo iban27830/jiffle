@@ -22,7 +22,7 @@ YANDEX_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
-YANDEX_TIMEOUT = 15
+YANDEX_TIMEOUT = 10
 
 _YANDEX_LOCK = threading.Lock()
 
@@ -112,8 +112,12 @@ class YandexReverseSearchProvider:
         preview = reverse_preview_bytes(image_path, max_side=512, quality=90) or reverse_preview_bytes(image_path)
         if preview is None:
             return []
+        if not _YANDEX_LOCK.acquire(timeout=12.0):
+            raise SourceProviderFailure(
+                "import.provider_timeout", "Yandex reverse search timed out."
+            )
         try:
-            with _YANDEX_LOCK:
+            try:
                 upload_resp = self._upload_image(preview, self.timeout)
                 if getattr(upload_resp, "status_code", None) == 429:
                     raise SourceProviderFailure(
@@ -135,6 +139,8 @@ class YandexReverseSearchProvider:
                     )
                 search_resp.raise_for_status()
                 html_text = search_resp.text or ""
+            finally:
+                _YANDEX_LOCK.release()
         except SourceProviderFailure:
             raise
         except requests.HTTPError as error:

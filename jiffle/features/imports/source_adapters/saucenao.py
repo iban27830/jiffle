@@ -102,13 +102,19 @@ class SaucenaoReverseSearch:
         if self.api_key:
             data["output_type"] = "2"
             data["api_key"] = self.api_key
+        if not _SAUCENAO_LOCK.acquire(timeout=12.0):
+            raise SourceProviderFailure(
+                "import.provider_timeout", "SauceNAO reverse search timed out."
+            )
         try:
-            with _SAUCENAO_LOCK:
+            try:
                 response = self._request(
                     files={"file": ("jiffle-preview.jpg", preview, "image/jpeg")},
                     data=data,
                     timeout=self.timeout,
                 )
+            finally:
+                _SAUCENAO_LOCK.release()
             status = getattr(response, "status_code", None)
             if status == 429:
                 raise SourceProviderFailure(

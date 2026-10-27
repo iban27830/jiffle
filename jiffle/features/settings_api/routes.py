@@ -1,4 +1,5 @@
 from dataclasses import replace
+import json
 import os
 from pathlib import Path
 import platform
@@ -257,6 +258,28 @@ def list_history():
             )
     where = "WHERE " + " AND ".join(clauses) if clauses else ""
     connection = get_database()
+    if entity_type in (None, "background_job"):
+        stale_pending = connection.execute(
+            "SELECT h.id, h.entity_id, j.status, j.result_json "
+            "FROM operation_history h LEFT JOIN background_jobs j ON j.id=h.entity_id "
+            "WHERE h.entity_type='background_job' AND h.event_type='import.pending' "
+            "AND (j.id IS NULL OR j.status NOT IN ('pending', 'running'))"
+        ).fetchall()
+        if stale_pending:
+            for stale in stale_pending:
+                outcome_event = "import.failed"
+                if stale["status"] == "completed" and stale["result_json"]:
+                    try:
+                        outcome_val = json.loads(stale["result_json"]).get("outcome")
+                        if outcome_val in {"accepted", "duplicate", "review", "rejected", "failed"}:
+                            outcome_event = f"import.{outcome_val}"
+                    except Exception:
+                        outcome_event = "import.accepted"
+                connection.execute(
+                    "UPDATE operation_history SET event_type=? WHERE id=?",
+                    (outcome_event, stale["id"]),
+                )
+            connection.commit()
     total = connection.execute(
         f"SELECT COUNT(*) FROM operation_history {where}", parameters
     ).fetchone()[0]

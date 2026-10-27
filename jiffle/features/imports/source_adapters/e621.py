@@ -168,6 +168,7 @@ class E621SourceProvider:
         preview = reverse_preview_bytes(image_path)
         if preview is None:
             return []
+        self._wait_for_rate_limit()
         try:
             response = requests.post(
                 "https://e621.net/iqdb_queries.json",

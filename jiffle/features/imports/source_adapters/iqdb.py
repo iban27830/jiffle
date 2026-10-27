@@ -60,12 +60,18 @@ class IqdbReverseSearch:
         preview = reverse_preview_bytes(image_path)
         if preview is None:
             return []
+        if not _IQDB_LOCK.acquire(timeout=12.0):
+            raise SourceProviderFailure(
+                "import.provider_timeout", "IQDB reverse search timed out."
+            )
         try:
-            with _IQDB_LOCK:
+            try:
                 response = self._request(
                     files={"file": ("jiffle-preview.jpg", preview, "image/jpeg")},
                     timeout=self.timeout,
                 )
+            finally:
+                _IQDB_LOCK.release()
             status = getattr(response, "status_code", None)
             if status in {429, 503}:
                 raise SourceProviderFailure(

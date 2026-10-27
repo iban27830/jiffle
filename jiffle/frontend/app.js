@@ -1684,7 +1684,7 @@ function renderHistoryRow(item, historyLabels) {
   const historyShelves = Array.isArray(details.shelves) && details.shelves.length
     ? `<span class="history-shelves">${details.shelves.map(s => `<span class="shelf-badge" style="--shelf-color:${esc(s.color)}" title="${esc('Shelf: ' + s.name)}"><span class="shelf-dot-inline" style="--shelf-color:${esc(s.color)}"></span>${esc(s.name)}</span>`).join('')}</span>`
     : '';
-  return `<article class="history-row"><i data-lucide="${item.event_type === 'import.pending' ? 'loader-circle' : 'activity'}" class="${item.event_type === 'import.pending' ? 'spin' : ''}"></i><div><div class="history-head"><strong>${esc(label)}</strong>${historyShelves}</div><small>${set.name ? `${esc(set.name)} · ` : ''}Import #${item.entity_id}${counters ? ` · ${esc(counters)}` : ''}${duration}${slowestLabel}${duplicateNote}${resolved}</small>${diagnostics}${issues}</div><div class="history-meta"><time>${esc(formatDateTime(item.created_at))}</time>${openAction}</div></article>`;
+  return `<article class="history-row" data-history-job-id="${esc(item.entity_id)}"><i data-lucide="${item.event_type === 'import.pending' ? 'loader-circle' : 'activity'}" class="${item.event_type === 'import.pending' ? 'spin' : ''}"></i><div><div class="history-head"><strong>${esc(label)}</strong>${historyShelves}</div><small>${set.name ? `${esc(set.name)} · ` : ''}Import #${item.entity_id}${counters ? ` · ${esc(counters)}` : ''}${duration}${slowestLabel}${duplicateNote}${resolved}</small>${diagnostics}${issues}</div><div class="history-meta"><time>${esc(formatDateTime(item.created_at))}</time>${openAction}</div></article>`;
 }
 
 async function extractDroppedFilesAndFolder(dataTransfer) {
@@ -1806,6 +1806,35 @@ async function showImport() {
     }
     return null;
   };
+  const updateQueuedHistoryRow = (jobId, job) => {
+    const row = document.querySelector(`.import-history .history-row[data-history-job-id="${jobId}"]`);
+    if (!row || !job) return;
+    if (job.status === 'pending' || job.status === 'running') {
+      const msgNode = row.querySelector('.history-diagnostics p');
+      if (msgNode && job.message) msgNode.textContent = job.message;
+      return;
+    }
+    const outcome = job.status === 'completed' ? (job.result?.outcome || 'accepted') : 'failed';
+    const eventType = outcome.startsWith('set_') ? `import.${outcome}` : `import.${outcome}`;
+    const detailsObj = {
+      ...(job.result?.resolution || {}),
+      ...(job.result || {}),
+      ...(job.error ? {code: job.error.code, message: job.error.message} : {}),
+    };
+    const temp = document.createElement('div');
+    temp.innerHTML = renderHistoryRow({
+      entity_id: jobId,
+      event_type: eventType,
+      details_json: JSON.stringify(detailsObj),
+      created_at: job.finished_at || job.created_at || new Date().toISOString(),
+    }, historyLabels);
+    const replacement = temp.firstElementChild;
+    if (replacement) {
+      row.replaceWith(replacement);
+      replacement.querySelectorAll('.open-import-media').forEach(node => node.onclick = libraryLinkClick);
+      icons();
+    }
+  };
   const showQueued = created => {
     const ids = Array.isArray(created.job_ids) && created.job_ids.length ? created.job_ids : [created.job_id];
     const list = document.querySelector('.import-history .item-list');
@@ -1813,7 +1842,8 @@ async function showImport() {
     if (empty) empty.remove();
     if (list) {
       ids.forEach(jobId => {
-        list.insertAdjacentHTML('afterbegin', `<article class="history-row"><i data-lucide="loader-circle" class="spin"></i><div><strong>Importing</strong><small>Import #${jobId}</small><details class="history-diagnostics"><summary>Provider diagnostics</summary><p>Resolving providers...</p></details></div><time>now</time></article>`);
+        if (list.querySelector(`.history-row[data-history-job-id="${jobId}"]`)) return;
+        list.insertAdjacentHTML('afterbegin', `<article class="history-row" data-history-job-id="${esc(jobId)}"><i data-lucide="loader-circle" class="spin"></i><div><strong>Importing</strong><small>Import #${jobId}</small><details class="history-diagnostics"><summary>Provider diagnostics</summary><p>Resolving providers...</p></details></div><time>now</time></article>`);
       });
     }
     const badge = document.querySelector('.import-history .badge');
@@ -1829,21 +1859,37 @@ async function showImport() {
       let done = 0;
       jobStatus.textContent = `Importing 1/${total}...`;
       const jobs = await Promise.all(res.job_ids.map(id => waitForJob(id, value => {
+        updateQueuedHistoryRow(id, value);
         if (value.type === 'source_set_import') renderSetStatus(value);
         else jobStatus.textContent = `Importing ${Math.min(total, done + 1)}/${total}...`;
-      }).then(job => {
+      }).catch(error => ({
+        id,
+        status: 'failed',
+        error: {message: error?.message || 'Import failed'},
+        result: {outcome: 'failed'},
+      })).then(job => {
         done += 1;
+        updateQueuedHistoryRow(id, job);
         jobStatus.textContent = `Importing ${done}/${total}...`;
         return job;
       })));
       jobStatus.textContent = '';
-      toast(`Imported ${jobs.length} files`);
+      const failedCount = jobs.filter(j => j?.status === 'failed' || j?.result?.outcome === 'failed').length;
+      toast(
+        failedCount > 0
+          ? `Imported ${jobs.length - failedCount}/${jobs.length} files (${failedCount} failed)`
+          : `Imported ${jobs.length} files`,
+        failedCount === jobs.length,
+      );
       return jobs;
     }
+    const singleId = res.job_id;
     const job = await waitForJob(res.status_url || res.job_id, value => {
+      if (singleId) updateQueuedHistoryRow(singleId, value);
       if (value.type === 'source_set_import') renderSetStatus(value);
       else jobStatus.textContent = value.message || `${value.type}: ${value.progress}%`;
     });
+    if (singleId) updateQueuedHistoryRow(singleId, job);
     jobStatus.textContent = '';
     toast(`Import: ${job.result?.outcome || 'failed'}`);
     return [job];
@@ -1955,6 +2001,26 @@ async function showImport() {
   };
   document.querySelector('#submitUrlImport').onclick = () => submitUrl(document.querySelector('#pasteImport').value.trim());
   document.querySelectorAll('.open-import-media').forEach(node => node.onclick = libraryLinkClick);
+  const pendingHistoryIds = (history.items || [])
+    .filter(item => item.event_type === 'import.pending' && Number(item.entity_id) > 0)
+    .map(item => Number(item.entity_id));
+  if (pendingHistoryIds.length) {
+    pendingHistoryIds.forEach(jobId => {
+      waitForJob(jobId, value => updateQueuedHistoryRow(jobId, value))
+        .then(job => {
+          updateQueuedHistoryRow(jobId, job);
+          refreshCounts();
+        })
+        .catch(error => {
+          updateQueuedHistoryRow(jobId, {
+            id: jobId,
+            status: 'failed',
+            error: {message: error?.message || 'Import failed'},
+            result: {outcome: 'failed'},
+          });
+        });
+    });
+  }
   icons(); restoreSetImportMonitor();
 }
 
