@@ -416,6 +416,7 @@ def create_universal_import_job(
     history_payload: dict[str, object] = {
         "submitted_input": submitted_input,
         "input_kind": input_kind,
+        "original_name": display_name,
         "resolution_method": "pending",
         "exact_candidates_checked": 0,
         "similar_candidates_found": 0,
@@ -445,9 +446,23 @@ def run_universal_import_job(
 ) -> None:
     connection = connect_database(database_path)
     temporary: list[Path] = []
+    cand_name_row = connection.execute(
+        "SELECT original_name FROM import_candidates WHERE job_id=?",
+        (job_id,),
+    ).fetchone()
+    original_display_name = (
+        cand_name_row["original_name"]
+        if cand_name_row is not None and cand_name_row["original_name"]
+        else (
+            _clean_original_name(Path(submitted_input).name)
+            if input_kind == "file"
+            else (Path(submitted_input).name or "import")
+        )
+    )
     details: dict[str, object] = {
         "submitted_input": submitted_input,
         "input_kind": input_kind,
+        "original_name": original_display_name,
         "resolution_method": "none",
         "exact_candidates_checked": 0,
         "similar_candidates_found": 0,

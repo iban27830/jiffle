@@ -5,10 +5,11 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
+import struct
 from uuid import uuid4
 
 import imagehash
-from PIL import Image
+from PIL import Image, ImageFile, PngImagePlugin
 
 from jiffle.configuration.settings import Settings
 from jiffle.features.imports.domain import ImportOutcome, LocalImportCommand, LocalImportResult
@@ -23,6 +24,47 @@ from jiffle.infrastructure.media_revisions import create_original_revision
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 VIDEO_EXTENSIONS = {".mp4", ".webm"}
+_APNG_CHUNKS = (b"acTL", b"fcTL", b"fdAT")
+
+
+def _install_png_ancillary_tolerance() -> None:
+    if getattr(PngImagePlugin.ChunkStream, "_jiffle_ancillary_tolerant", False):
+        return
+
+    original_crc = PngImagePlugin.ChunkStream.crc
+    original_call = PngImagePlugin.ChunkStream.call
+
+    def _tolerant_crc(self, cid: bytes, data: bytes) -> None:
+        # PNG spec section 5.4: bit 5 of the first byte is 1 for ancillary
+        # (non-critical) metadata chunks such as eXIf, tEXt, iTXt, zTXt, iCCP,
+        # pHYs, or tIME.  Many boorus and privacy scrubbers edit or zero EXIF
+        # fields in place without recalculating the 4-byte chunk CRC.  Verify
+        # that the 4 checksum bytes exist so truncated files still fail, while
+        # keeping strict CRC checks for critical chunks (IHDR, PLTE, IDAT, IEND)
+        # and APNG frame chunks.
+        if cid and (cid[0] >> 5 & 1) and cid not in _APNG_CHUNKS:
+            assert self.fp is not None
+            if len(self.fp.read(4)) < 4:
+                raise SyntaxError(f"broken PNG file (incomplete checksum in {cid!r})")
+            return
+        return original_crc(self, cid, data)
+
+    def _tolerant_call(self, cid: bytes, pos: int, length: int) -> bytes:
+        if cid and (cid[0] >> 5 & 1) and cid not in _APNG_CHUNKS:
+            try:
+                return original_call(self, cid, pos, length)
+            except (SyntaxError, ValueError, struct.error):
+                assert self.fp is not None
+                self.fp.seek(pos)
+                return ImageFile._safe_read(self.fp, length)
+        return original_call(self, cid, pos, length)
+
+    PngImagePlugin.ChunkStream.crc = _tolerant_crc
+    PngImagePlugin.ChunkStream.call = _tolerant_call
+    PngImagePlugin.ChunkStream._jiffle_ancillary_tolerant = True
+
+
+_install_png_ancillary_tolerance()
 
 
 @dataclass(frozen=True)

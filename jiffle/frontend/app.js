@@ -351,6 +351,7 @@ function historyDiagnosticsHtml(details, item) {
     return '<details class="history-diagnostics"><summary>Provider diagnostics</summary><p>Resolving providers...</p></details>';
   }
   const diagnostics = historyDiagnostics(details);
+  if (item.event_type === 'import.failed' && !diagnostics.length) return '';
   if (!diagnostics.length && !details.search_status && !details.search_state && !details.search_outcome) return '';
   const summary = historyDiagnosticSummary(details, diagnostics);
   return `<details class="history-diagnostics"><summary>${esc(summary)}</summary><ul>${diagnosticRowsHtml(diagnostics)}</ul></details>`;
@@ -1681,10 +1682,12 @@ function renderHistoryRow(item, historyLabels) {
   const duration = details.timing?.duration_ms != null ? ` · ${formatDuration(details.timing.duration_ms)}` : '';
   const slowest = details.timing?.slowest_posts?.[0];
   const slowestLabel = slowest ? ` · slowest #${esc(slowest.post_id)} (${formatDuration(slowest.duration_ms)})` : '';
+  const fileName = !set.name ? (details.original_name || details.name || (details.input_kind === 'file' && details.submitted_input ? String(details.submitted_input).split(/[\\/]/).pop().replace(/^upload-[0-9a-f]{32}-/i, '') : '')) : '';
+  const errorNote = item.event_type === 'import.failed' && details.message ? ` · ${esc(details.message)}` : '';
   const historyShelves = Array.isArray(details.shelves) && details.shelves.length
     ? `<span class="history-shelves">${details.shelves.map(s => `<span class="shelf-badge" style="--shelf-color:${esc(s.color)}" title="${esc('Shelf: ' + s.name)}"><span class="shelf-dot-inline" style="--shelf-color:${esc(s.color)}"></span>${esc(s.name)}</span>`).join('')}</span>`
     : '';
-  return `<article class="history-row" data-history-job-id="${esc(item.entity_id)}"><i data-lucide="${item.event_type === 'import.pending' ? 'loader-circle' : 'activity'}" class="${item.event_type === 'import.pending' ? 'spin' : ''}"></i><div><div class="history-head"><strong>${esc(label)}</strong>${historyShelves}</div><small>${set.name ? `${esc(set.name)} · ` : ''}Import #${item.entity_id}${counters ? ` · ${esc(counters)}` : ''}${duration}${slowestLabel}${duplicateNote}${resolved}</small>${diagnostics}${issues}</div><div class="history-meta"><time>${esc(formatDateTime(item.created_at))}</time>${openAction}</div></article>`;
+  return `<article class="history-row" data-history-job-id="${esc(item.entity_id)}"><i data-lucide="${item.event_type === 'import.pending' ? 'loader-circle' : 'activity'}" class="${item.event_type === 'import.pending' ? 'spin' : ''}"></i><div><div class="history-head"><strong>${esc(label)}</strong>${historyShelves}</div><small>${set.name ? `${esc(set.name)} · ` : (fileName ? `${esc(fileName)} · ` : '')}Import #${item.entity_id}${counters ? ` · ${esc(counters)}` : ''}${duration}${slowestLabel}${duplicateNote}${resolved}${errorNote}</small>${diagnostics}${issues}</div><div class="history-meta"><time>${esc(formatDateTime(item.created_at))}</time>${openAction}</div></article>`;
 }
 
 async function extractDroppedFilesAndFolder(dataTransfer) {
